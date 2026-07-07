@@ -1,0 +1,12 @@
+{
+  "name": "RouteOne Field Sales",
+  "short_name": "RouteOne",
+  "description": "B2B field sales - customers, visits, orders and quotes from the field, online or offline",
+  "start_url": "/mobile",
+  "display": "standalone",
+  "background_color": "#f1f5f9",
+  "theme_color": "#152a44",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

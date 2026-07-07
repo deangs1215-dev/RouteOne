@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output (regenerate with: npm run build)
+dist/
+
+# Runtime data - NOT committed (regenerate with: npm run seed)
+server/data/
+server/uploads/
+
+# Logs & temp
+*.log
+npm-debug.log*
+
+# Secrets / local config
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
