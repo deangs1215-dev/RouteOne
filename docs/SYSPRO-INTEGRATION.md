@@ -151,6 +151,17 @@ WHERE cp.FixedPrice > 0;
   after sync (quotes still allowed).
 - "Demo data" source mode exercises the whole pipeline before SYSPRO is wired up.
 
+## Security
+
+**Passwords are encrypted at rest.** The SYSPRO database password and SMTP password are stored
+encrypted in the app database (never plaintext), using AES-256 encryption.
+
+- On deployment, set environment variable: `export SECRET_KEY='your-long-random-secret-key'`
+  (or add to a .env file if using dotenv)
+- Production deployment must use a strong random SECRET_KEY, not the dev default.
+- Deployment guide will include how to generate and safely manage this key.
+- The read-only SYSPRO login remains least-privilege (SELECT on 4 views only, no write access).
+
 ## Outbound flow (no direct posting)
 
 - **Order submitted in app** → HTML email to the orders department (rep in CC)
