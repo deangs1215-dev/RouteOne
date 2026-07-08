@@ -10,6 +10,7 @@
 //  stock:     { code, qty_available }
 //  prices:    { customer_code, product_code, price }   (contract prices)
 import { getSetting } from '../db.js';
+import { decryptSecret } from '../crypto.js';
 
 export function sysproConfig() {
   return {
@@ -17,7 +18,7 @@ export function sysproConfig() {
     port: parseInt(getSetting('syspro_port', '1433'), 10),
     database: getSetting('syspro_db', ''),
     user: getSetting('syspro_user', ''),
-    password: getSetting('syspro_password', ''),
+    password: decryptSecret(getSetting('syspro_password', '')),
     views: {
       customers: getSetting('syspro_view_customers', 'vw_FS_Customers'),
       products: getSetting('syspro_view_products', 'vw_FS_Products'),

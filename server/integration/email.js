@@ -3,6 +3,7 @@
 // SMTP isn't configured (or fails) it stays 'pending'/'failed' and can be
 // previewed and resent from the Integration page.
 import { db, getSetting, VAT_RATE } from '../db.js';
+import { decryptSecret } from '../crypto.js';
 
 function smtpConfig() {
   const host = getSetting('smtp_host', '');
@@ -12,7 +13,7 @@ function smtpConfig() {
     port: parseInt(getSetting('smtp_port', '587'), 10),
     secure: getSetting('smtp_secure', '0') === '1',
     auth: getSetting('smtp_user', '')
-      ? { user: getSetting('smtp_user'), pass: getSetting('smtp_password', '') }
+      ? { user: getSetting('smtp_user'), pass: decryptSecret(getSetting('smtp_password', '')) }
       : undefined
   };
 }

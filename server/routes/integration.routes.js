@@ -5,6 +5,7 @@ import { requireRole } from '../auth.js';
 import { getProvider } from '../integration/providers.js';
 import { runSync, SYNC_ENTITIES } from '../integration/sync.js';
 import { buildOrderEmail, buildOrderConfirmationEmail, buildQuoteEmail, sendEmail, attemptSend } from '../integration/email.js';
+import { encryptSecret } from '../crypto.js';
 
 const router = Router();
 
@@ -32,7 +33,12 @@ router.get('/integration/settings', requireRole('admin'), (req, res) => {
 router.put('/integration/settings', requireRole('admin'), (req, res) => {
   const b = req.body || {};
   for (const k of SETTING_KEYS) if (k in b) setSetting(k, b[k] ?? '');
-  for (const k of SECRET_KEYS) if (b[k]) setSetting(k, b[k]); // only overwrite when a new value is typed
+  for (const k of SECRET_KEYS) {
+    if (b[k]) {
+      // Encrypt before storing so passwords are never plaintext at rest
+      setSetting(k, encryptSecret(b[k]));
+    }
+  }
   logActivity(req.user.id, 'update', 'integration_settings', null);
   res.json({ ok: true });
 });
