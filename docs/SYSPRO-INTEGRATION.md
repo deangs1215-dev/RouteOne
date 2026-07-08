@@ -2,10 +2,18 @@
 
 The app integrates with SYSPRO in **read-only** mode via SQL views, plus email
 for the outbound flow. Orders are **not** posted into SYSPRO — they are captured
-in the app and emailed to the orders department, who capture them in SYSPRO.
+in the app and emailed to **telesales**, who capture them in SYSPRO.
 (If direct posting is ever wanted later, that's done through SYSPRO e.net
 Solutions business objects — `SORTOI` for sales orders — and needs an e.net
 license; nothing in the current design blocks adding that.)
+
+## Confirmed environment (South Bakels)
+
+- **SYSPRO version:** 8.2 — the view templates below match this; the DBA validates exact columns.
+- **Hosting:** RouteOne runs on its own server on the **same private network** as the SYSPRO SQL Server (no VPN or internet exposure needed). A Linux server is planned.
+- **SQL Server:** managed by internal IT, who create the read-only login and open port 1433 between the two servers.
+- **Pricing:** contract + customer pricing — the exact source table is confirmed with the SYSPRO specialist when building `vw_FS_ContractPrices`.
+- **Automatic sync:** now built into the app (no external Task Scheduler/cron) — an admin sets the cadence on the Integration page (off / hourly / every 4 hours / daily at a chosen time).
 
 ## Checklist — what to request from IT / the SYSPRO consultant
 
@@ -18,8 +26,9 @@ license; nothing in the current design blocks adding that.)
 4. **SMTP mailbox** for outbound mail (e.g. `fieldsales@company.co.za` via
    Office 365 or your mail server) + the **orders department address** that
    should receive order emails.
-5. Agree the **sync schedule** (the Integration page has a "Sync all" button;
-   a scheduled task can call the same endpoint hourly/nightly).
+5. Set the **automatic sync schedule** on the Integration page (built into the
+   app — off / hourly / every 4 hours / daily at a set time). A manual "Sync all"
+   button is always available too.
 
 ## The four views
 

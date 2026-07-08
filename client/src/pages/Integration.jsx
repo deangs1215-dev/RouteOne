@@ -151,6 +151,33 @@ export default function Integration() {
           </button>
         </div>
       }>
+        {isAdmin && settings && (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <Field label="Automatic sync">
+                <select className="input" value={settings.sync_schedule || 'off'} onChange={set('sync_schedule')}>
+                  <option value="off">Off (manual only)</option>
+                  <option value="hourly">Every hour</option>
+                  <option value="4hours">Every 4 hours</option>
+                  <option value="daily">Daily at…</option>
+                </select>
+              </Field>
+              {settings.sync_schedule === 'daily' && (
+                <Field label="Time">
+                  <input className="input" type="time" value={settings.sync_daily_time || '02:00'} onChange={set('sync_daily_time')} />
+                </Field>
+              )}
+              <button className="btn-secondary" onClick={save} disabled={busy === 'save'}>
+                {busy === 'save' ? 'Saving…' : 'Save schedule'}
+              </button>
+              <div className="text-xs text-slate-500">
+                {settings.last_auto_sync_at
+                  ? <>Last auto-sync: {fmtDateTime(settings.last_auto_sync_at)}<br />{settings.last_auto_sync_result}</>
+                  : 'No automatic sync has run yet.'}
+              </div>
+            </div>
+          </div>
+        )}
         <Table headers={['#', 'Source', 'Entity', 'Read', 'Upserted', 'Status', 'Started', 'Errors']}
           empty={runs.length === 0 && 'No syncs yet — hit "Sync all".'}>
           {runs.map((r) => (

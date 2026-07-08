@@ -14,7 +14,8 @@ const SETTING_KEYS = [
   'intg_source', 'syspro_host', 'syspro_port', 'syspro_db', 'syspro_user',
   'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_prices',
   'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_from',
-  'orders_email', 'email_auto_send', 'email_confirm_customer'
+  'orders_email', 'email_auto_send', 'email_confirm_customer',
+  'sync_schedule', 'sync_daily_time'
 ];
 const SECRET_KEYS = ['syspro_password', 'smtp_password'];
 
@@ -22,6 +23,9 @@ router.get('/integration/settings', requireRole('admin'), (req, res) => {
   const out = {};
   for (const k of SETTING_KEYS) out[k] = getSetting(k, '');
   for (const k of SECRET_KEYS) out[`${k}_set`] = getSetting(k, '') ? 1 : 0;
+  // Read-only status of the automatic scheduler.
+  out.last_auto_sync_at = getSetting('last_auto_sync_at', '');
+  out.last_auto_sync_result = getSetting('last_auto_sync_result', '');
   res.json(out);
 });
 
