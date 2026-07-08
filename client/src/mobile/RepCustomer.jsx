@@ -33,6 +33,7 @@ export default function RepCustomer() {
   const [fillingForm, setFillingForm] = useState(null);
   const [formsDone, setFormsDone] = useState([]);
   const [intel, setIntel] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const load = async () => {
     const cust = await api.get(`/customers/${id}`);
@@ -160,6 +161,27 @@ export default function RepCustomer() {
           )}
         </div>
 
+        {/* + Add: order / quote / field forms — the on-site action menu */}
+        <div>
+          <button className="btn-primary flex w-full items-center justify-center gap-1 py-3" onClick={() => setMenuOpen((o) => !o)}>
+            ＋ Add {menuOpen ? '▲' : '▼'}
+          </button>
+          {menuOpen && (
+            <div className="card mt-2 max-h-96 divide-y divide-slate-100 overflow-y-auto p-0">
+              <Link to={`/mobile/customers/${c.id}/order${visitParam}`} className="block px-4 py-3 text-sm hover:bg-slate-50">🧾 New order</Link>
+              <Link to={`/mobile/customers/${c.id}/order${visitParam ? visitParam + '&' : '?'}kind=quote`} className="block px-4 py-3 text-sm hover:bg-slate-50">📄 New quote</Link>
+              {templates.length > 0 && <div className="px-4 pt-2 pb-1 text-[10px] font-semibold uppercase text-slate-400">Forms</div>}
+              {templates.map((t) => (
+                <button key={t.id} className="flex w-full items-center justify-between px-4 py-3 text-left text-sm hover:bg-slate-50"
+                  onClick={() => { setFillingForm(t); setMenuOpen(false); }}>
+                  <span>{t.name}</span>
+                  <span className="text-xs">{formsDone.includes(t.id) ? '✅' : '›'}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Visit flow */}
         {!checkedIn ? (
           <button className="btn-primary w-full py-3" onClick={checkIn} disabled={busy}>
@@ -170,11 +192,6 @@ export default function RepCustomer() {
             <div className="text-sm font-semibold text-emerald-600">
               ✓ Checked in {fmtDateTime(offlineVisit ? offlineVisit.check_in_at : activeVisit.check_in_at)}
               {offlineVisit && <span className="ml-1 text-xs font-normal text-slate-400">(offline)</span>}
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <Link to={`/mobile/customers/${c.id}/order${visitParam}`} className="btn-primary py-3">🧾 New order</Link>
-              <Link to={`/mobile/customers/${c.id}/order${visitParam ? visitParam + '&' : '?'}kind=quote`} className="btn-secondary py-3">📄 New quote</Link>
             </div>
 
             {/* Photos (needs a server-side visit) */}
@@ -190,22 +207,6 @@ export default function RepCustomer() {
                     <input type="file" accept="image/*" capture="environment" className="hidden"
                       onChange={(e) => e.target.files[0] && addPhoto(e.target.files[0])} />
                   </label>
-                </div>
-              </div>
-            )}
-
-            {/* Field forms */}
-            {templates.length > 0 && (
-              <div>
-                <label className="label">Field forms</label>
-                <div className="space-y-1.5">
-                  {templates.map((t) => (
-                    <button key={t.id} className="flex w-full items-center justify-between rounded-lg border border-slate-200 px-3 py-2 text-left text-sm hover:bg-slate-50"
-                      onClick={() => setFillingForm(t)}>
-                      <span>{t.name}</span>
-                      <span className="text-xs">{formsDone.includes(t.id) ? '✅' : '›'}</span>
-                    </button>
-                  ))}
                 </div>
               </div>
             )}
@@ -227,13 +228,6 @@ export default function RepCustomer() {
             <button className="btn-secondary w-full py-3" onClick={checkOut} disabled={busy}>
               {busy ? 'Checking out…' : 'Check out'}
             </button>
-          </div>
-        )}
-
-        {!checkedIn && (
-          <div className="grid grid-cols-2 gap-2">
-            <Link to={`/mobile/customers/${c.id}/order`} className="btn-secondary py-3">🧾 Order</Link>
-            <Link to={`/mobile/customers/${c.id}/order?kind=quote`} className="btn-secondary py-3">📄 Quote</Link>
           </div>
         )}
 

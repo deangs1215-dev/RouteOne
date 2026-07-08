@@ -20,6 +20,7 @@ import intelligenceRoutes from './routes/intelligence.routes.js';
 import portalRoutes from './routes/portal.routes.js';
 import dashboardRoutes from './routes/dashboard.routes.js';
 import { startScheduler } from './integration/scheduler.js';
+import { ensureDefaultForms } from './defaultForms.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -64,6 +65,7 @@ app.use((err, req, res, next) => {
 
 const seeded = db.prepare('SELECT COUNT(*) AS n FROM roles').get().n > 0;
 if (!seeded) console.log('! Database is empty - run "npm run seed" to load demo data.');
+else ensureDefaultForms(); // add the standard customer-visit forms if missing
 
 const PORT = process.env.API_PORT || 4200;
 app.listen(PORT, () => {
