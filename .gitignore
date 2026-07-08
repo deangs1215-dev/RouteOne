@@ -10,6 +10,7 @@ server/uploads/
 
 # Logs & temp
 *.log
+*.err
 npm-debug.log*
 
 # Secrets / local config
