@@ -16,7 +16,10 @@ const SETTING_KEYS = [
   'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_prices',
   'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_from',
   'orders_email', 'email_auto_send', 'email_confirm_customer',
-  'sync_schedule', 'sync_daily_time'
+  'sync_schedule', 'sync_daily_time',
+  // Company letterhead (email header/footer + PDF documents)
+  'company_name', 'company_reg', 'company_vat', 'company_address',
+  'company_phone', 'company_email', 'company_website', 'company_logo'
 ];
 const SECRET_KEYS = ['syspro_password', 'smtp_password'];
 

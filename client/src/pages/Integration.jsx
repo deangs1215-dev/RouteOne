@@ -79,6 +79,39 @@ export default function Integration() {
       {notice && <div className="rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm px-3 py-2">{notice}</div>}
 
       {isAdmin && (!settings ? <Spinner /> : (
+        <>
+        <Card title="Company details (letterhead on emails + PDF documents)">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Company name" span>
+              <input className="input" value={settings.company_name || ''} onChange={set('company_name')} placeholder="South Bakels (Pty) Ltd" />
+            </Field>
+            <Field label="Registration no"><input className="input" value={settings.company_reg || ''} onChange={set('company_reg')} placeholder="1970/012345/07" /></Field>
+            <Field label="VAT no"><input className="input" value={settings.company_vat || ''} onChange={set('company_vat')} placeholder="4000000000" /></Field>
+            <Field label="Address" span><input className="input" value={settings.company_address || ''} onChange={set('company_address')} placeholder="123 Bakery Road, Cape Town, 7405" /></Field>
+            <Field label="Phone"><input className="input" value={settings.company_phone || ''} onChange={set('company_phone')} placeholder="+27 21 000 0000" /></Field>
+            <Field label="Email"><input className="input" value={settings.company_email || ''} onChange={set('company_email')} placeholder="info@sbakels.co.za" /></Field>
+            <Field label="Website"><input className="input" value={settings.company_website || ''} onChange={set('company_website')} placeholder="www.sbakels.co.za" /></Field>
+            <Field label="Logo (PNG/JPG)">
+              <div className="flex items-center gap-3">
+                {settings.company_logo && <img src={settings.company_logo} alt="logo" className="h-10 max-w-[120px] object-contain rounded border border-slate-200 bg-white p-1" />}
+                <input type="file" accept="image/png,image/jpeg" className="text-xs" onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  if (file.size > 500000) { setError('Logo too large — please use an image under 500KB.'); return; }
+                  const reader = new FileReader();
+                  reader.onload = () => setSettings({ ...settings, company_logo: reader.result });
+                  reader.readAsDataURL(file);
+                }} />
+                {settings.company_logo && <button className="text-xs text-red-600 hover:underline" onClick={() => setSettings({ ...settings, company_logo: '' })}>remove</button>}
+              </div>
+            </Field>
+          </div>
+          <div className="mt-4">
+            <button className="btn-primary" onClick={save} disabled={busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save company details'}</button>
+          </div>
+          <p className="mt-3 text-xs text-slate-400">These appear as the letterhead on customer emails and on the attached quote/order PDFs. The registration and VAT numbers show in the document footer.</p>
+        </Card>
+
         <div className="grid gap-6 lg:grid-cols-2">
           <Card title="SYSPRO connection (read-only SQL views)">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -137,6 +170,7 @@ export default function Integration() {
             <p className="mt-3 text-xs text-slate-400">Orders are emailed to the orders department for capture into SYSPRO (rep in CC). Quotes are emailed to the customer. If SMTP isn't configured, emails wait in the log below and can be sent later.</p>
           </Card>
         </div>
+        </>
       ))}
 
       <Card title="Data sync" actions={

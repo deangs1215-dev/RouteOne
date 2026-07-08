@@ -43,12 +43,69 @@ function docTable(items, doc) {
     </table>`;
 }
 
+// Company letterhead details, entered once on the Integration page. Used by
+// both the email header/footer and the attached PDF.
+export function companyDetails() {
+  return {
+    name: getSetting('company_name', ''),
+    reg: getSetting('company_reg', ''),
+    vat: getSetting('company_vat', ''),
+    address: getSetting('company_address', ''),
+    phone: getSetting('company_phone', ''),
+    email: getSetting('company_email', ''),
+    website: getSetting('company_website', ''),
+    logo: getSetting('company_logo', '') // data URL
+  };
+}
+
 function wrap(title, inner) {
+  const co = companyDetails();
+  const brand = co.logo
+    ? `<img src="${co.logo}" alt="${co.name || ''}" style="max-height:46px;max-width:190px;vertical-align:middle">`
+    : `<span style="font-weight:bold;font-size:18px;color:#fff">${co.name || 'RouteOne'}</span>`;
+  const footerBits = [
+    co.reg && `Reg: ${co.reg}`,
+    co.vat && `VAT: ${co.vat}`,
+    co.phone,
+    co.email,
+    co.website
+  ].filter(Boolean).join(' &nbsp;·&nbsp; ');
+  // Table layout for the header - flexbox is unreliable in Outlook.
   return `
   <div style="font-family:Segoe UI,Arial,sans-serif;max-width:640px;margin:0 auto;color:#1e293b">
-    <div style="background:#152a44;color:#fff;padding:14px 20px;border-radius:8px 8px 0 0;font-weight:bold;font-size:16px">Route<span style="color:#2b9fca">One</span> — ${title}</div>
-    <div style="border:1px solid #e2e8f0;border-top:0;padding:20px;border-radius:0 0 8px 8px">${inner}</div>
+    <table width="100%" style="border-collapse:collapse;background:#152a44;border-radius:8px 8px 0 0">
+      <tr>
+        <td style="padding:14px 20px">${brand}</td>
+        <td style="padding:14px 20px;text-align:right;color:#cbd5e1;font-size:13px">${title}</td>
+      </tr>
+    </table>
+    <div style="border:1px solid #e2e8f0;border-top:0;padding:20px;border-radius:0 0 8px 8px">${inner}
+      ${footerBits || co.name ? `<div style="margin-top:18px;padding-top:12px;border-top:1px solid #e2e8f0;font-size:11px;color:#94a3b8;text-align:center">${co.name || ''}${footerBits ? '<br>' + footerBits : ''}</div>` : ''}
+    </div>
   </div>`;
+}
+
+// Regenerate the PDF for a customer-facing email (quote / order confirmation)
+// at send time, so attachments never need to live in the email_log table.
+async function pdfForEmail(kind, refId) {
+  const { buildDocumentPdf } = await import('./pdf.js');
+  const company = companyDetails();
+  if (kind === 'quote') {
+    const doc = db.prepare(`
+      SELECT q.*, c.name AS customer_name, c.code AS customer_code, c.contact_name, c.address, c.city
+      FROM quotes q JOIN customers c ON c.id = q.customer_id WHERE q.id = ?
+    `).get(refId);
+    if (!doc) return null;
+    const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ?').all(refId);
+    return { filename: `Quotation-${doc.number}.pdf`, content: await buildDocumentPdf({ type: 'quote', doc, items, company }) };
+  }
+  const doc = db.prepare(`
+    SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.contact_name, c.address, c.city
+    FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = ?
+  `).get(refId);
+  if (!doc) return null;
+  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(refId);
+  return { filename: `Order-${doc.number}.pdf`, content: await buildDocumentPdf({ type: 'order', doc, items, company }) };
 }
 
 export function buildOrderEmail(orderId) {
@@ -168,6 +225,21 @@ export async function attemptSend(emailId) {
     return db.prepare('SELECT * FROM email_log WHERE id = ?').get(emailId);
   }
   try {
+    // Customer-facing documents (quote, and the order confirmation that goes to
+    // the customer rather than telesales) get the PDF attached. The telesales
+    // order email stays HTML-only for capture.
+    let attachments;
+    const ordersEmail = getSetting('orders_email', '');
+    const isCustomerDoc = email.kind === 'quote' || (email.kind === 'order' && email.to_addr !== ordersEmail);
+    if (isCustomerDoc) {
+      try {
+        const pdf = await pdfForEmail(email.kind, email.ref_id);
+        if (pdf) attachments = [pdf];
+      } catch (e) {
+        console.error('PDF attachment failed (sending without it):', e.message);
+      }
+    }
+
     const nodemailer = (await import('nodemailer')).default;
     const transport = nodemailer.createTransport(cfg);
     await transport.sendMail({
@@ -175,7 +247,8 @@ export async function attemptSend(emailId) {
       to: email.to_addr,
       cc: email.cc_addr || undefined,
       subject: email.subject,
-      html: email.body_html
+      html: email.body_html,
+      attachments
     });
     db.prepare("UPDATE email_log SET status = 'sent', error = NULL, sent_at = datetime('now') WHERE id = ?").run(emailId);
   } catch (e) {
