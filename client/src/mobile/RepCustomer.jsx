@@ -34,6 +34,7 @@ export default function RepCustomer() {
   const [formsDone, setFormsDone] = useState([]);
   const [intel, setIntel] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [openVisit, setOpenVisit] = useState(null); // rep's current in-progress visit (any customer)
 
   const load = async () => {
     const cust = await api.get(`/customers/${id}`);
@@ -48,6 +49,7 @@ export default function RepCustomer() {
     load().catch(console.error);
     api.get('/form-templates').then((ts) => setTemplates(ts.filter((t) => t.active))).catch(() => {});
     api.get(`/intel/customer/${id}`).then(setIntel).catch(() => {});
+    api.get('/visits/open').then(setOpenVisit).catch(() => {});
   }, [id]);
 
   if (!c) return <><MobileHeader title="Customer" back="/mobile/customers" /><Spinner /></>;
@@ -55,7 +57,19 @@ export default function RepCustomer() {
   const checkedIn = activeVisit?.status === 'in_progress' || !!offlineVisit;
   const visitParam = activeVisit?.status === 'in_progress' ? `?visit=${activeVisit.id}` : '';
 
+  // An open visit at ANOTHER customer blocks checking in here. Cover both the
+  // online case (server) and an offline visit parked under a different key.
+  const offlineElsewhere = Object.keys(localStorage)
+    .find((k) => k.startsWith('fsp_offline_visit_') && k !== offlineVisitKey(id) && localStorage.getItem(k));
+  const openElsewhere = (openVisit && openVisit.customer_id !== Number(id))
+    ? { id: openVisit.customer_id, name: openVisit.customer_name }
+    : (offlineElsewhere ? { id: offlineElsewhere.replace('fsp_offline_visit_', ''), name: 'another customer' } : null);
+
   const checkIn = async () => {
+    if (openElsewhere) {
+      setError(`You're still checked in at ${openElsewhere.name}. Check out there first.`);
+      return;
+    }
     setBusy(true);
     setError('');
     const pos = await getPosition();
@@ -74,7 +88,11 @@ export default function RepCustomer() {
         const record = { check_in_at: new Date().toISOString().slice(0, 19).replace('T', ' '), ...pos };
         localStorage.setItem(offlineVisitKey(id), JSON.stringify(record));
         setOfflineVisit(record);
-      } else setError(e.message);
+      } else {
+        setError(e.message);
+        // e.g. a 409 "checked in elsewhere" — refresh so the block banner shows.
+        api.get('/visits/open').then(setOpenVisit).catch(() => {});
+      }
     }
     setBusy(false);
   };
@@ -184,9 +202,17 @@ export default function RepCustomer() {
 
         {/* Visit flow */}
         {!checkedIn ? (
-          <button className="btn-primary w-full py-3" onClick={checkIn} disabled={busy}>
-            {busy ? 'Checking in…' : `📍 Check in${activeVisit ? '' : ' (unplanned visit)'}`}
-          </button>
+          openElsewhere ? (
+            <div className="card border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+              <div className="font-semibold">✋ Check out first</div>
+              <div className="mt-1">You're still checked in at <span className="font-semibold">{openElsewhere.name}</span>. Finish and check out there before starting a new visit.</div>
+              <Link to={`/mobile/customers/${openElsewhere.id}`} className="btn-secondary mt-3 block py-2 text-center">Go to {openElsewhere.name}</Link>
+            </div>
+          ) : (
+            <button className="btn-primary w-full py-3" onClick={checkIn} disabled={busy}>
+              {busy ? 'Checking in…' : `📍 Check in${activeVisit ? '' : ' (unplanned visit)'}`}
+            </button>
+          )
         ) : (
           <div className="card space-y-3 p-4">
             <div className="text-sm font-semibold text-emerald-600">

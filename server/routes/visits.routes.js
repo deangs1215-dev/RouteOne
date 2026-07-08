@@ -43,9 +43,33 @@ router.post('/visits', (req, res) => {
   res.json(db.prepare('SELECT * FROM visits WHERE id = ?').get(info.lastInsertRowid));
 });
 
+// The rep's currently open (checked-in) visit, if any - one at a time.
+router.get('/visits/open', (req, res) => {
+  const v = db.prepare(`
+    SELECT v.id, v.customer_id, v.check_in_at, c.name AS customer_name
+    FROM visits v JOIN customers c ON c.id = v.customer_id
+    WHERE v.rep_id = ? AND v.status = 'in_progress'
+    ORDER BY v.check_in_at DESC LIMIT 1
+  `).get(req.user.id);
+  res.json(v || null);
+});
+
 // Check in on site - starts an unplanned visit if no id supplied.
 router.post('/visits/check-in', (req, res) => {
   const b = req.body || {};
+  // One open visit at a time: a rep must check out before checking in elsewhere.
+  const open = db.prepare(`
+    SELECT v.id, c.name AS customer_name FROM visits v
+    JOIN customers c ON c.id = v.customer_id
+    WHERE v.rep_id = ? AND v.status = 'in_progress' LIMIT 1
+  `).get(req.user.id);
+  if (open && open.id !== Number(b.visit_id)) {
+    return res.status(409).json({
+      error: `You're still checked in at ${open.customer_name}. Check out there before starting a new visit.`,
+      open_visit_id: open.id,
+      open_customer_name: open.customer_name
+    });
+  }
   let visitId = b.visit_id;
   if (!visitId) {
     if (!b.customer_id) return res.status(400).json({ error: 'Customer is required' });
