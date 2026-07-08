@@ -19,6 +19,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   const [custId, setCustId] = useState(customerId || '');
   const [products, setProducts] = useState([]);
   const [search, setSearch] = useState('');
+  const [filterMode, setFilterMode] = useState('bought'); // 'bought' | 'all'
   const [lines, setLines] = useState([]); // { product, qty }
   const [notes, setNotes] = useState('');
   const [delivery, setDelivery] = useState('');
@@ -31,14 +32,24 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
 
   useEffect(() => {
     if (!custId) return setProducts([]);
-    api.get(`/products/for-customer/${custId}`).then(setProducts).catch(() => {});
+    api.get(`/products/for-customer/${custId}`).then((ps) => {
+      setProducts(ps);
+      // Default to the customer's usual products; fall back to all if they've
+      // never ordered (a brand-new account).
+      setFilterMode(ps.some((p) => p.times_bought > 0) ? 'bought' : 'all');
+    }).catch(() => {});
     setLines([]);
   }, [custId]);
 
+  const boughtCount = useMemo(() => products.filter((p) => p.times_bought > 0).length, [products]);
+
   const filtered = useMemo(() => {
     const s = search.toLowerCase();
-    return products.filter((p) => !s || p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s)).slice(0, 8);
-  }, [products, search]);
+    return products
+      .filter((p) => filterMode === 'all' || p.times_bought > 0)
+      .filter((p) => !s || p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s))
+      .slice(0, 60);
+  }, [products, search, filterMode]);
 
   const addLine = (product) => {
     setSearch('');
@@ -91,27 +102,38 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
 
       {custId && (
         <>
-          <div className="relative mb-4">
-            <label className="label">Add products</label>
-            <input className="input" placeholder="Search by name or code…" value={search} onChange={(e) => setSearch(e.target.value)} />
-            {search && (
-              <div className="absolute z-10 mt-1 w-full card p-0 max-h-64 overflow-y-auto">
-                {filtered.map((p) => (
-                  <button key={p.id} className="flex w-full items-center justify-between border-b border-slate-100 px-4 py-2.5 text-left text-sm hover:bg-slate-50"
-                    onClick={() => addLine(p)}>
-                    <span>
-                      <span className="font-medium">{p.name}</span>
-                      <span className="ml-2 text-xs text-slate-400">{p.code} · stock {p.stock_qty}</span>
-                    </span>
-                    <span className="font-medium">
-                      {fmtR(p.effective_price)}
-                      {p.has_contract_price === 1 && <span className="ml-1 text-xs text-emerald-600">contract</span>}
-                    </span>
-                  </button>
-                ))}
-                {filtered.length === 0 && <div className="px-4 py-3 text-sm text-slate-400">No products match.</div>}
+          <div className="mb-4">
+            <div className="mb-2 flex items-center justify-between">
+              <label className="label mb-0">Add products</label>
+              <div className="flex rounded-lg border border-slate-200 p-0.5 text-xs font-medium">
+                <button className={`rounded-md px-2.5 py-1 ${filterMode === 'bought' ? 'bg-brand-600 text-white' : 'text-slate-500'}`}
+                  onClick={() => setFilterMode('bought')}>Buys ({boughtCount})</button>
+                <button className={`rounded-md px-2.5 py-1 ${filterMode === 'all' ? 'bg-brand-600 text-white' : 'text-slate-500'}`}
+                  onClick={() => setFilterMode('all')}>All products</button>
               </div>
-            )}
+            </div>
+            <input className="input" placeholder="Search by name or code…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <div className="mt-1 card p-0 max-h-64 overflow-y-auto">
+              {filtered.map((p) => (
+                <button key={p.id} className="flex w-full items-center justify-between border-b border-slate-100 px-4 py-2.5 text-left text-sm hover:bg-slate-50"
+                  onClick={() => addLine(p)}>
+                  <span>
+                    <span className="font-medium">{p.name}</span>
+                    {p.times_bought > 0 && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">bought {p.times_bought}×</span>}
+                    <span className="ml-2 text-xs text-slate-400">{p.code} · stock {p.stock_qty}</span>
+                  </span>
+                  <span className="font-medium">
+                    {fmtR(p.effective_price)}
+                    {p.has_contract_price === 1 && <span className="ml-1 text-xs text-emerald-600">contract</span>}
+                  </span>
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="px-4 py-3 text-sm text-slate-400">
+                  {filterMode === 'bought' ? 'No purchase history — switch to “All products”.' : 'No products match.'}
+                </div>
+              )}
+            </div>
           </div>
 
           {lines.length > 0 && (

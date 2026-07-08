@@ -23,16 +23,23 @@ router.get('/products', (req, res) => {
 // Product list with the effective price for one customer (contract price beats
 // list price) plus price breaks so the client can price qty discounts locally.
 router.get('/products/for-customer/:customerId', (req, res) => {
+  const cid = req.params.customerId;
   const rows = db.prepare(`
     SELECT p.*, c.name AS category_name,
       COALESCE(cp.price, p.list_price) AS effective_price,
-      CASE WHEN cp.price IS NOT NULL THEN 1 ELSE 0 END AS has_contract_price
+      CASE WHEN cp.price IS NOT NULL THEN 1 ELSE 0 END AS has_contract_price,
+      (SELECT COUNT(DISTINCT oi.order_id) FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+         WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled') AS times_bought,
+      (SELECT MAX(o.order_date) FROM order_items oi
+         JOIN orders o ON o.id = oi.order_id
+         WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled') AS last_bought_at
     FROM products p
     LEFT JOIN product_categories c ON c.id = p.category_id
     LEFT JOIN customer_prices cp ON cp.product_id = p.id AND cp.customer_id = ?
     WHERE p.active = 1
     ORDER BY p.name
-  `).all(req.params.customerId);
+  `).all(cid, cid, cid);
   const rules = activeRules();
   res.json(rows.map((p) => {
     const breaks = p.has_contract_price ? [] : priceBreaks(p, rules);

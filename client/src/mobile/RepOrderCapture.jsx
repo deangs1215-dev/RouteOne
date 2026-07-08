@@ -22,6 +22,7 @@ export default function RepOrderCapture() {
   const [products, setProducts] = useState(null);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('');
+  const [onlyBought, setOnlyBought] = useState(false); // show only what this customer buys
   const [cart, setCart] = useState({}); // productId -> qty
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
@@ -30,21 +31,26 @@ export default function RepOrderCapture() {
 
   useEffect(() => {
     api.get(`/customers/${id}`).then(setCustomer).catch(console.error);
-    api.get(`/products/for-customer/${id}`).then(setProducts).catch(console.error);
+    api.get(`/products/for-customer/${id}`).then((ps) => {
+      setProducts(ps);
+      setOnlyBought(ps.some((p) => p.times_bought > 0)); // default to their usual products
+    }).catch(console.error);
   }, [id]);
 
   const categories = useMemo(
     () => [...new Set((products || []).map((p) => p.category_name).filter(Boolean))],
     [products]
   );
+  const boughtCount = useMemo(() => (products || []).filter((p) => p.times_bought > 0).length, [products]);
 
   const filtered = useMemo(() => {
     const s = search.toLowerCase();
     return (products || []).filter((p) =>
       (!s || p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s)) &&
-      (!category || p.category_name === category)
+      (!category || p.category_name === category) &&
+      (!onlyBought || p.times_bought > 0)
     );
-  }, [products, search, category]);
+  }, [products, search, category, onlyBought]);
 
   const setQty = (pid, qty) => setCart((c) => {
     const next = { ...c };
@@ -111,6 +117,10 @@ export default function RepOrderCapture() {
         <ErrorNote error={error} />
         <input className="input" placeholder="Search products…" value={search} onChange={(e) => setSearch(e.target.value)} />
         <div className="flex gap-2 overflow-x-auto pb-1">
+          {boughtCount > 0 && (
+            <button className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${onlyBought ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}
+              onClick={() => setOnlyBought((v) => !v)}>★ Buys ({boughtCount})</button>
+          )}
           <button className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${!category ? 'bg-brand-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}
             onClick={() => setCategory('')}>All</button>
           {categories.map((cat) => (
@@ -128,7 +138,10 @@ export default function RepOrderCapture() {
             return (
               <div key={p.id} className="card flex items-center gap-3 p-3">
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">{p.name}</div>
+                  <div className="truncate text-sm font-medium">
+                    {p.name}
+                    {p.times_bought > 0 && <span className="ml-1.5 rounded bg-emerald-50 px-1 py-0.5 text-[10px] text-emerald-600">buys {p.times_bought}×</span>}
+                  </div>
                   <div className="text-xs text-slate-400">
                     {p.code} · {fmtR(price)}
                     {p.has_contract_price === 1 && <span className="ml-1 text-emerald-600">contract</span>}
