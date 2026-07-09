@@ -9,6 +9,7 @@ import VisitSummary from '../components/VisitSummary';
 import VisitTimer, { visitDuration } from '../components/VisitTimer';
 import DatePicker from '../components/DatePicker';
 import TaskCreateModal from '../components/TaskCreateModal';
+import TaskRescheduleModal from '../components/TaskRescheduleModal';
 import { queueWrite } from '../offline';
 import { MobileHeader } from './MobileApp';
 
@@ -75,6 +76,22 @@ export default function RepCustomer() {
   const [showHistoryDatePicker, setShowHistoryDatePicker] = useState(false);
   const [tasks, setTasks] = useState([]);
   const [showCreateTask, setShowCreateTask] = useState(false);
+  const [reschedulingTask, setReschedulingTask] = useState(null);
+  const [taskBusyId, setTaskBusyId] = useState(null);
+
+  const loadTasks = () => api.get(`/customers/${id}/tasks`).then(setTasks).catch(() => {});
+
+  const markTaskDone = async (taskId) => {
+    setTaskBusyId(taskId);
+    try {
+      await api.put(`/tasks/${taskId}`, { status: 'done' });
+      await loadTasks();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setTaskBusyId(null);
+    }
+  };
 
   const load = async () => {
     const cust = await api.get(`/customers/${id}`);
@@ -90,7 +107,7 @@ export default function RepCustomer() {
     api.get('/form-templates').then((ts) => setTemplates(ts.filter((t) => t.active))).catch(() => {});
     api.get(`/intel/customer/${id}`).then(setIntel).catch(() => {});
     api.get('/visits/open').then(setOpenVisit).catch(() => {});
-    api.get(`/customers/${id}/tasks`).then(setTasks).catch(() => {});
+    loadTasks();
   }, [id]);
 
   if (!c) return <><MobileHeader title="Customer" back="/mobile/customers" /><Spinner /></>;
@@ -337,44 +354,62 @@ export default function RepCustomer() {
         )}
 
         {/* Outstanding tasks */}
-        {tasks.length > 0 && (
-          <div className="card border border-amber-200 bg-amber-50 p-4">
-            <h2 className="mb-2 flex items-center justify-between text-sm font-semibold text-amber-900">
-              <span>⚠️ Outstanding tasks ({tasks.length})</span>
-            </h2>
-            <div className="space-y-2 mb-3">
-              {tasks.map((t) => {
-                const today = new Date().toISOString().slice(0, 10);
-                const isOverdue = t.follow_up_date < today && t.status === 'open';
-                return (
-                  <div key={t.id} className={`rounded-lg px-3 py-2 text-xs ${isOverdue ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-white text-slate-700 border border-amber-100'}`}>
-                    <div className="font-medium">{t.task_type}</div>
-                    {t.notes && <div className="mt-0.5 text-[11px] opacity-75">{t.notes}</div>}
-                    <div className="mt-1 text-[10px] opacity-60">
-                      {isOverdue ? `⚠ Overdue · ${fmtDate(t.follow_up_date)}` : `Due ${fmtDate(t.follow_up_date)}`}
+        {(() => {
+          const openTasks = tasks.filter((t) => t.status === 'open');
+          if (openTasks.length === 0) {
+            return (
+              <button
+                onClick={() => setShowCreateTask(true)}
+                className="btn-primary w-full py-2 text-sm"
+              >
+                ✓ Add follow-up task
+              </button>
+            );
+          }
+          const today = new Date().toISOString().slice(0, 10);
+          return (
+            <div className="card border border-amber-200 bg-amber-50 p-4">
+              <h2 className="mb-2 text-sm font-semibold text-amber-900">
+                ⚠️ Outstanding tasks ({openTasks.length})
+              </h2>
+              <div className="space-y-2 mb-3">
+                {openTasks.map((t) => {
+                  const isOverdue = t.follow_up_date < today;
+                  return (
+                    <div key={t.id} className={`rounded-lg px-3 py-2 ${isOverdue ? 'bg-red-100 border border-red-200' : 'bg-white border border-amber-100'}`}>
+                      <div className={`text-xs font-medium ${isOverdue ? 'text-red-700' : 'text-slate-700'}`}>{t.task_type}</div>
+                      {t.notes && <div className="mt-0.5 text-[11px] text-slate-500">{t.notes}</div>}
+                      <div className={`mt-1 text-[10px] ${isOverdue ? 'text-red-600' : 'text-slate-400'}`}>
+                        {isOverdue ? `⚠ Overdue · ${fmtDate(t.follow_up_date)}` : `Due ${fmtDate(t.follow_up_date)}`}
+                      </div>
+                      <div className="mt-2 flex gap-2">
+                        <button
+                          onClick={() => markTaskDone(t.id)}
+                          disabled={taskBusyId === t.id}
+                          className="flex-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                          ✓ Done
+                        </button>
+                        <button
+                          onClick={() => setReschedulingTask(t)}
+                          className="flex-1 rounded-lg bg-white border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          📅 Reschedule
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
+              <button
+                onClick={() => setShowCreateTask(true)}
+                className="btn-secondary w-full text-sm py-2"
+              >
+                + Create new task
+              </button>
             </div>
-            <button
-              onClick={() => setShowCreateTask(true)}
-              className="btn-secondary w-full text-sm py-2"
-            >
-              + Create new task
-            </button>
-          </div>
-        )}
-
-        {/* Create new task button (when no outstanding tasks) */}
-        {tasks.length === 0 && (
-          <button
-            onClick={() => setShowCreateTask(true)}
-            className="btn-primary w-full py-2 text-sm"
-          >
-            ✓ Add follow-up task
-          </button>
-        )}
+          );
+        })()}
 
         {/* Activity history: visits, orders, quotes, forms */}
         <div>
@@ -495,11 +530,20 @@ export default function RepCustomer() {
       {showCreateTask && (
         <TaskCreateModal
           customerId={parseInt(id)}
+          customerName={c.name}
           onClose={() => setShowCreateTask(false)}
           onCreated={() => {
             setShowCreateTask(false);
-            api.get(`/customers/${id}/tasks`).then(setTasks).catch(() => {});
+            loadTasks();
           }}
+        />
+      )}
+
+      {reschedulingTask && (
+        <TaskRescheduleModal
+          task={reschedulingTask}
+          onClose={() => setReschedulingTask(null)}
+          onSaved={() => { setReschedulingTask(null); loadTasks(); }}
         />
       )}
     </>

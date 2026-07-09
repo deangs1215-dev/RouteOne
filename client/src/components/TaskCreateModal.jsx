@@ -15,9 +15,10 @@ const quickDates = () => {
   };
 };
 
-export default function TaskCreateModal({ customerId, onClose, onCreated }) {
+export default function TaskCreateModal({ customerId, customerName, onClose, onCreated }) {
   const [customers, setCustomers] = useState([]);
   const [selectedCustId, setSelectedCustId] = useState(customerId || '');
+  const [preName, setPreName] = useState(customerName || '');
   const [taskType, setTaskType] = useState('');
   const [followUpDate, setFollowUpDate] = useState('');
   const [note, setNote] = useState('');
@@ -25,12 +26,17 @@ export default function TaskCreateModal({ customerId, onClose, onCreated }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  // Load customer list if not pre-selected
+  // Pre-selected from a customer screen: just resolve the name to show it.
+  // Otherwise load the full list so the rep can search and pick a customer.
   useEffect(() => {
-    if (!customerId) {
+    if (customerId) {
+      if (!customerName) {
+        api.get(`/customers/${customerId}`).then((c) => setPreName(c.name)).catch(() => {});
+      }
+    } else {
       api.get('/customers').then(setCustomers).catch(() => {});
     }
-  }, [customerId]);
+  }, [customerId, customerName]);
 
   const [searchCust, setSearchCust] = useState('');
   const filtered = useMemo(() => {
@@ -76,7 +82,7 @@ export default function TaskCreateModal({ customerId, onClose, onCreated }) {
         <Field label="Customer *">
           {customerId ? (
             <div className="px-3 py-2 rounded-lg bg-slate-50 text-sm font-medium text-slate-700">
-              {customers.find((c) => c.id === customerId)?.name || 'Loading...'}
+              {preName || 'Loading...'}
             </div>
           ) : selectedCustId ? (
             <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 text-sm font-medium text-slate-700">

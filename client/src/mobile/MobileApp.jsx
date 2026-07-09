@@ -2,10 +2,11 @@
 // Works offline: data comes from the sync snapshot, writes queue in the outbox.
 import { useEffect, useState } from 'react';
 import { Routes, Route, NavLink, Link, Navigate } from 'react-router-dom';
-import { api, fmtR, fmtDateTime, getPosition } from '../api';
+import { api, fmtR, fmtDate, fmtDateTime, getPosition } from '../api';
 import { useAuth } from '../auth';
 import { Spinner, VisitStatusBadge, OrderStatusBadge } from '../components/ui';
 import DatePicker from '../components/DatePicker';
+import CustomerTasksSheet from '../components/CustomerTasksSheet';
 import AppIcon from '../components/AppIcon';
 import { onOfflineChange, getOutbox, flushOutbox, refreshSnapshot } from '../offline';
 import RepCustomer from './RepCustomer';
@@ -103,11 +104,14 @@ function Today() {
   const [data, setData] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [taskSheet, setTaskSheet] = useState(null); // { customer_id, customer_name }
 
   const displayDate = selectedDate || new Date().toISOString().slice(0, 10);
 
+  const loadDay = () => api.get(`/my-day?date=${displayDate}`).then(setData).catch(console.error);
+
   useEffect(() => {
-    api.get(`/my-day?date=${displayDate}`).then(setData).catch(console.error);
+    loadDay();
     // Best-effort position ping so managers see reps on the live map.
     getPosition().then((pos) => {
       if (pos.lat != null) api.post('/locations', pos).catch(() => {});
@@ -159,22 +163,53 @@ function Today() {
           </div>
           <div className="space-y-2">
             {visits.map((v, i) => (
-              <div key={v.id} className="card flex items-center gap-3 p-3">
-                <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${v.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-brand-600 text-white'}`}>
-                  {v.status === 'completed' ? '✓' : v.route_order || i + 1}
+              <div key={v.id} className="card p-3">
+                <div className="flex items-center gap-3">
+                  <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${v.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-brand-600 text-white'}`}>
+                    {v.status === 'completed' ? '✓' : v.route_order || i + 1}
+                  </div>
+                  <Link to={`/mobile/customers/${v.customer_id}`} className="min-w-0 flex-1">
+                    <div className="truncate font-medium">{v.customer_name}</div>
+                    <div className="text-xs text-slate-400">{v.city} · {v.purpose}</div>
+                  </Link>
+                  <div className="flex items-center gap-2">
+                    {v.order_count > 0 && <span className="text-xs">🧾</span>}
+                    {v.customer_lat != null && v.status !== 'completed' && (
+                      <a className="btn-secondary px-2 py-1 text-xs" target="_blank" rel="noreferrer"
+                        href={`https://www.google.com/maps/dir/?api=1&destination=${v.customer_lat},${v.customer_lng}`}>🧭</a>
+                    )}
+                    <VisitStatusBadge status={v.status} />
+                  </div>
                 </div>
-                <Link to={`/mobile/customers/${v.customer_id}`} className="min-w-0 flex-1">
-                  <div className="truncate font-medium">{v.customer_name}</div>
-                  <div className="text-xs text-slate-400">{v.city} · {v.purpose}</div>
-                </Link>
-                <div className="flex items-center gap-2">
-                  {v.order_count > 0 && <span className="text-xs">🧾</span>}
-                  {v.customer_lat != null && v.status !== 'completed' && (
-                    <a className="btn-secondary px-2 py-1 text-xs" target="_blank" rel="noreferrer"
-                      href={`https://www.google.com/maps/dir/?api=1&destination=${v.customer_lat},${v.customer_lng}`}>🧭</a>
+
+                {/* Task indicator — tap to Done / reschedule / add without leaving Today */}
+                <button
+                  onClick={() => setTaskSheet({ customer_id: v.customer_id, customer_name: v.customer_name })}
+                  className={`mt-2 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs ${
+                    v.overdue_task_count > 0
+                      ? 'bg-red-50 text-red-700'
+                      : v.open_task_count > 0
+                      ? 'bg-amber-50 text-amber-700'
+                      : 'bg-slate-50 text-slate-400'
+                  }`}
+                >
+                  {v.open_task_count > 0 ? (
+                    <>
+                      <span className="min-w-0 flex-1 truncate">
+                        <span className="font-semibold">📋 {v.open_task_count} open{v.overdue_task_count > 0 ? ` · ${v.overdue_task_count} overdue` : ''}</span>
+                        {v.next_task_type && (
+                          <span className="ml-1 opacity-80">— next: {v.next_task_type} ({fmtDate(v.next_task_date)})</span>
+                        )}
+                      </span>
+                      <span className="ml-2 shrink-0 font-semibold">›</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>＋ Add task</span>
+                      <span className="font-semibold">›</span>
+                    </>
                   )}
-                  <VisitStatusBadge status={v.status} />
-                </div>
+                </button>
               </div>
             ))}
             {visits.length === 0 && (
@@ -193,6 +228,15 @@ function Today() {
           onChange={setSelectedDate}
           onClose={() => setShowDatePicker(false)}
           label="Select date"
+        />
+      )}
+
+      {taskSheet && (
+        <CustomerTasksSheet
+          customerId={taskSheet.customer_id}
+          customerName={taskSheet.customer_name}
+          onClose={() => setTaskSheet(null)}
+          onChanged={loadDay}
         />
       )}
     </>
