@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime, getPosition } from '../api';
 import { Spinner, ErrorNote, GradeBadge, OrderStatusBadge, Modal, Field } from '../components/ui';
+import VisitSummary from '../components/VisitSummary';
 import { queueWrite } from '../offline';
 import { MobileHeader } from './MobileApp';
 
@@ -214,13 +215,19 @@ export default function RepCustomer() {
             </button>
           )
         ) : (
-          <div className="card space-y-3 p-4">
-            <div className="text-sm font-semibold text-emerald-600">
-              ✓ Checked in {fmtDateTime(offlineVisit ? offlineVisit.check_in_at : activeVisit.check_in_at)}
-              {offlineVisit && <span className="ml-1 text-xs font-normal text-slate-400">(offline)</span>}
+          <div className="space-y-3">
+            <div className="card p-4">
+              <div className="text-sm font-semibold text-emerald-600">
+                ✓ Checked in {fmtDateTime(offlineVisit ? offlineVisit.check_in_at : activeVisit.check_in_at)}
+                {offlineVisit && <span className="ml-1 text-xs font-normal text-slate-400">(offline)</span>}
+              </div>
             </div>
 
-            {/* Photos (needs a server-side visit) */}
+            {/* Visit activity summary */}
+            {activeVisit?.status === 'in_progress' && <VisitSummary visitId={activeVisit.id} />}
+
+            <div className="card space-y-3 p-4">
+              {/* Photos (needs a server-side visit) */}
             {activeVisit?.status === 'in_progress' && (
               <div>
                 <label className="label">Photos</label>
@@ -254,6 +261,7 @@ export default function RepCustomer() {
             <button className="btn-secondary w-full py-3" onClick={checkOut} disabled={busy}>
               {busy ? 'Checking out…' : 'Check out'}
             </button>
+            </div>
           </div>
         )}
 

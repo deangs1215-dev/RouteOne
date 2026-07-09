@@ -142,6 +142,47 @@ router.get('/visits/:id/photos', (req, res) => {
   res.json(db.prepare('SELECT * FROM visit_photos WHERE visit_id = ? ORDER BY created_at').all(req.params.id));
 });
 
+// Visit summary: orders, quotes, forms, and photos created during this visit
+router.get('/visits/:id/summary', (req, res) => {
+  const visitId = req.params.id;
+  const visit = db.prepare(`
+    SELECT v.*, c.name AS customer_name, u.name AS rep_name
+    FROM visits v
+    JOIN customers c ON c.id = v.customer_id
+    JOIN users u ON u.id = v.rep_id
+    WHERE v.id = ?
+  `).get(visitId);
+  if (!visit) return res.status(404).json({ error: 'Visit not found' });
+
+  const orders = db.prepare(`
+    SELECT id, number, total, status, order_date FROM orders WHERE visit_id = ? ORDER BY order_date DESC
+  `).all(visitId);
+
+  const quotes = db.prepare(`
+    SELECT id, number, total, status, quote_date FROM quotes WHERE visit_id = ? ORDER BY quote_date DESC
+  `).all(visitId);
+
+  const forms = db.prepare(`
+    SELECT t.id, t.name AS template_name, COUNT(s.id) AS count
+    FROM form_templates t
+    LEFT JOIN form_submissions s ON s.template_id = t.id AND s.visit_id = ?
+    WHERE s.id IS NOT NULL
+    GROUP BY t.id, t.name
+  `).all(visitId);
+
+  const photos = db.prepare(`
+    SELECT COUNT(*) AS count FROM visit_photos WHERE visit_id = ?
+  `).get(visitId);
+
+  res.json({
+    visit,
+    orders,
+    quotes,
+    forms,
+    photo_count: photos.count || 0
+  });
+});
+
 // Rep home screen: today's route plus quick stats.
 router.get('/my-day', (req, res) => {
   const repId = req.user.id;

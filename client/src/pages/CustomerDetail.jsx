@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime } from '../api';
 import { Card, Stat, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge, OrderStatusBadge, VisitStatusBadge, QuoteStatusBadge } from '../components/ui';
+import VisitSummary from '../components/VisitSummary';
 import { CustomerModal } from './Customers';
 import { useAuth } from '../auth';
 
@@ -14,6 +15,7 @@ export default function CustomerDetail() {
   const [showEdit, setShowEdit] = useState(false);
   const [showContact, setShowContact] = useState(false);
   const [showPrices, setShowPrices] = useState(false);
+  const [selectedVisitId, setSelectedVisitId] = useState(null);
 
   const load = () => api.get(`/customers/${id}`).then(setC).catch(console.error);
   useEffect(() => {
@@ -99,7 +101,7 @@ export default function CustomerDetail() {
         <Card title="Visit history">
           <Table headers={['Date', 'Rep', 'Status', 'Outcome']} empty={c.recent_visits.length === 0 && 'No visits yet.'}>
             {c.recent_visits.map((v) => (
-              <tr key={v.id}>
+              <tr key={v.id} className="cursor-pointer hover:bg-slate-50" onClick={() => setSelectedVisitId(selectedVisitId === v.id ? null : v.id)}>
                 <td className="td">{fmtDateTime(v.check_in_at || v.planned_date)}</td>
                 <td className="td text-slate-500">{v.rep_name}</td>
                 <td className="td"><VisitStatusBadge status={v.status} /></td>
@@ -107,6 +109,12 @@ export default function CustomerDetail() {
               </tr>
             ))}
           </Table>
+          {selectedVisitId && (
+            <div className="border-t border-slate-100 pt-4 mt-4">
+              <div className="text-xs font-semibold text-slate-500 uppercase mb-3">Visit summary</div>
+              <VisitSummary visitId={selectedVisitId} />
+            </div>
+          )}
         </Card>
       </div>
 
