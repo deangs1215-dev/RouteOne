@@ -52,6 +52,13 @@ router.get('/customers/:id', (req, res) => {
     LEFT JOIN users u ON u.id = q.rep_id
     WHERE q.customer_id = ? ORDER BY q.quote_date DESC LIMIT 10
   `).all(customer.id);
+  customer.recent_forms = db.prepare(`
+    SELECT s.id, s.created_at, t.name AS template_name, u.name AS rep_name
+    FROM form_submissions s
+    JOIN form_templates t ON t.id = s.template_id
+    LEFT JOIN users u ON u.id = s.user_id
+    WHERE s.customer_id = ? ORDER BY s.created_at DESC LIMIT 10
+  `).all(customer.id);
   customer.prices = db.prepare(`
     SELECT cp.product_id, cp.price, p.code, p.name, p.list_price
     FROM customer_prices cp JOIN products p ON p.id = cp.product_id
