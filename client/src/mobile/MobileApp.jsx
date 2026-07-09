@@ -75,7 +75,12 @@ export function MobileHeader({ title, back }) {
   return (
     <header className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
       <div className="flex items-center gap-2">
-        {back && <Link to={back} className="text-slate-400 text-xl leading-none">‹</Link>}
+        {back && (
+          <Link to={back} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600 text-white text-sm font-semibold hover:bg-red-700 transition">
+            <span className="text-lg leading-none">←</span>
+            <span className="hidden sm:inline">Return Back</span>
+          </Link>
+        )}
         <h1 className="font-bold">{title}</h1>
       </div>
       <button onClick={logout} className="text-xs text-slate-400">Sign out</button>
