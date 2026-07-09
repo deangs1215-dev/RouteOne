@@ -37,7 +37,7 @@ export default function Login() {
       <div className="w-full max-w-sm">
         {/* South Bakels logo at top */}
         <div className="mb-8 text-center">
-          <img src="/bakels-logo.svg" alt="South Bakels" className="mx-auto h-20" />
+          <img src="/bakels-logo.jpg" alt="South Bakels" className="mx-auto h-24" />
         </div>
 
         {/* Login form */}
