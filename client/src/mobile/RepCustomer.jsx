@@ -292,59 +292,71 @@ export default function RepCustomer() {
 
         {/* Activity history: orders, quotes, forms */}
         <div>
-          <h2 className="mb-2 text-sm font-semibold text-slate-600">📋 Activity history</h2>
-          <div className="space-y-2">
-            {/* Orders */}
-            {(c.recent_orders || []).slice(0, 8).map((o) => (
-              <div key={`order-${o.id}`} className="card p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">📦</span>
-                    <span className="text-sm font-medium">{o.number}</span>
-                  </div>
-                  <OrderStatusBadge status={o.status} />
-                </div>
-                <div className="mt-0.5 flex justify-between text-xs text-slate-400">
-                  <span>{fmtDate(o.order_date)}</span>
-                  <span className="font-semibold text-slate-700">{fmtR(o.total)}</span>
+          <h2 className="mb-3 text-sm font-semibold text-slate-600">📋 Activity history</h2>
+          <div className="space-y-4">
+            {/* Orders Section */}
+            {(c.recent_orders || []).length > 0 && (
+              <div>
+                <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">📦 Orders</h3>
+                <div className="space-y-2">
+                  {(c.recent_orders || []).slice(0, 8).map((o) => (
+                    <div key={`order-${o.id}`} className="card p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{o.number}</span>
+                        <OrderStatusBadge status={o.status} />
+                      </div>
+                      <div className="mt-0.5 flex justify-between text-xs text-slate-400">
+                        <span>{fmtDate(o.order_date)}</span>
+                        <span className="font-semibold text-slate-700">{fmtR(o.total)}</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
 
-            {/* Quotes */}
-            {(c.recent_quotes || []).slice(0, 8).map((q) => (
-              <div key={`quote-${q.id}`} className="card p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">💬</span>
-                    <span className="text-sm font-medium">{q.number}</span>
-                  </div>
-                  <span className={`text-xs px-2 py-0.5 rounded ${q.status === 'accepted' ? 'bg-emerald-100 text-emerald-700' : q.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-purple-100 text-purple-700'}`}>
-                    {q.status}
-                  </span>
-                </div>
-                <div className="mt-0.5 flex justify-between text-xs text-slate-400">
-                  <span>{fmtDate(q.quote_date)}</span>
-                  <span className="font-semibold text-slate-700">{fmtR(q.total)}</span>
+            {/* Quotes Section */}
+            {(c.recent_quotes || []).length > 0 && (
+              <div>
+                <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">💬 Quotes</h3>
+                <div className="space-y-2">
+                  {(c.recent_quotes || []).slice(0, 8).map((q) => (
+                    <div key={`quote-${q.id}`} className="card p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{q.number}</span>
+                        <span className={`text-xs px-2 py-0.5 rounded ${q.status === 'accepted' ? 'bg-emerald-100 text-emerald-700' : q.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-purple-100 text-purple-700'}`}>
+                          {q.status}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex justify-between text-xs text-slate-400">
+                        <span>{fmtDate(q.quote_date)}</span>
+                        <span className="font-semibold text-slate-700">{fmtR(q.total)}</span>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
 
-            {/* Forms */}
-            {(c.recent_forms || []).slice(0, 8).map((f) => (
-              <div key={`form-${f.id}`} className="card p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm">📝</span>
-                    <span className="text-sm font-medium">{f.template_name}</span>
-                  </div>
-                  <span className="text-xs text-slate-400">submitted</span>
-                </div>
-                <div className="mt-0.5 text-xs text-slate-400">
-                  {fmtDate(f.created_at)}
+            {/* Forms Section */}
+            {(c.recent_forms || []).length > 0 && (
+              <div>
+                <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">📝 Forms & Records</h3>
+                <div className="space-y-2">
+                  {(c.recent_forms || []).slice(0, 8).map((f) => (
+                    <div key={`form-${f.id}`} className="card p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{f.template_name}</span>
+                        <span className="text-xs text-slate-400">submitted</span>
+                      </div>
+                      <div className="mt-0.5 text-xs text-slate-400">
+                        {fmtDate(f.created_at)}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
 
             {(c.recent_orders?.length === 0 && c.recent_quotes?.length === 0 && c.recent_forms?.length === 0) &&
               <div className="card p-4 text-center text-sm text-slate-400">No activity yet.</div>}
