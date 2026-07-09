@@ -65,12 +65,6 @@ export default function Login() {
             ))}
           </div>
         </div>
-
-        {/* RouteOne logo at bottom */}
-        <div className="mt-8 text-center">
-          <img src="/logo.svg" alt="RouteOne" className="mx-auto h-8" />
-          <p className="mt-1 text-xs text-slate-400">B2B field sales platform</p>
-        </div>
       </div>
     </div>
   );
