@@ -258,8 +258,8 @@ export default function RepCustomer() {
                 <option value="other">Other</option>
               </select>
             </div>
-            <button className="btn-secondary w-full py-3" onClick={checkOut} disabled={busy}>
-              {busy ? 'Checking out…' : 'Check out'}
+            <button className="btn-primary w-full py-3 bg-red-600 hover:bg-red-700" onClick={checkOut} disabled={busy}>
+              {busy ? 'Checking out…' : '🔴 Check out'}
             </button>
             </div>
           </div>

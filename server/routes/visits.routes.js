@@ -164,9 +164,9 @@ router.get('/visits/:id/summary', (req, res) => {
 
   const forms = db.prepare(`
     SELECT t.id, t.name AS template_name, COUNT(s.id) AS count
-    FROM form_templates t
-    LEFT JOIN form_submissions s ON s.template_id = t.id AND s.visit_id = ?
-    WHERE s.id IS NOT NULL
+    FROM form_submissions s
+    JOIN form_templates t ON t.id = s.template_id
+    WHERE s.visit_id = ?
     GROUP BY t.id, t.name
   `).all(visitId);
 
