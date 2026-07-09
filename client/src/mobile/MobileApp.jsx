@@ -5,6 +5,7 @@ import { Routes, Route, NavLink, Link, Navigate } from 'react-router-dom';
 import { api, fmtR, fmtDateTime, getPosition } from '../api';
 import { useAuth } from '../auth';
 import { Spinner, VisitStatusBadge, OrderStatusBadge } from '../components/ui';
+import DatePicker from '../components/DatePicker';
 import AppIcon from '../components/AppIcon';
 import { onOfflineChange, getOutbox, flushOutbox, refreshSnapshot } from '../offline';
 import RepCustomer from './RepCustomer';
@@ -91,23 +92,37 @@ export function MobileHeader({ title, back }) {
 function Today() {
   const { user } = useAuth();
   const [data, setData] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [showDatePicker, setShowDatePicker] = useState(false);
+
+  const displayDate = selectedDate || new Date().toISOString().slice(0, 10);
 
   useEffect(() => {
-    api.get('/my-day').then(setData).catch(console.error);
+    api.get(`/my-day?date=${displayDate}`).then(setData).catch(console.error);
     // Best-effort position ping so managers see reps on the live map.
     getPosition().then((pos) => {
       if (pos.lat != null) api.post('/locations', pos).catch(() => {});
     });
-  }, []);
+  }, [displayDate]);
 
   if (!data) return <><MobileHeader title="My day" /><Spinner /></>;
   const { visits, stats } = data;
   const pct = stats.target ? Math.min(100, (stats.sales_mtd / stats.target) * 100) : 0;
 
+  const dateStr = new Date(displayDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+
   return (
     <>
       <MobileHeader title={`Hi ${user.name.split(' ')[0]} 👋`} />
       <div className="space-y-4 p-4">
+        {/* Date selector */}
+        <button
+          onClick={() => setShowDatePicker(true)}
+          className="w-full card p-3 text-center font-semibold text-slate-700 hover:bg-slate-50 transition"
+        >
+          📅 {dateStr}
+        </button>
+
         <div className="card p-4">
           <div className="flex justify-between text-sm">
             <span className="text-slate-500">Sales this month</span>
@@ -162,6 +177,15 @@ function Today() {
           </div>
         </div>
       </div>
+
+      {showDatePicker && (
+        <DatePicker
+          value={displayDate}
+          onChange={setSelectedDate}
+          onClose={() => setShowDatePicker(false)}
+          label="Select date"
+        />
+      )}
     </>
   );
 }

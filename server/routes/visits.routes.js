@@ -183,21 +183,22 @@ router.get('/visits/:id/summary', (req, res) => {
   });
 });
 
-// Rep home screen: today's route plus quick stats.
+// Rep home screen: today's route plus quick stats (or a selected date).
 router.get('/my-day', (req, res) => {
   const repId = req.user.id;
+  const dateParam = req.query.date ? `'${req.query.date}'` : "date('now')";
   const visits = db.prepare(`
     SELECT v.*, c.name AS customer_name, c.address, c.city, c.lat AS customer_lat, c.lng AS customer_lng,
       (SELECT COUNT(*) FROM orders o WHERE o.visit_id = v.id) AS order_count
     FROM visits v JOIN customers c ON c.id = v.customer_id
-    WHERE v.rep_id = ? AND date(COALESCE(v.check_in_at, v.planned_date)) = date('now')
+    WHERE v.rep_id = ? AND date(COALESCE(v.check_in_at, v.planned_date)) = date(${dateParam})
     ORDER BY v.status = 'completed', v.route_order IS NULL, v.route_order, v.id
   `).all(repId);
   const stats = db.prepare(`
     SELECT
-      (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(check_in_at) = date('now') AND status = 'completed') AS visits_done,
-      (SELECT COUNT(*) FROM orders WHERE rep_id = ? AND date(order_date) = date('now') AND status != 'cancelled') AS orders_today,
-      (SELECT COALESCE(SUM(total), 0) FROM orders WHERE rep_id = ? AND date(order_date) = date('now') AND status != 'cancelled') AS sales_today,
+      (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(check_in_at) = date(${dateParam}) AND status = 'completed') AS visits_done,
+      (SELECT COUNT(*) FROM orders WHERE rep_id = ? AND date(order_date) = date(${dateParam}) AND status != 'cancelled') AS orders_today,
+      (SELECT COALESCE(SUM(total), 0) FROM orders WHERE rep_id = ? AND date(order_date) = date(${dateParam}) AND status != 'cancelled') AS sales_today,
       (SELECT COALESCE(SUM(total), 0) FROM orders WHERE rep_id = ? AND order_date >= date('now', 'start of month') AND status != 'cancelled') AS sales_mtd
   `).get(repId, repId, repId, repId);
   stats.target = req.user.sales_target || 0;
