@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { db, UPLOAD_DIR } from './db.js';
-import { requireAuth, customerGuard } from './auth.js';
+import { requireAuth } from './auth.js';
 import authRoutes from './routes/auth.routes.js';
 import customerRoutes from './routes/customers.routes.js';
 import productRoutes from './routes/products.routes.js';
@@ -17,7 +17,6 @@ import syncRoutes from './routes/sync.routes.js';
 import planningRoutes from './routes/planning.routes.js';
 import integrationRoutes from './routes/integration.routes.js';
 import intelligenceRoutes from './routes/intelligence.routes.js';
-import portalRoutes from './routes/portal.routes.js';
 import dashboardRoutes from './routes/dashboard.routes.js';
 import { startScheduler } from './integration/scheduler.js';
 import { ensureDefaultForms } from './defaultForms.js';
@@ -31,9 +30,7 @@ app.use(express.json({ limit: '20mb' }));
 
 app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '7d' }));
 app.use('/api/auth', authRoutes);
-app.use('/api', requireAuth, portalRoutes);
-app.use('/api', requireAuth, customerGuard); // portal logins stop here
-app.use('/api', customerRoutes);
+app.use('/api', requireAuth, customerRoutes);
 app.use('/api', productRoutes);
 app.use('/api', visitRoutes);
 app.use('/api', orderRoutes);

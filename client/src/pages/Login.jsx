@@ -7,8 +7,7 @@ const DEMO = [
   ['admin@demo.co.za', 'Admin'],
   ['manager@demo.co.za', 'Sales Manager'],
   ['office@demo.co.za', 'Internal Sales'],
-  ['rep@demo.co.za', 'Field Rep (mobile)'],
-  ['customer@demo.co.za', 'Customer portal']
+  ['rep@demo.co.za', 'Field Rep (mobile)']
 ];
 
 export default function Login() {

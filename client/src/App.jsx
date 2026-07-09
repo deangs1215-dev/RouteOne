@@ -26,7 +26,6 @@ const Analytics = lazy(() => import('./pages/Analytics'));
 const SalesAI = lazy(() => import('./pages/SalesAI'));
 const Users = lazy(() => import('./pages/Users'));
 const MobileApp = lazy(() => import('./mobile/MobileApp'));
-const PortalApp = lazy(() => import('./portal/PortalApp'));
 
 export default function App() {
   const { user } = useAuth();
@@ -39,19 +38,13 @@ export default function App() {
       </Routes>
     );
 
-  // Reps land in the mobile app; customers in the portal; office roles get
-  // the back office.
+  // Reps land in the mobile app; office roles get the back office.
   return (
     <Suspense fallback={<Spinner />}>
       {user.role === 'rep' ? (
         <Routes>
           <Route path="/mobile/*" element={<MobileApp />} />
           <Route path="*" element={<Navigate to="/mobile" replace />} />
-        </Routes>
-      ) : user.role === 'customer' ? (
-        <Routes>
-          <Route path="/portal/*" element={<PortalApp />} />
-          <Route path="*" element={<Navigate to="/portal" replace />} />
         </Routes>
       ) : (
         <Routes>
