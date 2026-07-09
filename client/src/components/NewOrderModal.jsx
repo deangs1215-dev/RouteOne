@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, fmtR } from '../api';
 import { Modal, Field, ErrorNote } from './ui';
+import OrderSummary from './OrderSummary';
 
 const VAT_RATE = 0.15;
 
@@ -89,68 +90,40 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
     <Modal title={`Review ${kind}`} onClose={() => setShowSummary(false)} wide>
       <ErrorNote error={error} />
 
-      <div className="mb-4 overflow-x-auto rounded-lg border border-slate-200">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b bg-slate-50">
-              <th className="px-4 py-3 text-left font-semibold">Product</th>
-              <th className="px-4 py-3 text-right font-semibold">Unit</th>
-              <th className="px-4 py-3 text-right font-semibold">Qty</th>
-              <th className="px-4 py-3 text-right font-semibold">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l) => {
-              const qty = Number(l.qty) || 0;
-              const unitPrice = unitPriceFor(l.product, qty);
-              const lineTotal = qty * unitPrice;
-              return (
-                <tr key={l.product.id} className="border-b last:border-b-0">
-                  <td className="px-4 py-2">
-                    <div className="font-medium">{l.product.name}</div>
-                    <div className="text-xs text-slate-400">{l.product.code}</div>
-                  </td>
-                  <td className="px-4 py-2 text-right text-sm">{fmtR(unitPrice)}</td>
-                  <td className="px-4 py-2 text-right text-sm font-medium">{qty}</td>
-                  <td className="px-4 py-2 text-right font-semibold">{fmtR(lineTotal)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="mb-6">
+        <OrderSummary
+          order={{
+            number: '',
+            quote_date: new Date().toISOString(),
+            order_date: new Date().toISOString(),
+            subtotal,
+            vat_amount: vat,
+            total: subtotal + vat,
+            notes,
+            customer_code: ''
+          }}
+          items={lines.map((l) => {
+            const qty = Number(l.qty) || 0;
+            const unitPrice = unitPriceFor(l.product, qty);
+            return {
+              product_name: l.product.name,
+              product_code: l.product.code,
+              unit_price: unitPrice,
+              qty,
+              uom: l.product.uom,
+              line_total: qty * unitPrice
+            };
+          })}
+          customer={{
+            name: 'Customer',
+            contact_name: '',
+            address: '',
+            city: ''
+          }}
+          type={kind}
+          showSignature={false}
+        />
       </div>
-
-      <div className="mb-4 rounded-lg border border-slate-200 p-4 space-y-2">
-        <div className="flex justify-between text-sm">
-          <span className="text-slate-600">Subtotal</span>
-          <span className="font-medium">{fmtR(subtotal)}</span>
-        </div>
-        <div className="flex justify-between text-sm">
-          <span className="text-slate-600">VAT (15%)</span>
-          <span className="font-medium">{fmtR(vat)}</span>
-        </div>
-        <div className="border-t pt-2 flex justify-between text-lg font-bold">
-          <span>Total</span>
-          <span className="text-brand-600">{fmtR(subtotal + vat)}</span>
-        </div>
-      </div>
-
-      {(notes || delivery) && (
-        <div className="mb-4 rounded-lg border border-slate-200 p-4 bg-slate-50 space-y-2">
-          {notes && (
-            <>
-              <div className="text-xs font-semibold text-slate-600">Notes</div>
-              <div className="text-sm">{notes}</div>
-            </>
-          )}
-          {delivery && (
-            <>
-              <div className="text-xs font-semibold text-slate-600 mt-2">Delivery instructions</div>
-              <div className="text-sm">{delivery}</div>
-            </>
-          )}
-        </div>
-      )}
 
       <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
         <div className="flex gap-2">

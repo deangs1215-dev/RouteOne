@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, fmtR } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
+import OrderSummary from '../components/OrderSummary';
 import { unitPriceFor } from '../components/NewOrderModal';
 import { queueWrite } from '../offline';
 import { MobileHeader } from './MobileApp';
@@ -178,64 +179,33 @@ export default function RepOrderCapture() {
       {/* Summary review screen */}
       {showSummary && (
         <>
-          <MobileHeader title="Review order" back={null} />
-          <div className="space-y-4 p-4 pb-28">
+          <MobileHeader title={`Review ${isQuote ? 'quote' : 'order'}`} back={null} />
+          <div className="p-4 pb-28 space-y-4">
             <ErrorNote error={error} />
-
-            {/* Order lines table */}
-            <div className="card overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b bg-slate-50">
-                    <th className="px-3 py-2 text-left font-semibold">Product</th>
-                    <th className="px-3 py-2 text-right font-semibold">Unit</th>
-                    <th className="px-3 py-2 text-right font-semibold">Qty</th>
-                    <th className="px-3 py-2 text-right font-semibold">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cartLines.map((p) => {
-                    const qty = cart[p.id];
-                    const unitPrice = unitPriceFor(p, qty);
-                    const lineTotal = qty * unitPrice;
-                    return (
-                      <tr key={p.id} className="border-b last:border-b-0">
-                        <td className="px-3 py-2">
-                          <div className="font-medium">{p.name}</div>
-                          <div className="text-xs text-slate-400">{p.code}</div>
-                        </td>
-                        <td className="px-3 py-2 text-right text-sm">{fmtR(unitPrice)}</td>
-                        <td className="px-3 py-2 text-right text-sm font-medium">{qty}</td>
-                        <td className="px-3 py-2 text-right font-semibold">{fmtR(lineTotal)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Totals card */}
-            <div className="card space-y-2 p-4">
-              <div className="flex justify-between text-sm">
-                <span className="text-slate-600">Subtotal</span>
-                <span className="font-medium">{fmtR(subtotal)}</span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-slate-600">VAT (15%)</span>
-                <span className="font-medium">{fmtR(subtotal * VAT_RATE)}</span>
-              </div>
-              <div className="border-t pt-2 flex justify-between text-lg font-bold">
-                <span>Total</span>
-                <span className="text-brand-600">{fmtR(total)}</span>
-              </div>
-            </div>
-
-            {notes && (
-              <div className="card p-4 bg-slate-50">
-                <div className="text-xs font-semibold text-slate-600">Notes</div>
-                <div className="mt-1 text-sm">{notes}</div>
-              </div>
-            )}
+            <OrderSummary
+              order={{
+                number: '',
+                quote_date: new Date().toISOString(),
+                order_date: new Date().toISOString(),
+                subtotal,
+                vat_amount: subtotal * VAT_RATE,
+                total,
+                notes,
+                customer_code: customer.code
+              }}
+              items={cartLines.map((p) => ({
+                product_name: p.name,
+                product_code: p.code,
+                unit_price: unitPriceFor(p, cart[p.id]),
+                qty: cart[p.id],
+                uom: p.uom,
+                line_total: cart[p.id] * unitPriceFor(p, cart[p.id])
+              }))}
+              customer={customer}
+              type={isQuote ? 'quote' : 'order'}
+              showSignature={true}
+              onSignatureSave={(sig) => console.log('Signature captured')}
+            />
           </div>
 
           {/* Action buttons */}
