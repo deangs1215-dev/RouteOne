@@ -27,6 +27,7 @@ export default function RepOrderCapture() {
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showSummary, setShowSummary] = useState(false); // review screen before final submit
   const [done, setDone] = useState(null); // { number?, queued? }
 
   useEffect(() => {
@@ -63,7 +64,7 @@ export default function RepOrderCapture() {
   const subtotal = cartLines.reduce((sum, p) => sum + cart[p.id] * unitPriceFor(p, cart[p.id]), 0);
   const total = subtotal * (1 + VAT_RATE);
 
-  const submit = async () => {
+  const confirmSubmit = async () => {
     setBusy(true);
     setError('');
     const payload = {
@@ -78,7 +79,6 @@ export default function RepOrderCapture() {
       setDone({ number: doc.number, total: doc.total });
     } catch (e) {
       if (e.isNetworkError) {
-        // No signal on site: park it in the outbox, it syncs automatically.
         queueWrite('POST', path, payload);
         setDone({ queued: true, total });
       } else {
@@ -175,15 +175,90 @@ export default function RepOrderCapture() {
         </div>
       </div>
 
+      {/* Summary review screen */}
+      {showSummary && (
+        <>
+          <MobileHeader title="Review order" back={null} />
+          <div className="space-y-4 p-4 pb-28">
+            <ErrorNote error={error} />
+
+            {/* Order lines table */}
+            <div className="card overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-slate-50">
+                    <th className="px-3 py-2 text-left font-semibold">Product</th>
+                    <th className="px-3 py-2 text-right font-semibold">Unit</th>
+                    <th className="px-3 py-2 text-right font-semibold">Qty</th>
+                    <th className="px-3 py-2 text-right font-semibold">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cartLines.map((p) => {
+                    const qty = cart[p.id];
+                    const unitPrice = unitPriceFor(p, qty);
+                    const lineTotal = qty * unitPrice;
+                    return (
+                      <tr key={p.id} className="border-b last:border-b-0">
+                        <td className="px-3 py-2">
+                          <div className="font-medium">{p.name}</div>
+                          <div className="text-xs text-slate-400">{p.code}</div>
+                        </td>
+                        <td className="px-3 py-2 text-right text-sm">{fmtR(unitPrice)}</td>
+                        <td className="px-3 py-2 text-right text-sm font-medium">{qty}</td>
+                        <td className="px-3 py-2 text-right font-semibold">{fmtR(lineTotal)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Totals card */}
+            <div className="card space-y-2 p-4">
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Subtotal</span>
+                <span className="font-medium">{fmtR(subtotal)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">VAT (15%)</span>
+                <span className="font-medium">{fmtR(subtotal * VAT_RATE)}</span>
+              </div>
+              <div className="border-t pt-2 flex justify-between text-lg font-bold">
+                <span>Total</span>
+                <span className="text-brand-600">{fmtR(total)}</span>
+              </div>
+            </div>
+
+            {notes && (
+              <div className="card p-4 bg-slate-50">
+                <div className="text-xs font-semibold text-slate-600">Notes</div>
+                <div className="mt-1 text-sm">{notes}</div>
+              </div>
+            )}
+          </div>
+
+          {/* Action buttons */}
+          <div className="fixed bottom-14 left-1/2 z-30 w-full max-w-md -translate-x-1/2 space-y-2 border-t border-slate-200 bg-white p-3">
+            <button className="btn-primary w-full py-3" onClick={confirmSubmit} disabled={busy}>
+              {busy ? 'Submitting…' : `Confirm & ${isQuote ? 'create quote' : 'submit order'}`}
+            </button>
+            <button className="btn-secondary w-full py-2" onClick={() => setShowSummary(false)} disabled={busy}>
+              Back to cart
+            </button>
+          </div>
+        </>
+      )}
+
       {/* Sticky cart summary */}
-      {cartLines.length > 0 && (
+      {!showSummary && cartLines.length > 0 && (
         <div className="fixed bottom-14 left-1/2 z-30 w-full max-w-md -translate-x-1/2 border-t border-slate-200 bg-white p-3">
           <div className="mb-2 flex justify-between text-sm">
             <span className="text-slate-500">{cartLines.length} products · subtotal {fmtR(subtotal)}</span>
             <span className="font-bold">{fmtR(total)} incl. VAT</span>
           </div>
-          <button className="btn-primary w-full py-3" onClick={submit} disabled={busy}>
-            {busy ? 'Submitting…' : isQuote ? 'Create quote' : 'Submit order'}
+          <button className="btn-primary w-full py-3" onClick={() => setShowSummary(true)} disabled={busy}>
+            {busy ? 'Loading…' : isQuote ? 'Review quote' : 'Review order'}
           </button>
         </div>
       )}
