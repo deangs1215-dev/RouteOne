@@ -300,7 +300,7 @@ export default function RepCustomer() {
                 <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">📦 Orders</h3>
                 <div className="space-y-2">
                   {(c.recent_orders || []).slice(0, 8).map((o) => (
-                    <div key={`order-${o.id}`} className="card p-3">
+                    <Link key={`order-${o.id}`} to={`/orders/${o.id}`} className="card p-3 hover:bg-slate-50 transition cursor-pointer">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">{o.number}</span>
                         <OrderStatusBadge status={o.status} />
@@ -309,7 +309,7 @@ export default function RepCustomer() {
                         <span>{fmtDate(o.order_date)}</span>
                         <span className="font-semibold text-slate-700">{fmtR(o.total)}</span>
                       </div>
-                    </div>
+                    </Link>
                   ))}
                 </div>
               </div>
@@ -321,7 +321,7 @@ export default function RepCustomer() {
                 <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">💬 Quotes</h3>
                 <div className="space-y-2">
                   {(c.recent_quotes || []).slice(0, 8).map((q) => (
-                    <div key={`quote-${q.id}`} className="card p-3">
+                    <Link key={`quote-${q.id}`} to={`/quotes/${q.id}`} className="card p-3 hover:bg-slate-50 transition cursor-pointer">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">{q.number}</span>
                         <span className={`text-xs px-2 py-0.5 rounded ${q.status === 'accepted' ? 'bg-emerald-100 text-emerald-700' : q.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-purple-100 text-purple-700'}`}>
@@ -332,7 +332,7 @@ export default function RepCustomer() {
                         <span>{fmtDate(q.quote_date)}</span>
                         <span className="font-semibold text-slate-700">{fmtR(q.total)}</span>
                       </div>
-                    </div>
+                    </Link>
                   ))}
                 </div>
               </div>

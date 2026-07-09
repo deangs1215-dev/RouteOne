@@ -10,6 +10,8 @@ import AppIcon from '../components/AppIcon';
 import { onOfflineChange, getOutbox, flushOutbox, refreshSnapshot } from '../offline';
 import RepCustomer from './RepCustomer';
 import RepOrderCapture from './RepOrderCapture';
+import OrderDetail from './OrderDetail';
+import QuoteDetail from './QuoteDetail';
 
 function OfflineBanner() {
   const [state, setState] = useState({ online: navigator.onLine, pending: getOutbox().length });
@@ -42,6 +44,8 @@ export default function MobileApp() {
           <Route path="/customers/:id" element={<RepCustomer />} />
           <Route path="/customers/:id/order" element={<RepOrderCapture />} />
           <Route path="/orders" element={<RepOrders />} />
+          <Route path="/orders/:id" element={<OrderDetail />} />
+          <Route path="/quotes/:id" element={<QuoteDetail />} />
           <Route path="*" element={<Navigate to="/mobile" replace />} />
         </Routes>
       </div>
