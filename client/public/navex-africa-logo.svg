@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 96" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+  <!-- Compass mark -->
+  <g transform="translate(48,48)">
+    <circle cx="0" cy="0" r="34" fill="none" stroke="#0f2436" stroke-width="8"/>
+    <!-- tick marks -->
+    <g stroke="#0f2436" stroke-width="4">
+      <line x1="0" y1="-40" x2="0" y2="-30"/>
+      <line x1="0" y1="40" x2="0" y2="30"/>
+      <line x1="-40" y1="0" x2="-30" y2="0"/>
+      <line x1="40" y1="0" x2="30" y2="0"/>
+    </g>
+    <!-- 4-point star -->
+    <path d="M0 -44 L9 -9 L44 0 L9 9 L0 44 L-9 9 L-44 0 L-9 -9 Z" fill="#0f2436"/>
+    <circle cx="0" cy="0" r="8" fill="#ffffff"/>
+    <circle cx="0" cy="0" r="4" fill="#0f2436"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="98" y="52" font-size="46" font-weight="800" fill="#0f2436" letter-spacing="1">NAVEX</text>
+  <text x="99" y="82" font-size="26" font-weight="700" fill="#1a7ea8" letter-spacing="8">AFRICA</text>
+</svg>

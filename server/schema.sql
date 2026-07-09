@@ -263,6 +263,52 @@ CREATE TABLE IF NOT EXISTS activity_log (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Call-cycle route plans (Phase 5): a rep's fixed N-week visit schedule, loaded
+-- from the planning sheet. Each stop is a customer planned for a (week, weekday).
+CREATE TABLE IF NOT EXISTS route_cycles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rep_id INTEGER NOT NULL REFERENCES users(id),
+  name TEXT,
+  rep_code TEXT,                       -- informational, from the source sheet
+  start_date TEXT NOT NULL,            -- YYYY-MM-DD; week 1 begins on/after this
+  cycle_weeks INTEGER NOT NULL DEFAULT 8,
+  repeat_count INTEGER NOT NULL DEFAULT 1,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS route_cycle_stops (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cycle_id INTEGER NOT NULL REFERENCES route_cycles(id) ON DELETE CASCADE,
+  week_no INTEGER NOT NULL,            -- 1..cycle_weeks
+  weekday INTEGER NOT NULL,            -- 1=Mon .. 5=Fri
+  customer_id INTEGER REFERENCES customers(id),
+  customer_code TEXT,                  -- kept even if unmatched, for reference
+  seq INTEGER
+);
+
+-- Tasks (Phase 5): Rep task management. Linked to customers, assigned to reps.
+-- Status: open / done / cancelled. Overdue detection is client-side based on follow_up_date.
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER REFERENCES customers(id),
+  assigned_to INTEGER NOT NULL REFERENCES users(id),
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  task_type TEXT NOT NULL,                -- Call Customer, Visit Customer, Follow Up Quote, Follow Up Order, Resolve Query, Collect Payment, Deliver Sample, Other
+  follow_up_date TEXT NOT NULL,           -- YYYY-MM-DD
+  notes TEXT,
+  status TEXT NOT NULL DEFAULT 'open',    -- open / done / cancelled
+  branch TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_route_cycles_rep ON route_cycles(rep_id, active);
+CREATE INDEX IF NOT EXISTS idx_route_cycle_stops_cycle ON route_cycle_stops(cycle_id, week_no, weekday);
+CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to, status, follow_up_date);
+CREATE INDEX IF NOT EXISTS idx_tasks_customer ON tasks(customer_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
+
 CREATE INDEX IF NOT EXISTS idx_customers_rep ON customers(rep_id);
 CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status);
 CREATE INDEX IF NOT EXISTS idx_quotes_customer ON quotes(customer_id);

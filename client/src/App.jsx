@@ -25,6 +25,9 @@ const Integration = lazy(() => import('./pages/Integration'));
 const Analytics = lazy(() => import('./pages/Analytics'));
 const SalesAI = lazy(() => import('./pages/SalesAI'));
 const Users = lazy(() => import('./pages/Users'));
+const Team = lazy(() => import('./pages/Team'));
+const RepDetail = lazy(() => import('./pages/RepDetail'));
+const Tasks = lazy(() => import('./pages/Tasks'));
 const MobileApp = lazy(() => import('./mobile/MobileApp'));
 
 export default function App() {
@@ -63,6 +66,9 @@ export default function App() {
             <Route path="/visits" element={<Visits />} />
             <Route path="/routes" element={<RoutesPage />} />
             <Route path="/map" element={<LiveMap />} />
+            <Route path="/team" element={<Team />} />
+            <Route path="/team/:id" element={<RepDetail />} />
+            <Route path="/tasks" element={<Tasks />} />
             <Route path="/kpis" element={<Kpis />} />
             <Route path="/analytics" element={<Analytics />} />
             <Route path="/ai" element={<SalesAI />} />

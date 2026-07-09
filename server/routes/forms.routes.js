@@ -44,7 +44,7 @@ router.get('/form-submissions', (req, res) => {
   if (visit_id) { where.push('s.visit_id = ?'); params.push(visit_id); }
   const rows = db.prepare(`
     SELECT s.*, t.name AS template_name, t.fields AS template_fields,
-      c.name AS customer_name, u.name AS user_name
+      c.name AS customer_name, u.name AS user_name, u.name AS rep_name
     FROM form_submissions s
     JOIN form_templates t ON t.id = s.template_id
     LEFT JOIN customers c ON c.id = s.customer_id
@@ -53,6 +53,20 @@ router.get('/form-submissions', (req, res) => {
     ORDER BY s.created_at DESC LIMIT 200
   `).all(...params);
   res.json(rows.map((s) => ({ ...s, data: JSON.parse(s.data), template_fields: JSON.parse(s.template_fields) })));
+});
+
+router.get('/form-submissions/:id', (req, res) => {
+  const row = db.prepare(`
+    SELECT s.*, t.name AS template_name, t.fields AS template_fields,
+      c.name AS customer_name, u.name AS rep_name
+    FROM form_submissions s
+    JOIN form_templates t ON t.id = s.template_id
+    LEFT JOIN customers c ON c.id = s.customer_id
+    LEFT JOIN users u ON u.id = s.user_id
+    WHERE s.id = ?
+  `).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Form submission not found' });
+  res.json({ ...row, data: JSON.parse(row.data), template_fields: JSON.parse(row.template_fields) });
 });
 
 // Submit a filled form. Photo-type answers arrive as base64 data URLs and are

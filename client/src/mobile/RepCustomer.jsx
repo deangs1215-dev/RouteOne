@@ -6,10 +6,45 @@ import { Link, useParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime, getPosition } from '../api';
 import { Spinner, ErrorNote, GradeBadge, OrderStatusBadge, Modal, Field } from '../components/ui';
 import VisitSummary from '../components/VisitSummary';
+import VisitTimer, { visitDuration } from '../components/VisitTimer';
+import DatePicker from '../components/DatePicker';
+import TaskCreateModal from '../components/TaskCreateModal';
 import { queueWrite } from '../offline';
 import { MobileHeader } from './MobileApp';
 
 const offlineVisitKey = (custId) => `fsp_offline_visit_${custId}`;
+
+// Green "view details" affordance shown on each clickable activity card.
+function DetailsLink() {
+  return (
+    <div className="mt-2 flex items-center justify-end gap-1 text-xs font-semibold text-emerald-600">
+      <span>Details</span>
+      <svg viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
+        <path fillRule="evenodd" d="M7.293 4.293a1 1 0 011.414 0l5 5a1 1 0 010 1.414l-5 5a1 1 0 01-1.414-1.414L11.586 10 7.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+      </svg>
+    </div>
+  );
+}
+
+// Collapsible section used by each Activity history group (Visits, Orders,
+// Quotes, Forms). Starts collapsed; the chevron rotates and the full list
+// (not just the preview slice) renders once expanded.
+function CollapsibleSection({ title, count, children }) {
+  const [open, setOpen] = useState(false);
+  if (!count) return null;
+  return (
+    <div>
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        className="mb-2 flex w-full items-center justify-between text-xs font-bold uppercase text-slate-500 tracking-wide">
+        <span>{title} <span className="text-slate-400 font-semibold normal-case">({count})</span></span>
+        <svg viewBox="0 0 20 20" fill="currentColor" className={`h-4 w-4 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`}>
+          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+        </svg>
+      </button>
+      {open && <div className="space-y-2">{children}</div>}
+    </div>
+  );
+}
 
 // Straight-line metres between two GPS points, for the "you seem far away" check.
 function distanceM(lat1, lng1, lat2, lng2) {
@@ -36,6 +71,10 @@ export default function RepCustomer() {
   const [intel, setIntel] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [openVisit, setOpenVisit] = useState(null); // rep's current in-progress visit (any customer)
+  const [historyFrom, setHistoryFrom] = useState(null); // activity history date filter: show items on/before this date
+  const [showHistoryDatePicker, setShowHistoryDatePicker] = useState(false);
+  const [tasks, setTasks] = useState([]);
+  const [showCreateTask, setShowCreateTask] = useState(false);
 
   const load = async () => {
     const cust = await api.get(`/customers/${id}`);
@@ -51,6 +90,7 @@ export default function RepCustomer() {
     api.get('/form-templates').then((ts) => setTemplates(ts.filter((t) => t.active))).catch(() => {});
     api.get(`/intel/customer/${id}`).then(setIntel).catch(() => {});
     api.get('/visits/open').then(setOpenVisit).catch(() => {});
+    api.get(`/customers/${id}/tasks`).then(setTasks).catch(() => {});
   }, [id]);
 
   if (!c) return <><MobileHeader title="Customer" back="/mobile/customers" /><Spinner /></>;
@@ -163,6 +203,7 @@ export default function RepCustomer() {
           <div className="flex items-start justify-between">
             <div>
               <div className="flex items-center gap-2 font-semibold">{c.name} <GradeBadge grade={c.classification} /></div>
+              {c.code && <div className="mt-0.5 text-xs font-semibold text-brand-600">Account {c.code}</div>}
               <div className="mt-0.5 text-xs text-slate-400">{c.address}{c.city ? `, ${c.city}` : ''}</div>
               <div className="text-xs text-slate-400">{c.contact_name} · {c.phone}</div>
             </div>
@@ -210,7 +251,7 @@ export default function RepCustomer() {
               <Link to={`/mobile/customers/${openElsewhere.id}`} className="btn-secondary mt-3 block py-2 text-center">Go to {openElsewhere.name}</Link>
             </div>
           ) : (
-            <button className="btn-primary w-full py-3" onClick={checkIn} disabled={busy}>
+            <button className="btn w-full py-3 bg-emerald-600 text-white hover:bg-emerald-700" onClick={checkIn} disabled={busy}>
               {busy ? 'Checking in…' : `📍 Check in${activeVisit ? '' : ' (unplanned visit)'}`}
             </button>
           )
@@ -220,6 +261,11 @@ export default function RepCustomer() {
               <div className="text-sm font-semibold text-emerald-600">
                 ✓ Checked in {fmtDateTime(offlineVisit ? offlineVisit.check_in_at : activeVisit.check_in_at)}
                 {offlineVisit && <span className="ml-1 text-xs font-normal text-slate-400">(offline)</span>}
+              </div>
+              <div className="mt-3 flex flex-col items-center rounded-lg bg-emerald-50 py-3">
+                <VisitTimer since={offlineVisit ? offlineVisit.check_in_at : activeVisit.check_in_at}
+                  className="text-3xl font-extrabold text-emerald-700" />
+                <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-widest text-emerald-600">Time on site</div>
               </div>
             </div>
 
@@ -268,7 +314,7 @@ export default function RepCustomer() {
         {/* Selling tips from the intelligence engine */}
         {intel && (intel.suggested_products.length > 0 || intel.lapsed_products.length > 0 || intel.risk_score >= 40) && (
           <div className="card p-4">
-            <h2 className="mb-2 text-sm font-semibold text-slate-600">💡 Selling tips</h2>
+            <h2 className="mb-2 text-sm font-semibold text-slate-600">Selling tips</h2>
             {intel.risk_score >= 40 && (
               <div className={`mb-2 rounded-lg px-3 py-2 text-xs ${intel.risk_score >= 70 ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
                 Churn risk {intel.risk_score}/100 — last order {intel.last_order_at ? `${intel.recency_days} days ago` : 'never'}
@@ -290,17 +336,93 @@ export default function RepCustomer() {
           </div>
         )}
 
-        {/* Activity history: orders, quotes, forms */}
+        {/* Outstanding tasks */}
+        {tasks.length > 0 && (
+          <div className="card border border-amber-200 bg-amber-50 p-4">
+            <h2 className="mb-2 flex items-center justify-between text-sm font-semibold text-amber-900">
+              <span>⚠️ Outstanding tasks ({tasks.length})</span>
+            </h2>
+            <div className="space-y-2 mb-3">
+              {tasks.map((t) => {
+                const today = new Date().toISOString().slice(0, 10);
+                const isOverdue = t.follow_up_date < today && t.status === 'open';
+                return (
+                  <div key={t.id} className={`rounded-lg px-3 py-2 text-xs ${isOverdue ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-white text-slate-700 border border-amber-100'}`}>
+                    <div className="font-medium">{t.task_type}</div>
+                    {t.notes && <div className="mt-0.5 text-[11px] opacity-75">{t.notes}</div>}
+                    <div className="mt-1 text-[10px] opacity-60">
+                      {isOverdue ? `⚠ Overdue · ${fmtDate(t.follow_up_date)}` : `Due ${fmtDate(t.follow_up_date)}`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              onClick={() => setShowCreateTask(true)}
+              className="btn-secondary w-full text-sm py-2"
+            >
+              + Create new task
+            </button>
+          </div>
+        )}
+
+        {/* Create new task button (when no outstanding tasks) */}
+        {tasks.length === 0 && (
+          <button
+            onClick={() => setShowCreateTask(true)}
+            className="btn-primary w-full py-2 text-sm"
+          >
+            ✓ Add follow-up task
+          </button>
+        )}
+
+        {/* Activity history: visits, orders, quotes, forms */}
         <div>
-          <h2 className="mb-3 text-sm font-semibold text-slate-600">📋 Activity history</h2>
-          <div className="space-y-4">
-            {/* Orders Section */}
-            {(c.recent_orders || []).length > 0 && (
-              <div>
-                <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">📦 Orders</h3>
-                <div className="space-y-2">
-                  {(c.recent_orders || []).slice(0, 8).map((o) => (
-                    <Link key={`order-${o.id}`} to={`/orders/${o.id}`} className="card p-3 hover:bg-slate-50 transition cursor-pointer">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-slate-600">Activity history</h2>
+            <button type="button" onClick={() => setShowHistoryDatePicker(true)}
+              className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-medium ${historyFrom ? 'border-brand-600 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-500'}`}>
+              📅 {historyFrom ? fmtDate(historyFrom) : 'All dates'}
+            </button>
+          </div>
+          {historyFrom && (
+            <button type="button" onClick={() => setHistoryFrom(null)} className="mb-3 text-xs text-brand-600 underline">
+              Clear date filter
+            </button>
+          )}
+          {(() => {
+            const cutoff = historyFrom; // show items on/before this date, newest first
+            const upTo = (dateStr) => !cutoff || (dateStr || '').slice(0, 10) <= cutoff;
+            const visits = (c.recent_visits || []).filter((v) => v.check_in_at && upTo(v.check_in_at));
+            const orders = (c.recent_orders || []).filter((o) => upTo(o.order_date));
+            const quotes = (c.recent_quotes || []).filter((q) => upTo(q.quote_date));
+            const forms = (c.recent_forms || []).filter((f) => upTo(f.created_at));
+            const nothing = visits.length === 0 && orders.length === 0 && quotes.length === 0 && forms.length === 0;
+
+            return (
+              <div className="space-y-4">
+                <CollapsibleSection title="Visits" count={visits.length}>
+                  {visits.map((v) => {
+                    const dur = visitDuration(v.check_in_at, v.check_out_at);
+                    return (
+                      <div key={`visit-${v.id}`} className="card p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm font-medium">{fmtDateTime(v.check_in_at)}</span>
+                          {dur ? (
+                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">⏱ {dur} on site</span>
+                          ) : v.status === 'in_progress' ? (
+                            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">in progress</span>
+                          ) : null}
+                        </div>
+                        {v.outcome && <div className="mt-0.5 text-xs text-slate-400">Outcome: {v.outcome.replace('_', ' ')}{v.rep_name ? ` · ${v.rep_name}` : ''}</div>}
+                      </div>
+                    );
+                  })}
+                </CollapsibleSection>
+
+                <CollapsibleSection title="Orders" count={orders.length}>
+                  {orders.map((o) => (
+                    <Link key={`order-${o.id}`} to={`/mobile/orders/${o.id}`} className="card block p-3">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">{o.number}</span>
                         <OrderStatusBadge status={o.status} />
@@ -309,22 +431,17 @@ export default function RepCustomer() {
                         <span>{fmtDate(o.order_date)}</span>
                         <span className="font-semibold text-slate-700">{fmtR(o.total)}</span>
                       </div>
+                      <DetailsLink />
                     </Link>
                   ))}
-                </div>
-              </div>
-            )}
+                </CollapsibleSection>
 
-            {/* Quotes Section */}
-            {(c.recent_quotes || []).length > 0 && (
-              <div>
-                <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">💬 Quotes</h3>
-                <div className="space-y-2">
-                  {(c.recent_quotes || []).slice(0, 8).map((q) => (
-                    <Link key={`quote-${q.id}`} to={`/quotes/${q.id}`} className="card p-3 hover:bg-slate-50 transition cursor-pointer">
+                <CollapsibleSection title="Quotes" count={quotes.length}>
+                  {quotes.map((q) => (
+                    <Link key={`quote-${q.id}`} to={`/mobile/quotes/${q.id}`} className="card block p-3">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">{q.number}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded ${q.status === 'accepted' ? 'bg-emerald-100 text-emerald-700' : q.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-purple-100 text-purple-700'}`}>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${q.status === 'accepted' ? 'bg-emerald-50 text-emerald-700' : q.status === 'rejected' ? 'bg-red-50 text-red-700' : 'bg-purple-50 text-purple-700'}`}>
                           {q.status}
                         </span>
                       </div>
@@ -332,43 +449,58 @@ export default function RepCustomer() {
                         <span>{fmtDate(q.quote_date)}</span>
                         <span className="font-semibold text-slate-700">{fmtR(q.total)}</span>
                       </div>
+                      <DetailsLink />
                     </Link>
                   ))}
-                </div>
-              </div>
-            )}
+                </CollapsibleSection>
 
-            {/* Forms Section */}
-            {(c.recent_forms || []).length > 0 && (
-              <div>
-                <h3 className="mb-2 text-xs font-bold uppercase text-slate-500 tracking-wide">📝 Forms & Records</h3>
-                <div className="space-y-2">
-                  {(c.recent_forms || []).slice(0, 8).map((f) => (
-                    <div key={`form-${f.id}`} className="card p-3">
+                <CollapsibleSection title="Forms & Records" count={forms.length}>
+                  {forms.map((f) => (
+                    <Link key={`form-${f.id}`} to={`/mobile/forms/${f.id}`} className="card block p-3">
                       <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">{f.template_name}</span>
-                        <span className="text-xs text-slate-400">submitted</span>
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500">submitted</span>
                       </div>
                       <div className="mt-0.5 text-xs text-slate-400">
                         {fmtDate(f.created_at)}
                       </div>
-                    </div>
+                      <DetailsLink />
+                    </Link>
                   ))}
-                </div>
-              </div>
-            )}
+                </CollapsibleSection>
 
-            {(c.recent_orders?.length === 0 && c.recent_quotes?.length === 0 && c.recent_forms?.length === 0) &&
-              <div className="card p-4 text-center text-sm text-slate-400">No activity yet.</div>}
-          </div>
+                {nothing && (
+                  <div className="card p-4 text-center text-sm text-slate-400">
+                    {historyFrom ? 'No activity on or before that date.' : 'No activity yet.'}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
+
+      {showHistoryDatePicker && (
+        <DatePicker value={historyFrom} onChange={setHistoryFrom} onClose={() => setShowHistoryDatePicker(false)}
+          label="View activity from date" />
+      )}
 
       {fillingForm && (
         <FormFillModal template={fillingForm} customerId={Number(id)}
           visitId={activeVisit?.status === 'in_progress' ? activeVisit.id : null}
           onClose={() => setFillingForm(null)}
           onDone={() => { setFormsDone((d) => [...d, fillingForm.id]); setFillingForm(null); }} />
+      )}
+
+      {showCreateTask && (
+        <TaskCreateModal
+          customerId={parseInt(id)}
+          onClose={() => setShowCreateTask(false)}
+          onCreated={() => {
+            setShowCreateTask(false);
+            api.get(`/customers/${id}/tasks`).then(setTasks).catch(() => {});
+          }}
+        />
       )}
     </>
   );

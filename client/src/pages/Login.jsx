@@ -38,7 +38,7 @@ export default function Login() {
         {/* RouteOne logo at top */}
         <div className="mb-8 text-center">
           <img src="/logo.svg" alt="RouteOne" className="mx-auto h-20" />
-          <p className="mt-2 text-sm text-slate-500">B2B field sales platform</p>
+          <p className="mt-2 text-sm text-slate-500">Bakels Field sales platform</p>
         </div>
 
         {/* Login form */}

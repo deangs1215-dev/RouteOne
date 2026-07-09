@@ -12,6 +12,8 @@ const NAV = [
   { to: '/visits', label: 'Visits', icon: 'visits' },
   { to: '/routes', label: 'Routes', icon: 'routes' },
   { to: '/map', label: 'Live map', icon: 'map' },
+  { to: '/team', label: 'Team', icon: 'kpis' },
+  { to: '/tasks', label: 'Tasks', icon: 'tasks' },
   { to: '/kpis', label: 'Rep KPIs', icon: 'kpis' },
   { to: '/analytics', label: 'Analytics', icon: 'analytics' },
   { to: '/ai', label: 'Sales AI', icon: 'ai' },
@@ -66,6 +68,9 @@ export default function Layout() {
         <main className="p-4 lg:p-6">
           <Outlet />
         </main>
+        <footer className="flex flex-col items-center gap-1 py-6">
+          <img src="/navex-africa-logo.svg" alt="NAVEX Africa" className="h-8 opacity-80" />
+        </footer>
       </div>
     </div>
   );

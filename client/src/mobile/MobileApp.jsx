@@ -12,6 +12,8 @@ import RepCustomer from './RepCustomer';
 import RepOrderCapture from './RepOrderCapture';
 import OrderDetail from './OrderDetail';
 import QuoteDetail from './QuoteDetail';
+import FormDetail from './FormDetail';
+import Tasks from './Tasks';
 
 function OfflineBanner() {
   const [state, setState] = useState({ online: navigator.onLine, pending: getOutbox().length });
@@ -41,11 +43,13 @@ export default function MobileApp() {
         <Routes>
           <Route path="/" element={<Today />} />
           <Route path="/customers" element={<RepCustomers />} />
-          <Route path="/customers/:id" element={<RepCustomer />} />
           <Route path="/customers/:id/order" element={<RepOrderCapture />} />
-          <Route path="/orders" element={<RepOrders />} />
+          <Route path="/customers/:id" element={<RepCustomer />} />
           <Route path="/orders/:id" element={<OrderDetail />} />
           <Route path="/quotes/:id" element={<QuoteDetail />} />
+          <Route path="/forms/:id" element={<FormDetail />} />
+          <Route path="/orders" element={<RepOrders />} />
+          <Route path="/tasks" element={<Tasks />} />
           <Route path="*" element={<Navigate to="/mobile" replace />} />
         </Routes>
       </div>
@@ -58,11 +62,12 @@ function BottomNav() {
   const items = [
     { to: '/mobile', label: 'Today', icon: 'today', end: true },
     { to: '/mobile/customers', label: 'Customers', icon: 'customers' },
-    { to: '/mobile/orders', label: 'Orders', icon: 'orders' }
+    { to: '/mobile/orders', label: 'Orders', icon: 'orders' },
+    { to: '/mobile/tasks', label: 'Tasks', icon: 'tasks' }
   ];
   return (
     <nav className="fixed bottom-0 left-1/2 z-30 w-full max-w-md -translate-x-1/2 border-t border-slate-200 bg-white">
-      <div className="grid grid-cols-3">
+      <div className="grid grid-cols-4">
         {items.map((i) => (
           <NavLink key={i.to} to={i.to} end={i.end}
             className={({ isActive }) =>
@@ -211,6 +216,7 @@ function RepCustomers() {
           <Link key={c.id} to={`/mobile/customers/${c.id}`} className="card flex items-center justify-between p-3">
             <div className="min-w-0">
               <div className="truncate font-medium">{c.name}</div>
+              {c.code && <div className="text-xs font-semibold text-brand-600">Account {c.code}</div>}
               <div className="text-xs text-slate-400">{c.city} · last order {c.last_order_at ? c.last_order_at.slice(0, 10) : 'never'}</div>
             </div>
             <span className="text-slate-300">›</span>
