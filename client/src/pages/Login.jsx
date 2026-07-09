@@ -33,12 +33,14 @@ export default function Login() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
+    <div className="flex min-h-screen flex-col items-center justify-center p-4">
       <div className="w-full max-w-sm">
-        <div className="mb-6 text-center">
-          <img src="/logo.svg" alt="RouteOne" className="mx-auto h-16" />
-          <p className="mt-2 text-sm text-slate-500">B2B field sales platform</p>
+        {/* South Bakels logo at top */}
+        <div className="mb-8 text-center">
+          <img src="/bakels-logo.svg" alt="South Bakels" className="mx-auto h-20" />
         </div>
+
+        {/* Login form */}
         <form onSubmit={submit} className="card p-6 space-y-4">
           <ErrorNote error={error} />
           <div>
@@ -62,6 +64,12 @@ export default function Login() {
               </button>
             ))}
           </div>
+        </div>
+
+        {/* RouteOne logo at bottom */}
+        <div className="mt-8 text-center">
+          <img src="/logo.svg" alt="RouteOne" className="mx-auto h-8" />
+          <p className="mt-1 text-xs text-slate-400">B2B field sales platform</p>
         </div>
       </div>
     </div>

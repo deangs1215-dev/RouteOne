@@ -1,0 +1,9 @@
+<svg viewBox="0 0 300 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- Bread loaf icon -->
+  <rect x="20" y="25" width="45" height="50" rx="8" fill="#0D47A1" />
+  <path d="M 28 35 Q 30 30 37 30 Q 44 30 46 35" stroke="#0D47A1" stroke-width="2" fill="none" />
+  <path d="M 28 42 Q 30 38 37 38 Q 44 38 46 42" stroke="#0D47A1" stroke-width="1.5" fill="none" />
+
+  <!-- BAKELS text -->
+  <text x="80" y="65" font-family="Arial, sans-serif" font-size="48" font-weight="bold" fill="#0D47A1">BAKELS</text>
+</svg>
