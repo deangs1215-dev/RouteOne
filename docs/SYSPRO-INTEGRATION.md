@@ -18,8 +18,8 @@ license; nothing in the current design blocks adding that.)
 ## Checklist — what to request from IT / the SYSPRO consultant
 
 1. **Read-only SQL Server login** on the SYSPRO company database
-   (e.g. `fieldsales_ro`), with SELECT rights on the four views below only.
-2. **Four SQL views** created on the SYSPRO database (definitions below —
+   (e.g. `fieldsales_ro`), with SELECT rights on the six views below only.
+2. **Six SQL views** created on the SYSPRO database (definitions below —
    the consultant should validate table/column names against your SYSPRO
    version and pricing setup).
 3. **Network access** from the app server to the SQL Server (port 1433).
@@ -30,13 +30,33 @@ license; nothing in the current design blocks adding that.)
    app — off / hourly / every 4 hours / daily at a set time). A manual "Sync all"
    button is always available too.
 
-## The four views
+## The six views
 
 The app runs `SELECT * FROM <view>` and expects these exact column names.
 Keeping the mapping inside the views means SYSPRO upgrades or company-specific
 customisations never touch the app.
 
-### 1. vw_FS_Customers
+### 1. vw_FS_Warehouses
+
+The depots/branches customers are fulfilled from. Each customer is fixed to
+one (via `vw_FS_Customers.warehouse_code` below) — reps don't choose a
+warehouse per order, it's shown read-only wherever the order is placed.
+
+| Column | Type | SYSPRO source (typical) |
+|---|---|---|
+| code | varchar | InvWarehouse.Warehouse |
+| name | varchar | InvWarehouse.Description |
+
+```sql
+CREATE VIEW vw_FS_Warehouses AS
+SELECT DISTINCT
+  RTRIM(w.Warehouse)    AS code,
+  RTRIM(w.Description)  AS name
+FROM InvWarehouse w
+WHERE w.Warehouse NOT LIKE 'Z%';
+```
+
+### 2. vw_FS_Customers
 
 | Column | Type | SYSPRO source (typical) |
 |---|---|---|
@@ -51,6 +71,7 @@ customisations never touch the app.
 | balance | decimal | ArCustomerBal.CurrentBalance1 |
 | payment_terms | varchar | terms description |
 | on_hold | int (0/1) | ArCustomer.CustomerOnHold |
+| warehouse_code | varchar | ArCustomer.Warehouse (default/branch warehouse) — must match a code in vw_FS_Warehouses |
 
 ```sql
 CREATE VIEW vw_FS_Customers AS
@@ -65,13 +86,14 @@ SELECT
   c.CreditLimit                        AS credit_limit,
   ISNULL(b.CurrentBalance1, 0)         AS balance,
   RTRIM(c.TermsCode)                   AS payment_terms,   -- or join to terms description
-  CASE WHEN c.CustomerOnHold = 'Y' THEN 1 ELSE 0 END AS on_hold
+  CASE WHEN c.CustomerOnHold = 'Y' THEN 1 ELSE 0 END AS on_hold,
+  RTRIM(c.Warehouse)                   AS warehouse_code   -- validate: the field holding the customer's default depot
 FROM ArCustomer c
 LEFT JOIN ArCustomerBal b ON b.Customer = c.Customer
 WHERE c.Customer NOT LIKE 'Z%';   -- exclude dummy/closed accounts as applicable
 ```
 
-### 2. vw_FS_Products
+### 3. vw_FS_Products
 
 | Column | SYSPRO source (typical) |
 |---|---|
@@ -100,7 +122,7 @@ LEFT JOIN InvPrice p ON p.StockCode = m.StockCode AND p.PriceCode = 'A'  -- your
 WHERE m.StockCode NOT LIKE 'Z%';
 ```
 
-### 3. vw_FS_Stock
+### 4. vw_FS_Stock
 
 | Column | SYSPRO source (typical) |
 |---|---|
@@ -117,7 +139,7 @@ WHERE w.Warehouse IN ('FG')                 -- the warehouse(s) reps sell from
 GROUP BY w.StockCode;
 ```
 
-### 4. vw_FS_ContractPrices
+### 5. vw_FS_ContractPrices
 
 Customer-specific pricing. Where this lives depends on how pricing is set up in
 your SYSPRO (contract pricing, customer price codes, or trade promotions) —
@@ -139,14 +161,67 @@ FROM SorContractPrice cp          -- validate: contract price table for your ver
 WHERE cp.FixedPrice > 0;
 ```
 
+### 6. vw_FS_Invoices
+
+Customer AR invoices, shown read-only on each customer screen ("Invoices — last
+30 days"). SYSPRO is the system of record for billing; the app only displays.
+Return recent invoices (the app filters to a rolling 30-day window per customer,
+so returning ~the last 60–90 days is plenty). One row per invoice:
+
+| Column | Meaning |
+|---|---|
+| number | invoice number (unique — the app keys on this) |
+| customer_code | SYSPRO account (matches vw_FS_Customers.code) |
+| order_number | originating sales order reference (optional) |
+| invoice_date | invoice date, `YYYY-MM-DD` |
+| due_date | payment due date (optional; used to flag *overdue*) |
+| subtotal | nett excl. VAT |
+| vat_amount | VAT value |
+| total | gross incl. VAT |
+| amount_paid | amount settled to date (optional) |
+| balance | outstanding = total − amount_paid (optional; derived if omitted) |
+| status | `paid` / `outstanding` / `overdue` (optional; derived if omitted) |
+
+If `status` is omitted the app derives it: `paid` when balance ≤ 0, `overdue`
+when the due date is past, else `outstanding`. Likewise `balance` is derived
+from `total − amount_paid` when not supplied.
+
+```sql
+CREATE VIEW vw_FS_Invoices AS
+SELECT
+  RTRIM(inv.Invoice)      AS number,
+  RTRIM(inv.Customer)     AS customer_code,
+  RTRIM(inv.SalesOrder)   AS order_number,
+  CONVERT(char(10), inv.InvoiceDate, 23) AS invoice_date,
+  CONVERT(char(10), inv.DueDate, 23)     AS due_date,
+  inv.MerchandiseValue    AS subtotal,     -- validate column names for your version
+  inv.TaxValue            AS vat_amount,
+  inv.InvoiceValue        AS total,
+  inv.PaidValue           AS amount_paid,
+  inv.BalanceValue        AS balance
+FROM ArInvoice inv                          -- validate: AR invoice/detail table for your setup
+WHERE inv.InvoiceDate >= DATEADD(day, -90, GETDATE());
+```
+
 ## Sync behaviour (app side)
 
 - Keyed on customer **code** and stock **code**; existing rows are updated,
   new ones inserted. Runs are logged on the Integration page.
 - SYSPRO is the **master** for: name, contact details, credit limit, balance,
-  terms, on-hold flag, product data, list prices, stock, contract prices.
-- The app remains the master for: rep/territory assignment, A/B/C grading,
-  GPS pins, visit frequency, notes — a sync never touches those.
+  terms, on-hold flag, warehouse assignment, product data, list prices, stock,
+  contract prices, invoices.
+- Each customer is fixed to **one warehouse** (its fulfilling depot). Orders
+  snapshot the customer's warehouse at the moment they're placed, so a later
+  change to the customer's assigned warehouse doesn't rewrite history.
+- **Rep matching:** On first sync, new customers are auto-assigned to their
+  SYSPRO rep using the rep code + warehouse. Reps must exist in RouteOne with
+  matching `rep_code` and `warehouse` assignment. Existing customers are never
+  re-assigned by sync (rep assignment is app-managed once set) — use the
+  "Match customers to reps" button for bulk backfill.
+- Invoices are keyed on the invoice **number** (upserted, never edited in-app)
+  and displayed read-only per customer for the last 30 days.
+- The app remains the master for: rep/territory assignment (after first sync),
+  A/B/C grading, GPS pins, visit frequency, notes — a sync never touches those.
 - A customer on hold in SYSPRO is blocked from ordering in the app immediately
   after sync (quotes still allowed).
 - "Demo data" source mode exercises the whole pipeline before SYSPRO is wired up.
@@ -156,11 +231,14 @@ WHERE cp.FixedPrice > 0;
 **Passwords are encrypted at rest.** The SYSPRO database password and SMTP password are stored
 encrypted in the app database (never plaintext), using AES-256 encryption.
 
-- On deployment, set environment variable: `export SECRET_KEY='your-long-random-secret-key'`
-  (or add to a .env file if using dotenv)
-- Production deployment must use a strong random SECRET_KEY, not the dev default.
-- Deployment guide will include how to generate and safely manage this key.
-- The read-only SYSPRO login remains least-privilege (SELECT on 4 views only, no write access).
+- Copy `.env.example` to `.env` and set `SECRET_KEY` to a random value:
+  `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`.
+  `.env` is gitignored — never commit it. If `SECRET_KEY` isn't set, the server
+  logs a warning at startup and falls back to an insecure hardcoded key (dev only).
+- Changing `SECRET_KEY` after secrets are already saved makes them
+  undecryptable with the new key — re-enter the SYSPRO/SMTP passwords on the
+  Integration page once after rotating it.
+- The read-only SYSPRO login remains least-privilege (SELECT on the six views only, no write access).
 
 ## Outbound flow (no direct posting)
 
