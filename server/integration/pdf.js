@@ -102,11 +102,15 @@ export function buildDocumentPdf({ type, doc, items, company }) {
     for (const it of items) {
       const name = `${it.product_name}`;
       const nameHeight = pdf.heightOfString(name, { width: 250 });
-      const rowH = Math.max(20, nameHeight + 8);
-      pdf.fillColor(NAVY).text(name, cols.product + 8, y + 5, { width: 250 });
+      const kgPrice = it.pack_weight_kg > 0 ? it.unit_price / it.pack_weight_kg : null;
+      const rowH = Math.max(20, nameHeight + 8, kgPrice != null ? 30 : 20);
+      pdf.fillColor(NAVY).fontSize(9.5).text(name, cols.product + 8, y + 5, { width: 250 });
       pdf.text(`${it.qty} ${it.uom || ''}`.trim(), cols.qty, y + 5, { width: 60, align: 'right' });
       pdf.text(fmtR(it.unit_price), cols.unit, y + 5, { width: 70, align: 'right' });
-      pdf.text(fmtR(it.line_total), cols.total, y + 5, { width: 67, align: 'right' });
+      if (kgPrice != null) {
+        pdf.fillColor(GREY).fontSize(7.5).text(`${fmtR(kgPrice)}/kg`, cols.unit, y + 16, { width: 70, align: 'right' });
+      }
+      pdf.fillColor(NAVY).fontSize(9.5).text(fmtR(it.line_total), cols.total, y + 5, { width: 67, align: 'right' });
       y += rowH;
       pdf.moveTo(left, y).lineTo(right, y).strokeColor(LINE).lineWidth(0.5).stroke();
     }

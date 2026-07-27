@@ -1,8 +1,8 @@
 // Phase 5: Task management. Reps create and manage their own tasks, assigned by themselves or managers.
 // Tasks are linked to customers and appear in activity timeline and daily call cycle.
 import { Router } from 'express';
-import { db, logActivity } from '../db.js';
-import { requireRole, scopeForUser } from '../auth.js';
+import { db, logActivity, getTodayISO } from '../db.js';
+import { requireRole, scopeForUser, userCanAccessCustomer } from '../auth.js';
 
 const router = Router();
 
@@ -21,7 +21,7 @@ router.post('/tasks', (req, res) => {
     return res.status(403).json({ error: 'Reps can only assign tasks to themselves' });
   }
 
-  if (!b.follow_up_date || !/\d{4}-\d{2}-\d{2}/.test(b.follow_up_date)) {
+  if (!b.follow_up_date || !/^\d{4}-\d{2}-\d{2}$/.test(b.follow_up_date)) {
     return res.status(400).json({ error: 'follow_up_date (YYYY-MM-DD) is required' });
   }
   if (!TASK_TYPES.includes(b.task_type)) {
@@ -31,6 +31,9 @@ router.post('/tasks', (req, res) => {
   const customer = b.customer_id ? db.prepare('SELECT id FROM customers WHERE id = ?').get(b.customer_id) : null;
   if (b.customer_id && !customer) {
     return res.status(404).json({ error: 'Customer not found' });
+  }
+  if (b.customer_id && !userCanAccessCustomer(req.user, b.customer_id)) {
+    return res.status(403).json({ error: 'Not your customer' });
   }
 
   const assignee = db.prepare('SELECT id FROM users WHERE id = ?').get(assignedTo);
@@ -82,7 +85,7 @@ router.put('/tasks/:id', (req, res) => {
     return res.status(403).json({ error: 'You can only edit your own tasks' });
   }
 
-  if (b.follow_up_date && !/\d{4}-\d{2}-\d{2}/.test(b.follow_up_date)) {
+  if (b.follow_up_date && !/^\d{4}-\d{2}-\d{2}$/.test(b.follow_up_date)) {
     return res.status(400).json({ error: 'follow_up_date must be YYYY-MM-DD' });
   }
   if (b.status && !['open', 'done', 'cancelled'].includes(b.status)) {
@@ -116,20 +119,17 @@ router.put('/tasks/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- List all tasks (manager only, for task management dashboard) ---
+// --- List all tasks (managers see every rep's; reps see only their own) ---
 router.get('/tasks/all', (req, res) => {
   const scope = scopeForUser(req.user);
-  if (scope.isRep) {
-    return res.status(403).json({ error: 'Only managers can view all tasks' });
-  }
-
   const rows = db.prepare(`
     SELECT t.*, c.name AS customer_name, u.name AS assigned_to_name
     FROM tasks t
     LEFT JOIN customers c ON c.id = t.customer_id
     LEFT JOIN users u ON u.id = t.assigned_to
+    ${scope.isRep ? 'WHERE t.assigned_to = ?' : ''}
     ORDER BY t.follow_up_date ASC, t.created_at DESC
-  `).all();
+  `).all(...(scope.isRep ? [req.user.id] : []));
   res.json(rows);
 });
 
@@ -139,7 +139,7 @@ router.get('/tasks/all', (req, res) => {
 router.get('/tasks', (req, res) => {
   const scope = scopeForUser(req.user);
   const filter = req.query.filter || 'upcoming'; // default to upcoming
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getTodayISO();
 
   let where = '';
   const params = [];
@@ -177,6 +177,12 @@ router.get('/tasks', (req, res) => {
 
 // --- Tasks for a customer (for activity timeline) ---
 router.get('/customers/:customerId/tasks', (req, res) => {
+  if (scopeForUser(req.user).isRep) {
+    const customer = db.prepare('SELECT rep_id FROM customers WHERE id = ?').get(req.params.customerId);
+    if (!customer || customer.rep_id !== req.user.id) {
+      return res.status(403).json({ error: 'Not your customer' });
+    }
+  }
   const rows = db.prepare(`
     SELECT t.*, u.name AS assigned_to_name
     FROM tasks t

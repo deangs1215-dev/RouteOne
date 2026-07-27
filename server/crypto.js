@@ -1,16 +1,20 @@
 // Encrypt/decrypt secrets at rest. Uses bcrypt for one-way hashing (passwords
-// aren't retrieved, just compared), but for settings that must be decrypted
-// (SYSPRO password, SMTP password), use a simple XOR-style approach with a
-// salt derived from a server-local key. Not as strong as AES, but good enough
-// for a single-server on a private LAN where the alternative is plaintext.
-//
-// If you deploy to an untrusted environment later (cloud shared host), upgrade
-// to proper AES-256 encryption with a .env key.
+// aren't retrieved, just compared). For settings that must be decrypted again
+// for use (SYSPRO password, SMTP password), uses authenticated AES-256-GCM with
+// a random IV per value, keyed from SECRET_KEY (see .env.example).
 import bcryptjs from 'bcryptjs';
 import crypto from 'crypto';
 
 const SALT_ROUNDS = 10;
-const ENCRYPTION_KEY = process.env.SECRET_KEY || 'routeone-local-encryption-key-change-in-production';
+const FALLBACK_KEY = 'routeone-local-encryption-key-change-in-production';
+if (!process.env.SECRET_KEY) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('SECRET_KEY is required in production');
+  }
+  console.warn('! SECRET_KEY is not set - falling back to an insecure hardcoded key. ' +
+    'Set SECRET_KEY in .env before storing any real secrets (see .env.example).');
+}
+const ENCRYPTION_KEY = process.env.SECRET_KEY || FALLBACK_KEY;
 
 // Hash a password (one-way, for user auth). Always use this, never raw plaintext.
 export async function hashPassword(plain) {
@@ -26,23 +30,29 @@ export async function comparePassword(plain, hash) {
 // Returns a cipher string that can be stored in the database.
 export function encryptSecret(plain) {
   if (!plain) return '';
-  const iv = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
   const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
-  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   let encrypted = cipher.update(plain, 'utf8', 'hex');
   encrypted += cipher.final('hex');
-  // Prepend IV so decrypt knows how to reverse it
-  return `aes:${iv.toString('hex')}:${encrypted}`;
+  const tag = cipher.getAuthTag();
+  return `gcm:${iv.toString('hex')}:${tag.toString('hex')}:${encrypted}`;
 }
 
 // Decrypt a secret (returns the plaintext for use in connections).
 export function decryptSecret(ciphertext) {
-  if (!ciphertext || !ciphertext.startsWith('aes:')) return '';
+  if (!ciphertext || (!ciphertext.startsWith('gcm:') && !ciphertext.startsWith('aes:'))) return '';
   try {
-    const [, ivHex, encrypted] = ciphertext.split(':');
-    const iv = Buffer.from(ivHex, 'hex');
     const key = crypto.createHash('sha256').update(ENCRYPTION_KEY).digest();
-    const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+    const parts = ciphertext.split(':');
+    const iv = Buffer.from(parts[1], 'hex');
+    const encrypted = parts[parts.length - 1];
+    const decipher = crypto.createDecipheriv(
+      parts[0] === 'gcm' ? 'aes-256-gcm' : 'aes-256-cbc',
+      key,
+      iv
+    );
+    if (parts[0] === 'gcm') decipher.setAuthTag(Buffer.from(parts[2], 'hex'));
     let decrypted = decipher.update(encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
     return decrypted;
@@ -55,5 +65,5 @@ export function decryptSecret(ciphertext) {
 // Check if a setting value looks encrypted (vs plaintext). Used to auto-migrate
 // old plaintext passwords on first read.
 export function isEncrypted(value) {
-  return typeof value === 'string' && value.startsWith('aes:');
+  return typeof value === 'string' && (value.startsWith('gcm:') || value.startsWith('aes:'));
 }

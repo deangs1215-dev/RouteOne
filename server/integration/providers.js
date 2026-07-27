@@ -5,32 +5,48 @@
 //    before the SYSPRO views/login exist.
 //
 // Every provider returns plain row arrays in the app's canonical shape:
-//  customers: { code, name, contact_name, phone, email, address, city, credit_limit, balance, payment_terms, on_hold }
+//  warehouses: { code, name }
+//  customers: { code, name, contact_name, phone, email, address, city, credit_limit, balance, payment_terms, on_hold, warehouse_code, rep_code, rep_warehouse_code }
 //  products:  { code, name, category, description, uom, pack_size, list_price, cost_price }
-//  stock:     { code, qty_available }
+//  stock:     { code, warehouse_code, qty_available }  (one row per product per branch)
 //  prices:    { customer_code, product_code, price }   (contract prices)
+//  invoices:  { number, customer_code, order_number, invoice_date, due_date, subtotal, vat_amount, total, amount_paid, balance, status }
 import { getSetting } from '../db.js';
 import { decryptSecret } from '../crypto.js';
 
-export function sysproConfig() {
+// overrides lets "Test connection" check the values currently typed in the
+// form (not yet saved) instead of only ever testing the last-saved settings.
+// A blank overridden password means "keep using the saved one", matching the
+// "type to replace" pattern the field already shows.
+export function sysproConfig(overrides = {}) {
+  const port = parseInt(overrides.syspro_port ?? getSetting('syspro_port', '1433'), 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid SYSPRO SQL port');
   return {
-    host: getSetting('syspro_host', ''),
-    port: parseInt(getSetting('syspro_port', '1433'), 10),
-    database: getSetting('syspro_db', ''),
-    user: getSetting('syspro_user', ''),
-    password: decryptSecret(getSetting('syspro_password', '')),
+    host: overrides.syspro_host ?? getSetting('syspro_host', ''),
+    port,
+    database: overrides.syspro_db ?? getSetting('syspro_db', ''),
+    user: overrides.syspro_user ?? getSetting('syspro_user', ''),
+    password: overrides.syspro_password ? overrides.syspro_password : decryptSecret(getSetting('syspro_password', '')),
+    encrypt: (overrides.syspro_encrypt ?? getSetting('syspro_encrypt', '1')) !== '0',
+    trustServerCertificate: (overrides.syspro_trust_server_certificate ?? getSetting('syspro_trust_server_certificate', '0')) === '1',
+    // '|| default' (not just getSetting's own fallback) because saving the
+    // settings form always writes an explicit '' for every view field, even
+    // ones left blank - getSetting's fallback only fires when no row exists
+    // at all, so a saved-but-empty value would otherwise shadow the default.
     views: {
-      customers: getSetting('syspro_view_customers', 'vw_FS_Customers'),
-      products: getSetting('syspro_view_products', 'vw_FS_Products'),
-      stock: getSetting('syspro_view_stock', 'vw_FS_Stock'),
-      prices: getSetting('syspro_view_prices', 'vw_FS_ContractPrices')
+      warehouses: getSetting('syspro_view_warehouses', '') || 'vw_FS_Warehouses',
+      customers: getSetting('syspro_view_customers', '') || 'vw_FS_Customers',
+      products: getSetting('syspro_view_products', '') || 'vw_FS_Products',
+      stock: getSetting('syspro_view_stock', '') || 'vw_FS_Stock',
+      customer_pricing: getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
+      invoices: getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices'
     }
   };
 }
 
-async function sysproPool() {
+async function sysproPool(overrides) {
   const sql = (await import('mssql')).default;
-  const cfg = sysproConfig();
+  const cfg = sysproConfig(overrides);
   if (!cfg.host || !cfg.database || !cfg.user) {
     throw new Error('SYSPRO connection is not configured (host, database, user are required)');
   }
@@ -40,7 +56,10 @@ async function sysproPool() {
     database: cfg.database,
     user: cfg.user,
     password: cfg.password,
-    options: { encrypt: false, trustServerCertificate: true },
+    options: {
+      encrypt: cfg.encrypt,
+      trustServerCertificate: cfg.trustServerCertificate
+    },
     pool: { max: 2 },
     connectionTimeout: 10000,
     requestTimeout: 60000
@@ -50,8 +69,10 @@ async function sysproPool() {
 // The views present app-friendly column names already (see the doc), so the
 // queries stay dumb on purpose: SELECT * FROM <view>.
 const sysproProvider = {
-  async test() {
-    const pool = await sysproPool();
+  // overrides (optional): test the values currently on the settings form,
+  // even if "Save settings" hasn't been clicked yet.
+  async test(overrides) {
+    const pool = await sysproPool(overrides);
     const result = await pool.request().query('SELECT 1 AS ok');
     await pool.close();
     return result.recordset[0].ok === 1;
@@ -59,10 +80,28 @@ const sysproProvider = {
   async fetch(entity) {
     const cfg = sysproConfig();
     const view = cfg.views[entity];
-    if (!view || !/^[\w.\[\]]+$/.test(view)) throw new Error(`Invalid view name for ${entity}`);
+    const parts = String(view || '').split('.');
+    if (!parts.length || parts.length > 2 ||
+        parts.some((part) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) {
+      throw new Error(`Invalid view name for ${entity}`);
+    }
+    const quotedView = parts.map((part) => `[${part}]`).join('.');
+    const limits = {
+      warehouses: 10000,
+      customers: 500000,
+      products: 500000,
+      stock: 1000000,
+      customer_pricing: 1000000,
+      invoices: 1000000
+    };
+    const limit = limits[entity];
+    if (!limit) throw new Error(`Unknown SYSPRO entity ${entity}`);
     const pool = await sysproPool();
     try {
-      const result = await pool.request().query(`SELECT * FROM ${view}`);
+      const result = await pool.request().query(`SELECT TOP (${limit + 1}) * FROM ${quotedView}`);
+      if (result.recordset.length > limit) {
+        throw new Error(`${entity} view exceeds the ${limit.toLocaleString()} row safety limit; narrow the DBA view before syncing`);
+      }
       return result.recordset;
     } finally {
       await pool.close();
@@ -71,10 +110,15 @@ const sysproProvider = {
 };
 
 const DEMO_ROWS = {
+  warehouses: [
+    { code: 'FG', name: 'Cape Town — Finished Goods' },
+    { code: 'JHB', name: 'Johannesburg Distribution Centre' },
+    { code: 'DBN', name: 'Durban Depot' }
+  ],
   customers: [
-    { code: 'GOLD001', name: 'Golden Crust Bakery', contact_name: 'Maria Santos', phone: '+27 82 1013579', email: 'orders@goldencrustbakery.co.za', address: '7 Main Road', city: 'Milnerton', credit_limit: 160000, balance: 42350.5, payment_terms: '30 days', on_hold: 0 },
-    { code: 'SYS-NEW01', name: 'Atlantic Foods Wholesale', contact_name: 'Brian Adams', phone: '+27 21 555 0199', email: 'buying@atlanticfoods.co.za', address: '14 Marine Drive', city: 'Paarden Eiland', credit_limit: 200000, balance: 0, payment_terms: '30 days', on_hold: 0 },
-    { code: 'SYS-NEW02', name: 'Boland Bake House', contact_name: 'Annelie Smit', phone: '+27 21 555 0242', email: 'info@bolandbake.co.za', address: '3 Kerk Street', city: 'Wellington', credit_limit: 50000, balance: 12800, payment_terms: '7 days', on_hold: 1 }
+    { code: 'GOLD001', name: 'Golden Crust Bakery', contact_name: 'Maria Santos', phone: '+27 82 1013579', email: 'orders@goldencrustbakery.co.za', address: '7 Main Road', city: 'Milnerton', credit_limit: 160000, balance: 42350.5, payment_terms: '30 days', on_hold: 0, warehouse_code: 'FG', rep_code: '140' },
+    { code: 'SYS-NEW01', name: 'Atlantic Foods Wholesale', contact_name: 'Brian Adams', phone: '+27 21 555 0199', email: 'buying@atlanticfoods.co.za', address: '14 Marine Drive', city: 'Paarden Eiland', credit_limit: 200000, balance: 0, payment_terms: '30 days', on_hold: 0, warehouse_code: 'FG', rep_code: '120' },
+    { code: 'SYS-NEW02', name: 'Boland Bake House', contact_name: 'Annelie Smit', phone: '+27 21 555 0242', email: 'info@bolandbake.co.za', address: '3 Kerk Street', city: 'Wellington', credit_limit: 50000, balance: 12800, payment_terms: '7 days', on_hold: 1, warehouse_code: 'FG', rep_code: '140' }
   ],
   products: [
     { code: 'FLR-001', name: 'White Bread Flour 12.5kg', category: 'Flour & Premixes', description: null, uom: 'bag', pack_size: '12.5kg', list_price: 192.75, cost_price: 144.5 },
@@ -82,14 +126,14 @@ const DEMO_ROWS = {
     { code: 'SYS-P002', name: 'Sourdough Starter Culture 1kg', category: 'Yeast & Raising Agents', description: null, uom: 'tub', pack_size: '1kg', list_price: 410.0, cost_price: 307.5 }
   ],
   stock: [
-    { code: 'FLR-001', qty_available: 512 },
-    { code: 'FLR-002', qty_available: 298 },
-    { code: 'SYS-P001', qty_available: 64 },
-    { code: 'SYS-P002', qty_available: 22 }
+    { code: 'FLR-001', warehouse_code: 'FG', qty_available: 512 },
+    { code: 'FLR-002', warehouse_code: 'FG', qty_available: 298 },
+    { code: 'SYS-P001', warehouse_code: 'FG', qty_available: 64 },
+    { code: 'SYS-P002', warehouse_code: 'FG', qty_available: 22 }
   ],
-  prices: [
-    { customer_code: 'GOLD001', product_code: 'FLR-001', price: 176.5 },
-    { customer_code: 'GOLD001', product_code: 'SYS-P001', price: 265.0 }
+  customer_pricing: [
+    { customer_code: 'GOLD001', product_code: 'FLR-001', contract_price: 176.5, buying_group_price: null, price_code_price: null },
+    { customer_code: 'GOLD001', product_code: 'SYS-P001', contract_price: 265.0, buying_group_price: null, price_code_price: null }
   ]
 };
 
@@ -103,4 +147,11 @@ const demoProvider = {
 
 export function getProvider() {
   return getSetting('intg_source', 'demo') === 'syspro' ? sysproProvider : demoProvider;
+}
+
+// Exposed so "Test connection" can test SYSPRO specifically, with overrides
+// from the (possibly unsaved) settings form, regardless of the saved data
+// source - lets an admin verify SQL Server credentials before switching over.
+export function testSyspro(overrides) {
+  return sysproProvider.test(overrides);
 }

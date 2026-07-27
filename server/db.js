@@ -1,16 +1,28 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(__dirname, 'data');
+const configuredPath = process.env.DATABASE_PATH
+  ? path.resolve(process.env.DATABASE_PATH)
+  : path.join(__dirname, 'data', 'fieldsales.db');
+const dataDir = path.dirname(configuredPath);
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 export const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-export const db = new Database(path.join(dataDir, 'fieldsales.db'));
+export const DB_PATH = configuredPath;
+export const db = new Database(configuredPath);
+
+// Releases the file lock on the live database - only ever used right before a
+// restore replaces the file wholesale, followed immediately by process exit
+// (see backup.js). Anything else querying `db` after this call will throw.
+export function closeDb() {
+  db.close();
+}
 // Tuning for many concurrent reps hitting a single SQLite file:
 db.pragma('journal_mode = WAL');       // concurrent readers while one writer commits
 db.pragma('foreign_keys = ON');
@@ -26,10 +38,64 @@ db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
 for (const stmt of [
   'ALTER TABLE visits ADD COLUMN route_order INTEGER',
   'ALTER TABLE visits ADD COLUMN check_in_distance_m REAL',
-  'ALTER TABLE users ADD COLUMN customer_id INTEGER REFERENCES customers(id)' // portal logins
+  'ALTER TABLE users ADD COLUMN customer_id INTEGER REFERENCES customers(id)', // portal logins
+  'ALTER TABLE users ADD COLUMN home_address TEXT',
+  'ALTER TABLE users ADD COLUMN home_lat REAL',
+  'ALTER TABLE users ADD COLUMN home_lng REAL',
+  'ALTER TABLE customers ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)',
+  'ALTER TABLE orders ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)',
+  "ALTER TABLE form_templates ADD COLUMN category TEXT DEFAULT 'general'",
+  'ALTER TABLE users ADD COLUMN rep_code TEXT',
+  'ALTER TABLE users ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)',
+  'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 1',
+  'ALTER TABLE products ADD COLUMN pack_weight_kg REAL',
+  "ALTER TABLE visits ADD COLUMN check_in_type TEXT DEFAULT 'onsite'",
+  'ALTER TABLE visits ADD COLUMN check_in_address TEXT',
+  'ALTER TABLE orders ADD COLUMN signature TEXT',
+  // Rep-captured onsite details (used when SYSPRO's info is wrong).
+  'ALTER TABLE customers ADD COLUMN onsite_name TEXT',
+  'ALTER TABLE customers ADD COLUMN onsite_phone TEXT',
+  'ALTER TABLE customers ADD COLUMN onsite_address TEXT',
+  'ALTER TABLE customers ADD COLUMN onsite_lat REAL',
+  'ALTER TABLE customers ADD COLUMN onsite_lng REAL',
+  'ALTER TABLE customers ADD COLUMN onsite_contact TEXT',
+  'ALTER TABLE customers ADD COLUMN onsite_cell TEXT',
+  'ALTER TABLE customers ADD COLUMN onsite_pricelist TEXT',
+  'ALTER TABLE customers ADD COLUMN onsite_vat TEXT',
+  // Contract / buying-group pricing validity dates (for date-based expiry).
+  'ALTER TABLE syspro_customer_pricing ADD COLUMN contract_start_date TEXT',
+  'ALTER TABLE syspro_customer_pricing ADD COLUMN contract_end_date TEXT',
+  'ALTER TABLE syspro_customer_pricing ADD COLUMN buying_group_start_date TEXT',
+  'ALTER TABLE syspro_customer_pricing ADD COLUMN buying_group_end_date TEXT',
+  'ALTER TABLE form_templates ADD COLUMN notify_email TEXT',
+  'ALTER TABLE users ADD COLUMN documents_last_viewed_at TEXT',
+  'ALTER TABLE users ADD COLUMN reset_token_hash TEXT',
+  'ALTER TABLE users ADD COLUMN reset_token_expires TEXT'
 ]) {
   try { db.exec(stmt); } catch { /* column already exists */ }
 }
+
+// Existing installations predate mandatory password changes. Mark every active
+// account once so known bootstrap passwords cannot remain in production.
+try {
+  const migrated = db.prepare("SELECT value FROM settings WHERE key = 'security_force_password_change_v1'").get();
+  if (!migrated) {
+    db.prepare('UPDATE users SET must_change_password = 1 WHERE active = 1').run();
+    db.prepare("INSERT INTO settings (key, value) VALUES ('security_force_password_change_v1', '1')").run();
+  }
+} catch { /* fresh databases may not have users yet */ }
+
+// Backfill invoice totals: SYSPRO's InvoiceValue sometimes synced as 0 even
+// when subtotal + VAT were populated, leaving customer views showing R0. The
+// gross is always subtotal + VAT, so repair the total for those rows. Balance
+// and status are left alone - they depend on payment data we can't re-derive.
+try {
+  db.exec(`
+    UPDATE invoices
+    SET total = ROUND(subtotal + vat_amount, 2)
+    WHERE (total IS NULL OR total = 0) AND (subtotal + vat_amount) > 0
+  `);
+} catch { /* invoices table may not exist yet on a fresh db */ }
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -50,6 +116,18 @@ export function nextNumber(prefix) {
   return `${prefix}-${String(n).padStart(5, '0')}`;
 }
 
+// A rep's sales target for a given month (1-12): the rep_budgets figure for
+// that month if the admin has set one, otherwise the flat sales_target on the
+// user record as a fallback. Everywhere "this rep's target" is shown should
+// go through this so the figure automatically rolls to the next month's
+// budget as the calendar date changes, rather than needing a manual update.
+export function repMonthTarget(repId, month) {
+  const row = db.prepare('SELECT budget FROM rep_budgets WHERE rep_id = ? AND month = ?').get(repId, month);
+  if (row) return row.budget;
+  const user = db.prepare('SELECT sales_target FROM users WHERE id = ?').get(repId);
+  return user?.sales_target || 0;
+}
+
 export function logActivity(userId, action, entityType, entityId, detail = null) {
   db.prepare(
     'INSERT INTO activity_log (user_id, action, entity_type, entity_id, detail) VALUES (?, ?, ?, ?, ?)'
@@ -58,14 +136,58 @@ export function logActivity(userId, action, entityType, entityId, detail = null)
 
 export const VAT_RATE = 0.15;
 
+// Today as 'YYYY-MM-DD' in the server's local time. `new Date().toISOString()`
+// converts through UTC first, which silently shifts the date whenever the
+// server's local time and UTC fall on different calendar days (e.g. showing
+// yesterday as "today" for the first couple of hours after local midnight in
+// timezones ahead of UTC, like SAST) - this builds the string from local
+// y/m/d components instead.
+export function getTodayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Date N days from today in 'YYYY-MM-DD' format (local time, not UTC).
+// Offset can be negative (past) or positive (future). Used for date calculations
+// like "3 days from now" without UTC drift.
+export function getLocalDateISO(offsetDays = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // Save a base64 data-URL to the uploads folder, return relative path.
-export function saveDataUrl(dataUrl, baseName) {
-  const m = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || '');
+export function saveDataUrl(dataUrl, baseName, options = {}) {
+  const m = /^data:([^;,]+);base64,([A-Za-z0-9+/=\r\n]+)$/.exec(dataUrl || '');
   if (!m) return null;
-  const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[m[1]] || 'bin';
-  const filename = `${baseName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  fs.writeFileSync(path.join(UPLOAD_DIR, filename), Buffer.from(m[2], 'base64'));
+  const allowedTypes = options.allowedTypes || ['image/png', 'image/jpeg', 'image/webp'];
+  if (!allowedTypes.includes(m[1])) return null;
+  const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'application/pdf': 'pdf' }[m[1]];
+  if (!ext) return null;
+  const data = Buffer.from(m[2], 'base64');
+  const maxBytes = options.maxBytes || 5 * 1024 * 1024;
+  if (!data.length || data.length > maxBytes) return null;
+  const signatures = {
+    'image/png': () => data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')),
+    'image/jpeg': () => data.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')),
+    'image/webp': () => data.subarray(0, 4).toString('ascii') === 'RIFF' && data.subarray(8, 12).toString('ascii') === 'WEBP',
+    'application/pdf': () => data.subarray(0, 5).toString('ascii') === '%PDF-'
+  };
+  if (!signatures[m[1]]?.()) return null;
+  const safeBase = String(baseName || 'upload').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'upload';
+  const filename = `${safeBase}-${Date.now()}-${crypto.randomBytes(12).toString('hex')}.${ext}`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, filename), data, { flag: 'wx' });
   return `/uploads/${filename}`;
+}
+
+export function deleteUploadedFile(relativePath) {
+  if (typeof relativePath !== 'string' || !relativePath.startsWith('/uploads/')) return false;
+  const filename = path.basename(relativePath);
+  if (relativePath !== `/uploads/${filename}`) return false;
+  const absolutePath = path.join(UPLOAD_DIR, filename);
+  if (!fs.existsSync(absolutePath)) return false;
+  fs.unlinkSync(absolutePath);
+  return true;
 }
 
 // Straight-line distance in metres between two GPS points (haversine).
@@ -106,10 +228,42 @@ export function activeRules() {
   `).all();
 }
 
-function rulePrice(rule, listPrice) {
+// SYSPRO's catalogue price (products.list_price) is a per-KG price, not a
+// per-unit/per-pack price - confirmed against real data (e.g. a 25kg bag
+// priced per kg, not per bag). The real selling price for one unit is
+// list_price * the pack's weight in kg. pack_weight_kg is parsed once at
+// sync time (see packWeightKg below) and stored, not re-derived per request.
+export function productUnitPrice(product) {
+  return product.list_price * (product.pack_weight_kg || 1);
+}
+
+// Parses a pack_size like "BAG 25KG", "BUCKET 2.7", "CARTON12.5", "EACH 500G",
+// or bare "KG" into a kg weight. Real SYSPRO data has no consistent spacing
+// or unit suffix - every pack in this catalogue is weight-based (no L/ml
+// packs), so a bare number with no unit is treated as kg.
+export function packWeightKg(packSize) {
+  if (!packSize) return null;
+  const s = String(packSize).toUpperCase().trim();
+  if (s === 'KG') return 1;
+  const m = s.match(/(\d+(?:\.\d+)?)\s*(KG|G)?/);
+  if (!m) return null;
+  const amount = parseFloat(m[1]);
+  if (!amount) return null;
+  return m[2] === 'G' ? amount / 1000 : amount;
+}
+
+// One-time backfill: products synced/created before pack_weight_kg existed
+// have it NULL. Parse it from their existing pack_size text so the fix takes
+// effect immediately, not just for the next sync.
+for (const p of db.prepare("SELECT id, pack_size FROM products WHERE pack_weight_kg IS NULL AND pack_size IS NOT NULL").all()) {
+  const kg = packWeightKg(p.pack_size);
+  if (kg) db.prepare('UPDATE products SET pack_weight_kg = ? WHERE id = ?').run(kg, p.id);
+}
+
+function rulePrice(rule, unitPrice) {
   if (rule.rule_type === 'fixed_price' && rule.fixed_price != null) return rule.fixed_price;
-  if (rule.discount_pct != null) return listPrice * (1 - rule.discount_pct / 100);
-  return listPrice;
+  if (rule.discount_pct != null) return unitPrice * (1 - rule.discount_pct / 100);
+  return unitPrice;
 }
 
 // Price breaks a client can evaluate offline: [{ min_qty, price, rule_name }],
@@ -119,9 +273,10 @@ export function priceBreaks(product, rules = null) {
   const applicable = rules
     ? rules.filter((r) => r.product_id === product.id || (r.category_id != null && r.category_id === product.category_id))
     : rulesForProduct(product);
-  const breaks = new Map([[0, { min_qty: 0, price: product.list_price, rule_name: null }]]);
+  const unitPrice = productUnitPrice(product);
+  const breaks = new Map([[0, { min_qty: 0, price: unitPrice, rule_name: null }]]);
   for (const rule of applicable) {
-    const price = Math.round(rulePrice(rule, product.list_price) * 100) / 100;
+    const price = Math.round(rulePrice(rule, unitPrice) * 100) / 100;
     const key = rule.min_qty || 0;
     const existing = breaks.get(key);
     if (!existing || price < existing.price) breaks.set(key, { min_qty: key, price, rule_name: rule.name });
@@ -135,14 +290,53 @@ export function priceBreaks(product, rules = null) {
 }
 
 // Effective unit price: customer contract price wins outright; otherwise the
-// best rule price for the quantity; otherwise list price.
+// best rule price for the quantity; otherwise list price * pack weight.
 export function effectivePrice(customerId, productId, qty = 1) {
+  const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
+  if (!product) return 0;
+  const customer = db.prepare('SELECT code FROM customers WHERE id = ?').get(customerId);
+  if (customer) {
+    const syspro = db.prepare(`
+      SELECT contract_price, buying_group_price, price_code_price,
+        contract_start_date, contract_end_date,
+        buying_group_start_date, buying_group_end_date
+      FROM syspro_customer_pricing
+      WHERE customer_code = ? AND product_code = ?
+    `).get(customer.code, product.code);
+    if (syspro) {
+      const today = getTodayISO();
+      const inWindow = (start, end) => (!start || start <= today) && (!end || end >= today);
+      const contractPrice = syspro.contract_price != null &&
+        inWindow(syspro.contract_start_date, syspro.contract_end_date)
+        ? syspro.contract_price : null;
+      const groupPrice = syspro.buying_group_price != null &&
+        inWindow(syspro.buying_group_start_date, syspro.buying_group_end_date)
+        ? syspro.buying_group_price : null;
+      const perKgPrice = contractPrice ?? groupPrice ?? syspro.price_code_price;
+      if (perKgPrice != null) return perKgPrice * (product.pack_weight_kg || 1);
+    }
+  }
   const contract = db.prepare(
     'SELECT price FROM customer_prices WHERE customer_id = ? AND product_id = ?'
   ).get(customerId, productId);
   if (contract) return contract.price;
-  const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
-  if (!product) return 0;
   const applicable = priceBreaks(product).filter((b) => qty >= b.min_qty);
-  return applicable.length ? applicable[applicable.length - 1].price : product.list_price;
+  return applicable.length ? applicable[applicable.length - 1].price : productUnitPrice(product);
+}
+
+export function adjustOrderStock(orderId, direction) {
+  if (![1, -1].includes(direction)) throw new Error('Invalid stock adjustment');
+  const order = db.prepare('SELECT warehouse_id FROM orders WHERE id = ?').get(orderId);
+  if (!order) throw new Error('Order not found');
+  const items = db.prepare('SELECT product_id, qty FROM order_items WHERE order_id = ?').all(orderId);
+  const updateTotal = db.prepare('UPDATE products SET stock_qty = stock_qty + ? WHERE id = ?');
+  const updateWarehouse = db.prepare(`
+    UPDATE product_stock SET qty_available = qty_available + ?
+    WHERE product_id = ? AND warehouse_id = ?
+  `);
+  for (const item of items) {
+    const delta = direction * item.qty;
+    updateTotal.run(delta, item.product_id);
+    if (order.warehouse_id) updateWarehouse.run(delta, item.product_id, order.warehouse_id);
+  }
 }

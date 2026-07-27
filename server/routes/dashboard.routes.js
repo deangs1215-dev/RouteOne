@@ -1,12 +1,23 @@
 import { Router } from 'express';
-import { db } from '../db.js';
-import { requireRole } from '../auth.js';
+import { db, logActivity } from '../db.js';
+import { passwordIsStrong, requireRole, scopeForUser } from '../auth.js';
 import bcrypt from 'bcryptjs';
 
 const router = Router();
 
 router.get('/dashboard', (req, res) => {
-  const stats = db.prepare(`
+  const scope = scopeForUser(req.user);
+  const repId = req.user.id;
+
+  const stats = scope.isRep ? db.prepare(`
+    SELECT
+      (SELECT COALESCE(SUM(total), 0) FROM orders WHERE rep_id = ? AND order_date >= date('now', 'start of month') AND status != 'cancelled') AS sales_mtd,
+      (SELECT COUNT(*) FROM orders WHERE rep_id = ? AND date(order_date) = date('now') AND status != 'cancelled') AS orders_today,
+      (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(check_in_at) = date('now') AND status = 'completed') AS visits_today,
+      (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(planned_date) = date('now') AND status = 'planned') AS visits_pending,
+      (SELECT COUNT(*) FROM customers WHERE rep_id = ? AND status = 'active') AS active_customers,
+      (SELECT COALESCE(AVG(total), 0) FROM orders WHERE rep_id = ? AND order_date >= date('now', '-30 days') AND status != 'cancelled') AS avg_order_value
+  `).get(repId, repId, repId, repId, repId, repId) : db.prepare(`
     SELECT
       (SELECT COALESCE(SUM(total), 0) FROM orders WHERE order_date >= date('now', 'start of month') AND status != 'cancelled') AS sales_mtd,
       (SELECT COUNT(*) FROM orders WHERE date(order_date) = date('now') AND status != 'cancelled') AS orders_today,
@@ -16,7 +27,8 @@ router.get('/dashboard', (req, res) => {
       (SELECT COALESCE(AVG(total), 0) FROM orders WHERE order_date >= date('now', '-30 days') AND status != 'cancelled') AS avg_order_value
   `).get();
 
-  const salesByRep = db.prepare(`
+  // "Sales by rep" leaderboard doesn't apply to a single rep's own dashboard.
+  const salesByRep = scope.isRep ? [] : db.prepare(`
     SELECT u.id, u.name, u.sales_target,
       COALESCE(SUM(CASE WHEN o.order_date >= date('now', 'start of month') AND o.status != 'cancelled' THEN o.total END), 0) AS sales_mtd,
       COUNT(DISTINCT CASE WHEN o.order_date >= date('now', 'start of month') AND o.status != 'cancelled' THEN o.id END) AS orders_mtd,
@@ -32,8 +44,9 @@ router.get('/dashboard', (req, res) => {
     SELECT c.id, c.name, c.city, COALESCE(SUM(o.total), 0) AS sales_mtd, COUNT(o.id) AS orders_mtd
     FROM customers c
     JOIN orders o ON o.customer_id = c.id AND o.order_date >= date('now', 'start of month') AND o.status != 'cancelled'
+    ${scope.isRep ? 'WHERE o.rep_id = ?' : ''}
     GROUP BY c.id ORDER BY sales_mtd DESC LIMIT 8
-  `).all();
+  `).all(...(scope.isRep ? [repId] : []));
 
   // Customers with no order in 30+ days - the "at risk" list.
   const atRisk = db.prepare(`
@@ -41,23 +54,24 @@ router.get('/dashboard', (req, res) => {
     FROM customers c
     LEFT JOIN orders o ON o.customer_id = c.id AND o.status != 'cancelled'
     LEFT JOIN users u ON u.id = c.rep_id
-    WHERE c.status = 'active'
+    WHERE c.status = 'active' ${scope.isRep ? 'AND c.rep_id = ?' : ''}
     GROUP BY c.id
     HAVING last_order_at IS NULL OR last_order_at < date('now', '-30 days')
     ORDER BY last_order_at LIMIT 8
-  `).all();
+  `).all(...(scope.isRep ? [repId] : []));
 
   const recentOrders = db.prepare(`
     SELECT o.id, o.number, o.total, o.status, o.order_date, c.name AS customer_name, u.name AS rep_name
     FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.rep_id
+    ${scope.isRep ? 'WHERE o.rep_id = ?' : ''}
     ORDER BY o.order_date DESC LIMIT 10
-  `).all();
+  `).all(...(scope.isRep ? [repId] : []));
 
   const salesTrend = db.prepare(`
     SELECT date(order_date) AS day, COALESCE(SUM(total), 0) AS total
-    FROM orders WHERE order_date >= date('now', '-14 days') AND status != 'cancelled'
+    FROM orders WHERE order_date >= date('now', '-14 days') AND status != 'cancelled' ${scope.isRep ? 'AND rep_id = ?' : ''}
     GROUP BY day ORDER BY day
-  `).all();
+  `).all(...(scope.isRep ? [repId] : []));
 
   res.json({ stats, salesByRep, topCustomers, atRisk, recentOrders, salesTrend });
 });
@@ -66,11 +80,13 @@ router.get('/dashboard', (req, res) => {
 
 router.get('/users', requireRole('admin', 'manager'), (req, res) => {
   res.json(db.prepare(`
-    SELECT u.id, u.name, u.email, u.phone, u.active, u.sales_target, u.territory_id, u.customer_id,
-      r.name AS role, t.name AS territory_name, c.name AS customer_name
+    SELECT u.id, u.name, u.email, u.phone, u.active, u.rep_code, u.sales_target, u.customer_id,
+      u.warehouse_id, w.name AS warehouse_name,
+      u.home_address, u.home_lat, u.home_lng,
+      r.name AS role, c.name AS customer_name
     FROM users u JOIN roles r ON r.id = u.role_id
-    LEFT JOIN territories t ON t.id = u.territory_id
     LEFT JOIN customers c ON c.id = u.customer_id
+    LEFT JOIN warehouses w ON w.id = u.warehouse_id
     ORDER BY u.name
   `).all());
 });
@@ -79,39 +95,127 @@ router.get('/roles', requireRole('admin', 'manager'), (req, res) => {
   res.json(db.prepare('SELECT id, name FROM roles ORDER BY id').all());
 });
 
-router.post('/users', requireRole('admin'), (req, res) => {
+// A manager may manage users, but never admin accounts (no self-escalation).
+function adminRoleId() {
+  return db.prepare("SELECT id FROM roles WHERE name = 'admin'").get()?.id;
+}
+
+router.post('/users', requireRole('admin', 'manager'), (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.email || !b.password || !b.role_id) {
     return res.status(400).json({ error: 'Name, email, password and role are required' });
   }
+  if (!passwordIsStrong(b.password)) {
+    return res.status(400).json({ error: 'Password must be at least 12 characters and not commonly used' });
+  }
+  if (req.user.role_name === 'manager' && Number(b.role_id) === adminRoleId()) {
+    return res.status(403).json({ error: 'Only an admin can create admin users' });
+  }
   try {
     const info = db.prepare(`
-      INSERT INTO users (name, email, password_hash, phone, role_id, territory_id, customer_id, sales_target)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(b.name, b.email, bcrypt.hashSync(b.password, 10), b.phone || null, b.role_id, b.territory_id || null, b.customer_id || null, b.sales_target || 0);
+      INSERT INTO users (name, email, password_hash, phone, role_id, customer_id, rep_code, warehouse_id, sales_target, home_address, home_lat, home_lng, must_change_password)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `).run(b.name, b.email, bcrypt.hashSync(b.password, 12), b.phone || null, b.role_id, b.customer_id || null, b.rep_code || null, b.warehouse_id || null, b.sales_target || 0,
+      b.home_address || null, b.home_lat ?? null, b.home_lng ?? null);
     res.json({ id: info.lastInsertRowid });
   } catch {
     res.status(400).json({ error: 'Email already in use' });
   }
 });
 
-router.put('/users/:id', requireRole('admin'), (req, res) => {
+router.put('/users/:id', requireRole('admin', 'manager'), (req, res) => {
   const b = req.body || {};
   const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'User not found' });
+  if (req.user.role_name === 'manager' &&
+      (existing.role_id === adminRoleId() || (b.role_id != null && Number(b.role_id) === adminRoleId()))) {
+    return res.status(403).json({ error: 'Only an admin can manage admin users' });
+  }
+  if (b.password && !passwordIsStrong(b.password)) {
+    return res.status(400).json({ error: 'Password must be at least 12 characters and not commonly used' });
+  }
   db.prepare(`
-    UPDATE users SET name = ?, email = ?, phone = ?, role_id = ?, territory_id = ?, customer_id = ?, sales_target = ?, active = ?
+    UPDATE users SET name = ?, email = ?, phone = ?, role_id = ?, customer_id = ?, rep_code = ?, warehouse_id = ?, sales_target = ?, active = ?,
+      home_address = ?, home_lat = ?, home_lng = ?
     WHERE id = ?
   `).run(
     b.name ?? existing.name, b.email ?? existing.email, b.phone ?? existing.phone,
-    b.role_id ?? existing.role_id, b.territory_id ?? existing.territory_id,
-    b.customer_id ?? existing.customer_id,
-    b.sales_target ?? existing.sales_target, b.active ?? existing.active, req.params.id
+    b.role_id ?? existing.role_id,
+    b.customer_id ?? existing.customer_id, b.rep_code ?? existing.rep_code, b.warehouse_id ?? existing.warehouse_id,
+    b.sales_target ?? existing.sales_target, b.active ?? existing.active,
+    b.home_address ?? existing.home_address, b.home_lat ?? existing.home_lat, b.home_lng ?? existing.home_lng,
+    req.params.id
   );
   if (b.password) {
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(b.password, 10), req.params.id);
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
+      .run(bcrypt.hashSync(b.password, 12), req.params.id);
   }
   res.json({ ok: true });
+});
+
+router.delete('/users/:id', requireRole('admin', 'manager'), (req, res) => {
+  const existing = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'User not found' });
+  if (Number(req.params.id) === req.user.id) {
+    return res.status(400).json({ error: 'You cannot delete your own account.' });
+  }
+  if (req.user.role_name === 'manager' && existing.role_id === adminRoleId()) {
+    return res.status(403).json({ error: 'Only an admin can delete admin users' });
+  }
+  // GPS ping history is live-map telemetry with no business value once the
+  // account is gone - clear it first so it never blocks an otherwise-clean delete.
+  db.prepare('DELETE FROM rep_locations WHERE user_id = ?').run(req.params.id);
+  try {
+    db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+  } catch (e) {
+    // A rep with orders/customers/visits/quotes is referenced elsewhere, so a
+    // hard delete would break that history. Guide the admin to deactivate.
+    if (String(e.code || '').startsWith('SQLITE_CONSTRAINT')) {
+      return res.status(409).json({
+        error: 'This user has linked records (orders, customers, visits or quotes) and can’t be deleted. Set them to Inactive instead.'
+      });
+    }
+    throw e;
+  }
+  logActivity(req.user.id, 'delete', 'user', Number(req.params.id), { name: existing.name });
+  res.json({ ok: true });
+});
+
+// --- Monthly budgets ---
+
+router.get('/budgets/:repId', requireRole('admin', 'manager'), (req, res) => {
+  const budgets = db.prepare(`
+    SELECT month, budget FROM rep_budgets
+    WHERE rep_id = ? ORDER BY month
+  `).all(req.params.repId);
+
+  // Return all 12 months, filling in 0 for missing months
+  const result = {};
+  for (let m = 1; m <= 12; m++) {
+    const found = budgets.find(b => b.month === m);
+    result[m] = found ? found.budget : 0;
+  }
+  res.json(result);
+});
+
+router.put('/budgets/:repId', requireRole('admin', 'manager'), (req, res) => {
+  const budgets = req.body || {};
+  const repId = req.params.repId;
+
+  try {
+    db.transaction(() => {
+      for (let month = 1; month <= 12; month++) {
+        const budget = Number(budgets[month]) || 0;
+        db.prepare(`
+          INSERT INTO rep_budgets (rep_id, month, budget) VALUES (?, ?, ?)
+          ON CONFLICT(rep_id, month) DO UPDATE SET budget = excluded.budget, updated_at = datetime('now')
+        `).run(repId, month, budget);
+      }
+    })();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 export default router;

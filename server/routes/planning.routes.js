@@ -1,7 +1,7 @@
 // Phase 3: route planning, visit-frequency coverage, rep locations, rep KPIs.
 import { Router } from 'express';
-import { db, logActivity, distanceM } from '../db.js';
-import { requireRole, scopeForUser } from '../auth.js';
+import { db, logActivity, distanceM, repMonthTarget, getTodayISO } from '../db.js';
+import { requireRole, scopeForUser, userCanAccessCustomer } from '../auth.js';
 
 const router = Router();
 
@@ -13,7 +13,7 @@ const FREQUENCY_DAYS = { weekly: 7, biweekly: 14, monthly: 30 };
 router.get('/routes', (req, res) => {
   const scope = scopeForUser(req.user);
   const repId = scope.isRep ? req.user.id : req.query.rep_id;
-  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const date = req.query.date || getTodayISO();
   if (!repId) return res.status(400).json({ error: 'rep_id is required' });
   const visits = db.prepare(`
     SELECT v.*, c.name AS customer_name, c.address, c.city, c.lat AS customer_lat, c.lng AS customer_lng,
@@ -32,7 +32,16 @@ router.post('/routes/stops', (req, res) => {
   const scope = scopeForUser(req.user);
   const repId = scope.isRep ? req.user.id : b.rep_id;
   if (!b.customer_id || !repId) return res.status(400).json({ error: 'Customer and rep are required' });
-  const date = b.date || new Date().toISOString().slice(0, 10);
+  if (!db.prepare('SELECT 1 FROM customers WHERE id = ?').get(b.customer_id)) {
+    return res.status(404).json({ error: 'Customer not found' });
+  }
+  if (!db.prepare('SELECT 1 FROM users WHERE id = ? AND active = 1').get(repId)) {
+    return res.status(404).json({ error: 'Rep not found' });
+  }
+  if (!userCanAccessCustomer(req.user, b.customer_id)) {
+    return res.status(403).json({ error: 'Not your customer' });
+  }
+  const date = b.date || getTodayISO();
   const maxOrder = db.prepare(
     'SELECT COALESCE(MAX(route_order), 0) AS m FROM visits WHERE rep_id = ? AND date(planned_date) = date(?)'
   ).get(repId, date).m;
@@ -48,6 +57,9 @@ router.post('/routes/stops', (req, res) => {
 router.delete('/routes/stops/:visitId', (req, res) => {
   const visit = db.prepare('SELECT * FROM visits WHERE id = ?').get(req.params.visitId);
   if (!visit) return res.status(404).json({ error: 'Visit not found' });
+  if (scopeForUser(req.user).isRep && visit.rep_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your route stop' });
+  }
   if (visit.status !== 'planned') return res.status(400).json({ error: 'Only planned stops can be removed' });
   db.prepare('DELETE FROM visits WHERE id = ?').run(visit.id);
   res.json({ ok: true });
@@ -57,27 +69,67 @@ router.delete('/routes/stops/:visitId', (req, res) => {
 router.put('/routes/reorder', (req, res) => {
   const ids = req.body?.visit_ids;
   if (!Array.isArray(ids)) return res.status(400).json({ error: 'visit_ids array is required' });
-  const update = db.prepare('UPDATE visits SET route_order = ? WHERE id = ?');
-  db.transaction(() => ids.forEach((id, i) => update.run(i + 1, id)))();
+  // Reps may only reorder their own visits - the WHERE clause makes any
+  // foreign id a silent no-op rather than a cross-rep write.
+  const scope = scopeForUser(req.user);
+  const update = scope.isRep
+    ? db.prepare('UPDATE visits SET route_order = ? WHERE id = ? AND rep_id = ?')
+    : db.prepare('UPDATE visits SET route_order = ? WHERE id = ?');
+  db.transaction(() => ids.forEach((id, i) =>
+    scope.isRep ? update.run(i + 1, id, req.user.id) : update.run(i + 1, id)
+  ))();
   res.json({ ok: true });
 });
 
-// Nearest-neighbour optimisation over the day's planned stops. Starts from the
-// rep's last known location if we have one, otherwise the first stop.
+// Where a rep's day begins, for anchoring the route optimiser and the map.
+// Priority: today's earliest GPS ping (the rep opening the app for the day,
+// usually at home before their first stop) > their saved home/office address
+// > their most recent GPS ping ever (stale, but better than nothing) > null
+// (falls back to the first planned stop).
+function dayStart(repId, date) {
+  const todaysEarliest = db.prepare(`
+    SELECT lat, lng, recorded_at FROM rep_locations
+    WHERE user_id = ? AND date(recorded_at) = date(?)
+    ORDER BY recorded_at ASC LIMIT 1
+  `).get(repId, date);
+  if (todaysEarliest) return { ...todaysEarliest, source: 'gps_today' };
+
+  const home = db.prepare('SELECT home_lat AS lat, home_lng AS lng, home_address FROM users WHERE id = ?').get(repId);
+  if (home?.lat != null && home?.lng != null) return { ...home, source: 'home' };
+
+  const lastKnown = db.prepare(
+    'SELECT lat, lng, recorded_at FROM rep_locations WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1'
+  ).get(repId);
+  if (lastKnown) return { ...lastKnown, source: 'gps_stale' };
+
+  return null;
+}
+
+// The anchor point for a rep's route on a given date — used to draw the
+// "start here" pin on the Routes map and to seed the optimiser below.
+router.get('/routes/start', (req, res) => {
+  const scope = scopeForUser(req.user);
+  const repId = scope.isRep ? req.user.id : req.query.rep_id;
+  const date = req.query.date || getTodayISO();
+  if (!repId) return res.status(400).json({ error: 'rep_id is required' });
+  res.json(dayStart(repId, date) || { lat: null, lng: null, source: 'none' });
+});
+
+// Nearest-neighbour optimisation over the day's planned stops. Starts from
+// the rep's day-start anchor (see dayStart above), otherwise the first stop.
 router.post('/routes/optimize', (req, res) => {
   const b = req.body || {};
   const scope = scopeForUser(req.user);
   const repId = scope.isRep ? req.user.id : b.rep_id;
-  const date = b.date || new Date().toISOString().slice(0, 10);
+  const date = b.date || getTodayISO();
+  if (!repId) return res.status(400).json({ error: 'rep_id is required' });
   const stops = db.prepare(`
     SELECT v.id, c.lat, c.lng FROM visits v JOIN customers c ON c.id = v.customer_id
     WHERE v.rep_id = ? AND date(v.planned_date) = date(?) AND v.status = 'planned'
   `).all(repId, date);
   if (stops.length < 2) return res.json({ ok: true, order: stops.map((s) => s.id) });
 
-  const start = db.prepare(
-    'SELECT lat, lng FROM rep_locations WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1'
-  ).get(repId);
+  const start = dayStart(repId, date);
 
   const remaining = [...stops];
   const ordered = [];
@@ -96,7 +148,7 @@ router.post('/routes/optimize', (req, res) => {
 
   const update = db.prepare('UPDATE visits SET route_order = ? WHERE id = ?');
   db.transaction(() => ordered.forEach((s, i) => update.run(i + 1, s.id)))();
-  logActivity(req.user.id, 'route_optimize', 'visit', null, { rep_id: repId, date, stops: ordered.length });
+  logActivity(req.user.id, 'route_optimize', 'visit', null, { rep_id: repId, date, stops: ordered.length, start_source: start?.source || 'first_stop' });
   res.json({ ok: true, order: ordered.map((s) => s.id) });
 });
 
@@ -134,8 +186,13 @@ router.get('/coverage', (req, res) => {
 
 router.post('/locations', (req, res) => {
   const { lat, lng } = req.body || {};
-  if (lat == null || lng == null) return res.status(400).json({ error: 'lat and lng are required' });
-  db.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(req.user.id, lat, lng);
+  const latitude = Number(lat);
+  const longitude = Number(lng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+      Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+    return res.status(400).json({ error: 'Valid lat and lng are required' });
+  }
+  db.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(req.user.id, latitude, longitude);
   // Keep only the last 50 pings per rep.
   db.prepare(`
     DELETE FROM rep_locations WHERE user_id = ? AND id NOT IN
@@ -157,15 +214,16 @@ router.get('/locations/latest', requireRole('admin', 'manager', 'office'), (req,
 // --- Rep KPIs -------------------------------------------------------------------
 
 // Month KPIs per rep: sales vs target, activity, compliance, strike rate.
-router.get('/kpis', requireRole('admin', 'manager', 'office'), (req, res) => {
-  const month = req.query.month || new Date().toISOString().slice(0, 7); // YYYY-MM
+router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), (req, res) => {
+  const scope = scopeForUser(req.user);
+  const month = req.query.month || getTodayISO().slice(0, 7); // YYYY-MM
+  const monthNum = Number(month.slice(5, 7));
   const start = `${month}-01`;
   const reps = db.prepare(`
-    SELECT u.id, u.name, u.sales_target, t.name AS territory_name
+    SELECT u.id, u.name, u.sales_target
     FROM users u JOIN roles r ON r.id = u.role_id
-    LEFT JOIN territories t ON t.id = u.territory_id
-    WHERE r.name = 'rep' AND u.active = 1
-  `).all();
+    WHERE r.name = 'rep' AND u.active = 1 ${scope.isRep ? 'AND u.id = ?' : ''}
+  `).all(...(scope.isRep ? [req.user.id] : []));
 
   const kpis = reps.map((rep) => {
     const sales = db.prepare(`
@@ -193,13 +251,15 @@ router.get('/kpis', requireRole('admin', 'manager', 'office'), (req, res) => {
       FROM quotes WHERE rep_id = ? AND strftime('%Y-%m', quote_date) = ?
     `).get(rep.id, month);
 
+    // Target rolls automatically with the selected month: a rep_budgets figure
+    // for that month if set, otherwise the flat sales_target fallback.
+    const target = repMonthTarget(rep.id, monthNum);
     return {
       rep_id: rep.id,
       name: rep.name,
-      territory: rep.territory_name,
       sales: sales.total,
-      target: rep.sales_target,
-      target_pct: rep.sales_target ? Math.round((sales.total / rep.sales_target) * 100) : null,
+      target,
+      target_pct: target ? Math.round((sales.total / target) * 100) : null,
       orders: sales.orders,
       avg_order_value: sales.aov,
       visits_completed: visits.completed,

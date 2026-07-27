@@ -1,16 +1,22 @@
 // Loads demo data for a bakery-ingredient distributor. Safe to re-run: wipes and reloads.
 import bcrypt from 'bcryptjs';
-import { db, setSetting } from './db.js';
+import { db, setSetting, getTodayISO } from './db.js';
 
+if (process.env.NODE_ENV === 'production') {
+  throw new Error('Demo seeding is disabled when NODE_ENV=production.');
+}
+
+db.pragma('foreign_keys = OFF');
 const wipe = db.transaction(() => {
   for (const t of ['rep_locations', 'form_submissions', 'form_templates', 'visit_photos', 'quote_items', 'quotes', 'price_rules',
-    'order_items', 'orders', 'visits', 'customer_prices', 'customer_contacts',
-    'customers', 'products', 'product_categories', 'users', 'territories', 'roles', 'activity_log']) {
+    'invoices', 'order_items', 'orders', 'visits', 'customer_prices', 'customer_contacts',
+    'customers', 'warehouses', 'products', 'product_categories', 'users', 'territories', 'roles', 'activity_log']) {
     db.prepare(`DELETE FROM ${t}`).run();
     db.prepare(`DELETE FROM sqlite_sequence WHERE name = ?`).run(t);
   }
 });
 wipe();
+db.pragma('foreign_keys = ON');
 setSetting('counter_ORD', '0');
 setSetting('counter_CUS', '0');
 
@@ -32,9 +38,8 @@ const addUser = (name, email, role, territory = null, target = 0) =>
 
 addUser('Sarah Admin', 'admin@demo.co.za', 'admin');
 const managerId = addUser('Pieter Manager', 'manager@demo.co.za', 'manager');
-addUser('Lindiwe Office', 'office@demo.co.za', 'office');
-const rep1 = addUser('Thabo Rep', 'rep@demo.co.za', 'rep', terr['Cape Town North'], 250000);
-const rep2 = addUser('Anika Rep', 'rep2@demo.co.za', 'rep', terr['Cape Town South'], 220000);
+const rep1 = addUser('Lizl Rep', 'rep@demo.co.za', 'rep', terr['Cape Town North'], 250000);
+const rep2 = addUser('Sergio Rep', 'rep2@demo.co.za', 'rep', terr['Cape Town South'], 220000);
 
 // Products ------------------------------------------------------------------
 const cats = {};
@@ -69,6 +74,12 @@ for (const [code, name, cat, uom, pack, price, cost, stock] of PRODUCTS) {
   `).run(code, name, cats[cat], uom, pack, price, cost, stock).lastInsertRowid);
 }
 
+// Warehouses ------------------------------------------------------------------
+const wh = {};
+for (const [code, name] of [['FG', 'Cape Town — Finished Goods'], ['JHB', 'Johannesburg Distribution Centre'], ['DBN', 'Durban Depot']]) {
+  wh[code] = db.prepare('INSERT INTO warehouses (code, name) VALUES (?, ?)').run(code, name).lastInsertRowid;
+}
+
 // Customers -----------------------------------------------------------------
 const CUSTOMERS = [
   ['Golden Crust Bakery', 'A', 'Cape Town North', rep1, 'Maria Santos', 'Milnerton', -33.877, 18.497, 'weekly'],
@@ -91,11 +102,11 @@ for (const [name, cls, t, rep, contact, city, lat, lng, freq] of CUSTOMERS) {
   const code = `CUS-${String(cusN).padStart(5, '0')}`;
   const id = db.prepare(`
     INSERT INTO customers (code, name, classification, territory_id, rep_id, contact_name, phone, email,
-      address, city, lat, lng, credit_limit, payment_terms, visit_frequency)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      address, city, lat, lng, credit_limit, payment_terms, visit_frequency, warehouse_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(code, name, cls, terr[t], rep, contact, `+27 82 ${String(1000000 + cusN * 13579).slice(0, 7)}`,
     `orders@${name.toLowerCase().replace(/[^a-z]/g, '')}.co.za`, `${cusN * 7} Main Road`, city, lat, lng,
-    cls === 'A' ? 150000 : cls === 'B' ? 75000 : 25000, '30 days', freq).lastInsertRowid;
+    cls === 'A' ? 150000 : cls === 'B' ? 75000 : 25000, '30 days', freq, wh.FG).lastInsertRowid;
   custIds.push(id);
   db.prepare('INSERT INTO customer_contacts (customer_id, name, role, phone) VALUES (?, ?, ?, ?)')
     .run(id, contact, 'Owner', `+27 82 ${String(1000000 + cusN * 13579).slice(0, 7)}`);
@@ -158,8 +169,8 @@ const custRep = (i) => CUSTOMERS[i][3];
 let ordN = 0;
 
 const insertOrder = db.prepare(`
-  INSERT INTO orders (number, customer_id, rep_id, visit_id, status, order_date, subtotal, vat_amount, total, notes)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO orders (number, customer_id, rep_id, visit_id, warehouse_id, status, order_date, subtotal, vat_amount, total, notes)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const insertItem = db.prepare(`
   INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total)
@@ -203,7 +214,7 @@ for (let day = 60; day >= 0; day--) {
     // Build an order of 2-5 lines.
     ordN += 1;
     const orderId = insertOrder.run(
-      `ORD-${String(ordN).padStart(5, '0')}`, custId, repId, visitId,
+      `ORD-${String(ordN).padStart(5, '0')}`, custId, repId, visitId, wh.FG,
       day < 2 ? 'submitted' : day < 7 ? 'processing' : 'invoiced',
       checkOut, 0, 0, 0, null
     ).lastInsertRowid;
@@ -270,17 +281,46 @@ for (const repId of [rep1, rep2]) {
   todays.forEach((v, i) =>
     db.prepare('UPDATE visits SET route_order = ? WHERE id = ?').run(i + 1, v.id));
 }
-// Last known positions: Thabo near Milnerton, Anika near Claremont.
+// Last known positions: Lizl near Milnerton, Sergio near Claremont.
 db.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(rep1, -33.885, 18.51);
 db.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(rep2, -33.975, 18.47);
 
+// Demo invoices from "SYSPRO" (Phase 5): 2-4 per customer within the last 30
+// days, mixed paid/outstanding/overdue. Stands in for the invoice sync feed.
+const insertInvoice = db.prepare(`
+  INSERT INTO invoices (number, customer_id, customer_code, order_number, invoice_date, due_date,
+    subtotal, vat_amount, total, amount_paid, balance, status)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const todayStr = getTodayISO();
+let invN = 90000;
+for (const custId of custIds) {
+  const cust = db.prepare('SELECT code FROM customers WHERE id = ?').get(custId);
+  const n = 2 + rand(3);
+  for (let i = 0; i < n; i++) {
+    invN += 1;
+    const daysAgo = 1 + rand(29);
+    const termDays = [7, 14, 30][rand(3)];
+    const invoiceDate = new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
+    const dueDate = new Date(Date.now() - (daysAgo - termDays) * 86400000).toISOString().slice(0, 10);
+    const subtotal = Math.round((1500 + rand(14000)) * 100) / 100;
+    const vat = Math.round(subtotal * 0.15 * 100) / 100;
+    const total = Math.round((subtotal + vat) * 100) / 100;
+    const roll = Math.random();
+    const amountPaid = roll < 0.45 ? total : roll < 0.6 ? Math.round(total * 0.5 * 100) / 100 : 0;
+    const balance = Math.round((total - amountPaid) * 100) / 100;
+    const status = balance <= 0.005 ? 'paid' : dueDate < todayStr ? 'overdue' : 'outstanding';
+    insertInvoice.run(`INV-${invN}`, custId, cust.code, `SO-${44000 + rand(900)}`,
+      invoiceDate, dueDate, subtotal, vat, total, amountPaid, balance, status);
+  }
+}
+
 console.log('Seeded demo data:');
 console.log(`  ${CUSTOMERS.length} customers, ${PRODUCTS.length} products, ${ordN} orders, ${quoN} quotes`);
-console.log('  4 price rules, 3 form templates');
+console.log(`  ${invN - 90000} invoices, 4 price rules, 3 form templates`);
 console.log('  Logins (password demo123):');
 console.log('    admin@demo.co.za    - Admin');
 console.log('    manager@demo.co.za  - Sales Manager');
-console.log('    office@demo.co.za   - Internal Sales');
-console.log('    rep@demo.co.za      - Field Rep (mobile app)');
-console.log('    rep2@demo.co.za     - Field Rep (mobile app)');
+console.log('    rep@demo.co.za      - Field Rep (Lizl)');
+console.log('    rep2@demo.co.za     - Field Rep (Sergio)');
 console.log('    customer@demo.co.za - Customer portal (Golden Crust Bakery)');

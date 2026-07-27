@@ -4,7 +4,7 @@
 // Default matching is "same week": a planned customer counts as visited if the
 // rep checked in to them any day in that calendar week (Mon–Sun).
 import { Router } from 'express';
-import { db, logActivity } from '../db.js';
+import { db, logActivity, repMonthTarget, getTodayISO } from '../db.js';
 import { requireRole, scopeForUser } from '../auth.js';
 
 const router = Router();
@@ -195,12 +195,16 @@ router.get('/route-compliance', requireRole('admin', 'manager', 'office'), (req,
 router.get('/reps/:id/summary', requireRole('admin', 'manager', 'office'), (req, res) => {
   const id = req.params.id;
   const rep = db.prepare(`
-    SELECT u.id, u.name, u.email, u.phone, u.sales_target, u.active, t.name AS territory_name
-    FROM users u LEFT JOIN territories t ON t.id = u.territory_id WHERE u.id = ?
+    SELECT u.id, u.name, u.email, u.phone, u.rep_code, u.sales_target, u.active
+    FROM users u WHERE u.id = ?
   `).get(id);
   if (!rep) return res.status(404).json({ error: 'Rep not found' });
 
-  const month = new Date().toISOString().slice(0, 7);
+  const today = getTodayISO();
+  const month = today.slice(0, 7);
+  // Sales (MTD) is a "this month" stat, so its target should be this month's
+  // budget - rolls automatically as the calendar moves into a new month.
+  rep.sales_target = repMonthTarget(rep.id, Number(month.slice(5, 7)));
   rep.sales = db.prepare(`
     SELECT COALESCE(SUM(total), 0) AS mtd, COUNT(*) AS orders
     FROM orders WHERE rep_id = ? AND status != 'cancelled' AND strftime('%Y-%m', order_date) = ?
@@ -226,14 +230,17 @@ router.get('/reps/:id/summary', requireRole('admin', 'manager', 'office'), (req,
 
 // List all reps (for the team screen).
 router.get('/reps', requireRole('admin', 'manager', 'office'), (req, res) => {
-  res.json(db.prepare(`
-    SELECT u.id, u.name, u.email, u.sales_target, u.active, t.name AS territory_name,
+  const rows = db.prepare(`
+    SELECT u.id, u.name, u.email, u.rep_code, u.sales_target, u.active,
       (SELECT COUNT(*) FROM customers c WHERE c.rep_id = u.id AND c.status = 'active') AS customers_assigned,
       (SELECT COUNT(*) FROM route_cycles rc WHERE rc.rep_id = u.id AND rc.active = 1) AS has_cycle
     FROM users u JOIN roles r ON r.id = u.role_id
-    LEFT JOIN territories t ON t.id = u.territory_id
     WHERE r.name = 'rep' ORDER BY u.name
-  `).all());
+  `).all();
+  // Show this month's target (rep_budgets if set, else the flat fallback).
+  const thisMonth = new Date().getMonth() + 1;
+  for (const r of rows) r.sales_target = repMonthTarget(r.id, thisMonth);
+  res.json(rows);
 });
 
 export default router;

@@ -1,10 +1,11 @@
 // Phase 4: SYSPRO sync + email admin endpoints.
 import { Router } from 'express';
 import { db, getSetting, setSetting, logActivity } from '../db.js';
-import { requireRole } from '../auth.js';
-import { getProvider } from '../integration/providers.js';
-import { runSync, SYNC_ENTITIES } from '../integration/sync.js';
-import { buildOrderEmail, buildOrderConfirmationEmail, buildQuoteEmail, sendEmail, attemptSend } from '../integration/email.js';
+import { requireRole, scopeForUser } from '../auth.js';
+import { getProvider, testSyspro } from '../integration/providers.js';
+import { runSync, SYNC_ENTITIES, matchRep } from '../integration/sync.js';
+import { buildOrderEmail, buildOrderConfirmationEmail, buildQuoteEmail, sendEmail, attemptSend, sendTestEmail } from '../integration/email.js';
+import { sendAllRepDigests } from '../integration/repDigest.js';
 import { encryptSecret } from '../crypto.js';
 
 const router = Router();
@@ -13,23 +14,37 @@ const router = Router();
 // returns whether one is set, never the value.
 const SETTING_KEYS = [
   'intg_source', 'syspro_host', 'syspro_port', 'syspro_db', 'syspro_user',
-  'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_prices',
-  'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_user', 'smtp_from',
-  'orders_email', 'email_auto_send', 'email_confirm_customer',
+  'syspro_encrypt', 'syspro_trust_server_certificate',
+  'syspro_view_warehouses', 'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_customer_pricing', 'syspro_view_invoices',
+   'email_transport', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_allow_invalid_cert', 'smtp_user', 'smtp_from',
+  'graph_tenant_id', 'graph_client_id', 'graph_sender',
+  'orders_email', 'technical_email', 'email_auto_send', 'email_confirm_customer',
   'sync_schedule', 'sync_daily_time',
+  'warehouses_sync_schedule', 'warehouses_sync_daily_time',
+  'customers_sync_schedule', 'customers_sync_daily_time',
+  'products_sync_schedule', 'products_sync_daily_time',
+  'stock_sync_schedule', 'stock_sync_daily_time',
+  'customer_pricing_sync_schedule', 'customer_pricing_sync_daily_time',
+  'invoices_sync_schedule', 'invoices_sync_daily_time',
+  'rep_sync_schedule', 'rep_sync_daily_time',
+  'rep_digest_enabled', 'rep_digest_time',
   // Company letterhead (email header/footer + PDF documents)
   'company_name', 'company_reg', 'company_vat', 'company_address',
   'company_phone', 'company_email', 'company_website', 'company_logo'
 ];
-const SECRET_KEYS = ['syspro_password', 'smtp_password'];
+const SECRET_KEYS = ['syspro_password', 'smtp_password', 'graph_client_secret'];
 
 router.get('/integration/settings', requireRole('admin'), (req, res) => {
   const out = {};
   for (const k of SETTING_KEYS) out[k] = getSetting(k, '');
   for (const k of SECRET_KEYS) out[`${k}_set`] = getSetting(k, '') ? 1 : 0;
-  // Read-only status of the automatic scheduler.
+  // Read-only status of the automatic schedulers.
   out.last_auto_sync_at = getSetting('last_auto_sync_at', '');
   out.last_auto_sync_result = getSetting('last_auto_sync_result', '');
+  out.last_rep_sync_at = getSetting('last_rep_sync_at', '');
+  out.last_rep_sync_result = getSetting('last_rep_sync_result', '');
+  out.last_rep_digest_at = getSetting('last_rep_digest_at', '');
+  out.last_rep_digest_result = getSetting('last_rep_digest_result', '');
   res.json(out);
 });
 
@@ -47,9 +62,28 @@ router.put('/integration/settings', requireRole('admin'), (req, res) => {
 });
 
 router.post('/integration/test-connection', requireRole('admin'), async (req, res) => {
+  const b = req.body || {};
+  // If the form's data source is set to SYSPRO, test against whatever is
+  // currently typed (even if unsaved) - not just the last-saved settings.
+  const source = b.intg_source || getSetting('intg_source', 'demo');
   try {
-    await getProvider().test();
-    res.json({ ok: true, source: getSetting('intg_source', 'demo') });
+    if (source === 'syspro') await testSyspro(b);
+    else await getProvider().test();
+    res.json({ ok: true, source });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Proves the configured outgoing-mail transport (SMTP or Microsoft 365 Graph)
+// actually works, without needing a real order/quote/form first.
+router.post('/integration/test-email', requireRole('admin'), async (req, res) => {
+  const to = (req.body?.to || '').trim();
+  if (!to) return res.status(400).json({ error: 'Recipient email is required' });
+  try {
+    const result = await sendTestEmail(to);
+    if (result.status !== 'sent') return res.status(400).json({ error: result.error || `Email is ${result.status}`, result });
+    res.json({ ok: true, result });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -69,8 +103,46 @@ router.post('/integration/sync/:entity', requireRole('admin', 'manager', 'office
   }
 });
 
+// Bulk re-match: pulls the live SYSPRO view again and assigns a rep to any
+// customer that currently has none, using branch + rep_code. Never touches a
+// customer that already has a rep - that stays app-managed once set, whether
+// it was assigned by a prior match run or manually in the app.
+router.post('/integration/match-reps', requireRole('admin'), async (req, res) => {
+  try {
+    const rows = await getProvider().fetch('customers');
+    let matched = 0, alreadyAssigned = 0, noMatch = 0, notFound = 0;
+    for (const row of rows) {
+      const customer = db.prepare('SELECT id, rep_id FROM customers WHERE code = ?').get(row.code);
+      if (!customer) { notFound++; continue; }
+      if (customer.rep_id) { alreadyAssigned++; continue; }
+      const repId = matchRep(row.warehouse_code, row.rep_code);
+      if (repId) {
+        db.prepare('UPDATE customers SET rep_id = ? WHERE id = ?').run(repId, customer.id);
+        matched++;
+      } else {
+        noMatch++;
+      }
+    }
+    logActivity(req.user.id, 'match_reps', 'customers', null, { matched, alreadyAssigned, noMatch, notFound });
+    res.json({ ok: true, matched, alreadyAssigned, noMatch, notFound, total: rows.length });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 router.get('/integration/sync-runs', requireRole('admin', 'manager', 'office'), (req, res) => {
   res.json(db.prepare('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 50').all());
+});
+
+// Manual "send now" for the daily rep digest - lets an admin test it without
+// waiting for the scheduled time.
+router.post('/integration/rep-digest/run-now', requireRole('admin', 'manager'), async (req, res) => {
+  try {
+    const results = await sendAllRepDigests('manual');
+    res.json({ results });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // --- Email log ---------------------------------------------------------------
@@ -93,8 +165,16 @@ router.post('/integration/emails/:id/resend', requireRole('admin', 'manager', 'o
 });
 
 // --- Send order / quote emails on demand --------------------------------------
+// Office roles can email any document; a rep only their own.
+
+function canEmailDoc(user, table, id) {
+  if (!scopeForUser(user).isRep) return true;
+  const doc = db.prepare(`SELECT rep_id FROM ${table} WHERE id = ?`).get(id);
+  return !!doc && doc.rep_id === user.id;
+}
 
 router.post('/orders/:id/email', async (req, res) => {
+  if (!canEmailDoc(req.user, 'orders', req.params.id)) return res.status(403).json({ error: 'Not your order' });
   try {
     const result = await sendEmail(buildOrderEmail(req.params.id));
     logActivity(req.user.id, 'email', 'order', req.params.id, { status: result.status });
@@ -105,6 +185,7 @@ router.post('/orders/:id/email', async (req, res) => {
 });
 
 router.post('/orders/:id/email-customer', async (req, res) => {
+  if (!canEmailDoc(req.user, 'orders', req.params.id)) return res.status(403).json({ error: 'Not your order' });
   try {
     const result = await sendEmail(buildOrderConfirmationEmail(req.params.id));
     logActivity(req.user.id, 'email', 'order', req.params.id, { status: result.status, to: 'customer' });
@@ -115,6 +196,7 @@ router.post('/orders/:id/email-customer', async (req, res) => {
 });
 
 router.post('/quotes/:id/email', async (req, res) => {
+  if (!canEmailDoc(req.user, 'quotes', req.params.id)) return res.status(403).json({ error: 'Not your quote' });
   try {
     const result = await sendEmail(buildQuoteEmail(req.params.id));
     logActivity(req.user.id, 'email', 'quote', req.params.id, { status: result.status });

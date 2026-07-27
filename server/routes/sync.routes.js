@@ -13,10 +13,9 @@ router.get('/sync/snapshot', (req, res) => {
   const repParams = scope.isRep ? [req.user.id] : [];
 
   const customers = db.prepare(`
-    SELECT c.*, t.name AS territory_name,
+    SELECT c.*,
       (SELECT MAX(order_date) FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled') AS last_order_at
     FROM customers c
-    LEFT JOIN territories t ON t.id = c.territory_id
     ${repFilter} ORDER BY c.name
   `).all(...repParams);
 

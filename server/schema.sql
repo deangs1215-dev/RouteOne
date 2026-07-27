@@ -24,7 +24,24 @@ CREATE TABLE IF NOT EXISTS users (
   role_id INTEGER NOT NULL REFERENCES roles(id),
   territory_id INTEGER REFERENCES territories(id),
   customer_id INTEGER REFERENCES customers(id),   -- for customer-portal logins
+  rep_code TEXT,                          -- rep's own code, e.g. matches SYSPRO/call-cycle sheets
+  warehouse_id INTEGER REFERENCES warehouses(id),  -- rep's home branch/depot
   sales_target REAL DEFAULT 0,
+  active INTEGER DEFAULT 1,
+  must_change_password INTEGER NOT NULL DEFAULT 1,
+  reset_token_hash TEXT,
+  reset_token_expires TEXT,
+  home_address TEXT,                      -- where the rep starts their day (home/office)
+  home_lat REAL,
+  home_lng REAL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- SYSPRO warehouses/depots. Synced read-only; each customer is fixed to one.
+CREATE TABLE IF NOT EXISTS warehouses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
   active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -36,6 +53,7 @@ CREATE TABLE IF NOT EXISTS customers (
   classification TEXT DEFAULT 'B',        -- A/B/C account grading
   territory_id INTEGER REFERENCES territories(id),
   rep_id INTEGER REFERENCES users(id),
+  warehouse_id INTEGER REFERENCES warehouses(id),  -- fixed fulfilling depot, set by SYSPRO sync
   contact_name TEXT,
   phone TEXT,
   email TEXT,
@@ -49,6 +67,15 @@ CREATE TABLE IF NOT EXISTS customers (
   visit_frequency TEXT DEFAULT 'weekly',  -- weekly / biweekly / monthly
   status TEXT DEFAULT 'active',           -- active / on_hold / closed
   notes TEXT,
+  onsite_name TEXT,                       -- actual location name if different from SYSPRO
+  onsite_phone TEXT,                      -- onsite contact number (override SYSPRO phone)
+  onsite_address TEXT,                    -- actual delivery address if different
+  onsite_lat REAL,                        -- actual location pin (if different from SYSPRO)
+  onsite_lng REAL,
+  onsite_contact TEXT,                    -- contact person(s), free text (may list several)
+  onsite_cell TEXT,                       -- onsite cell number
+  onsite_pricelist TEXT,                  -- which price list they're on
+  onsite_vat TEXT,                        -- VAT number
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -74,11 +101,21 @@ CREATE TABLE IF NOT EXISTS products (
   description TEXT,
   uom TEXT DEFAULT 'each',
   pack_size TEXT,
+  pack_weight_kg REAL,             -- parsed from pack_size; list_price is per-kg, this converts to per-unit
   list_price REAL NOT NULL DEFAULT 0,
   cost_price REAL DEFAULT 0,
   stock_qty REAL DEFAULT 0,
   active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Per-branch stock availability, synced from SYSPRO (vw_FS_Stock). products.stock_qty
+-- stays as the SUM across warehouses for existing code that just needs a total.
+CREATE TABLE IF NOT EXISTS product_stock (
+  product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+  qty_available REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (product_id, warehouse_id)
 );
 
 -- Customer-specific contract pricing overrides the list price.
@@ -87,6 +124,25 @@ CREATE TABLE IF NOT EXISTS customer_prices (
   product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   price REAL NOT NULL,
   PRIMARY KEY (customer_id, product_id)
+);
+
+-- SYSPRO customer pricing overrides (contract, buying group, price code). List
+-- price isn't stored here - it's already per-product on products.list_price
+-- (synced from vw_FS_Products), so no need to duplicate it per customer.
+-- Synced from vw_FS_CustomerPricing_ContractBuyingGroup - one row per
+-- (customer, product) that has at least one override, never a full cross join.
+CREATE TABLE IF NOT EXISTS syspro_customer_pricing (
+  customer_code TEXT NOT NULL,
+  product_code TEXT NOT NULL,
+  contract_price REAL,
+  buying_group_price REAL,
+  price_code_price REAL,
+  contract_start_date TEXT,
+  contract_end_date TEXT,
+  buying_group_start_date TEXT,
+  buying_group_end_date TEXT,
+  synced_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (customer_code, product_code)
 );
 
 CREATE TABLE IF NOT EXISTS visits (
@@ -101,6 +157,8 @@ CREATE TABLE IF NOT EXISTS visits (
   check_in_lat REAL,
   check_in_lng REAL,
   check_in_distance_m REAL,               -- how far from the customer's pin at check-in
+  check_in_type TEXT DEFAULT 'onsite',    -- onsite / onsite_manual / offsite
+  check_in_address TEXT,                  -- rep-entered address for onsite_manual / offsite
   check_out_at TEXT,
   check_out_lat REAL,
   check_out_lng REAL,
@@ -125,6 +183,7 @@ CREATE TABLE IF NOT EXISTS orders (
   customer_id INTEGER NOT NULL REFERENCES customers(id),
   rep_id INTEGER REFERENCES users(id),
   visit_id INTEGER REFERENCES visits(id),
+  warehouse_id INTEGER REFERENCES warehouses(id),  -- snapshot of the customer's warehouse at order time
   status TEXT DEFAULT 'submitted',        -- draft / submitted / processing / invoiced / cancelled
   order_date TEXT DEFAULT (datetime('now')),
   subtotal REAL DEFAULT 0,
@@ -132,6 +191,7 @@ CREATE TABLE IF NOT EXISTS orders (
   total REAL DEFAULT 0,
   notes TEXT,
   delivery_instructions TEXT,
+  signature TEXT,                         -- customer signature captured on-site (base64 PNG), required before submit
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -195,13 +255,27 @@ CREATE TABLE IF NOT EXISTS quote_items (
 );
 
 -- Custom field-capture forms. fields is a JSON array:
--- [{ key, label, type: text|number|select|checkbox|photo, options?, required }]
+-- [{ key, label, type: heading|text|email|number|date|select|checkbox|photo|signature|product, options?, required }]
 CREATE TABLE IF NOT EXISTS form_templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   description TEXT,
   fields TEXT NOT NULL DEFAULT '[]',
+  category TEXT DEFAULT 'general',    -- 'general' / 'technical' — technical submissions email technical_email
+  notify_email TEXT,                  -- optional: email address this form's submissions are sent to
   active INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Marketing documents (PDFs) uploaded by admin/manager for reps to browse from
+-- the shared main menu. Read access is open to any logged-in non-customer
+-- user; uploading/deleting is admin/manager only (see requireRole in routes).
+CREATE TABLE IF NOT EXISTS documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  description TEXT,
+  file_path TEXT NOT NULL,
+  uploaded_by INTEGER REFERENCES users(id),
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -218,10 +292,31 @@ CREATE TABLE IF NOT EXISTS form_submissions (
 CREATE TABLE IF NOT EXISTS visit_photos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   visit_id INTEGER NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
-  path TEXT NOT NULL,
+  path TEXT NOT NULL,        -- file path under /uploads (compressed JPEG)
   caption TEXT,
   created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Customer invoices. Read-only mirror of SYSPRO's AR invoices (system of record
+-- for billing). Synced in from the ERP; never edited in the app. Keyed on the
+-- SYSPRO invoice number, linked to a customer by account code.
+CREATE TABLE IF NOT EXISTS invoices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  number TEXT UNIQUE NOT NULL,            -- SYSPRO invoice number
+  customer_id INTEGER REFERENCES customers(id),
+  customer_code TEXT NOT NULL,            -- kept even if the customer isn't matched yet
+  order_number TEXT,                      -- SYSPRO sales order reference, if any
+  invoice_date TEXT NOT NULL,             -- YYYY-MM-DD
+  due_date TEXT,
+  subtotal REAL DEFAULT 0,
+  vat_amount REAL DEFAULT 0,
+  total REAL DEFAULT 0,
+  amount_paid REAL DEFAULT 0,
+  balance REAL DEFAULT 0,                 -- outstanding = total - amount_paid
+  status TEXT DEFAULT 'outstanding',      -- paid / outstanding / overdue
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id, invoice_date);
 
 -- Phase 4: SYSPRO sync + email integration ------------------------------------
 
@@ -236,6 +331,15 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   error TEXT,
   started_at TEXT DEFAULT (datetime('now')),
   finished_at TEXT
+);
+
+-- Configured email recipients for order/quote distribution (admin setup).
+CREATE TABLE IF NOT EXISTS email_recipients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,                      -- e.g., "Finance", "Management", "Accounts"
+  email TEXT NOT NULL UNIQUE,
+  description TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 
 -- Outbound emails (orders to the orders department, quotes to customers).
@@ -285,6 +389,33 @@ CREATE TABLE IF NOT EXISTS route_cycle_stops (
   customer_id INTEGER REFERENCES customers(id),
   customer_code TEXT,                  -- kept even if unmatched, for reference
   seq INTEGER
+);
+
+-- Rep-captured field intel on a customer — the soft knowledge SYSPRO doesn't
+-- hold (who they buy from now, who signs off orders, access quirks, rapport).
+-- Kept in its own table so the SYSPRO customer sync never overwrites it. 1:1
+-- with a customer.
+CREATE TABLE IF NOT EXISTS customer_intel (
+  customer_id INTEGER PRIMARY KEY REFERENCES customers(id) ON DELETE CASCADE,
+  current_supplier TEXT,        -- who they currently buy from (competitor)
+  decision_maker TEXT,          -- who signs off purchases (name / role)
+  best_visit_time TEXT,         -- when to catch them
+  delivery_notes TEXT,          -- access / delivery quirks (gate code, back entrance…)
+  products_of_interest TEXT,    -- what they've shown interest in / to pitch
+  competitor_notes TEXT,        -- rival activity seen on-site
+  general_notes TEXT,           -- free-form rapport / misc
+  updated_by INTEGER REFERENCES users(id),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Monthly sales budgets per rep (Jan-Dec).
+CREATE TABLE IF NOT EXISTS rep_budgets (
+  rep_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),  -- 1=Jan, 12=Dec
+  budget REAL NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (rep_id, month)
 );
 
 -- Tasks (Phase 5): Rep task management. Linked to customers, assigned to reps.
