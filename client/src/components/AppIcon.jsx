@@ -17,6 +17,7 @@ const GRAD = {
   analytics:   ['#f76db4', '#d63e8c'],
   ai:          ['#9b6cf6', '#6d28d9'],
   forms:       ['#6f90ba', '#47688f'],
+  documents:   ['#e8a23c', '#c97f1a'],
   integration: ['#2fd3ca', '#1a9e97'],
   users:       ['#7c8aa0', '#3f4d63'],
   today:       ['#f79a3c', '#e5701f'],
@@ -114,6 +115,13 @@ function Glyph({ name }) {
           <rect x="14" y="14" width="20" height="22" rx="3" />
           <rect x="19" y="11.5" width="10" height="5.5" rx="2.2" fill={DARK} />
           <path d="M18.5 23h11M18.5 28h11M18.5 32h7" stroke={DARK} strokeWidth="1.7" strokeLinecap="round" />
+        </>
+      );
+    case 'documents':
+      return (
+        <>
+          <path d="M12 17.5a3 3 0 0 1 3-3h6l3 3h11a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3H15a3 3 0 0 1-3-3z" />
+          <path d="M12 17.5h24" stroke={DARK} strokeWidth="1.4" />
         </>
       );
     case 'integration':
