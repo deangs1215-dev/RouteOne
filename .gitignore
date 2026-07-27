@@ -7,6 +7,7 @@ dist/
 # Runtime data - NOT committed (regenerate with: npm run seed)
 server/data/
 server/uploads/
+server/backups/
 
 # Logs & temp
 *.log
@@ -22,3 +23,9 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# graphify - local tooling/output, not project code. Regenerate with:
+# /graphify update .
+.claude/skills/
+.claude/settings.json
+graphify-out/
