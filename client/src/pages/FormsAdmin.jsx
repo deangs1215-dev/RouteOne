@@ -5,7 +5,7 @@ import { api, fmtDateTime } from '../api';
 import { Card, Table, Modal, Field, Spinner, ErrorNote, Badge } from '../components/ui';
 import { useAuth } from '../auth';
 
-const FIELD_TYPES = ['text', 'number', 'select', 'checkbox', 'photo'];
+const FIELD_TYPES = ['heading', 'text', 'email', 'number', 'date', 'select', 'checkbox', 'photo', 'signature', 'product'];
 
 export default function FormsAdmin() {
   const { user } = useAuth();
@@ -30,12 +30,17 @@ export default function FormsAdmin() {
 
       <Card title="Form templates">
         {!templates ? <Spinner /> : (
-          <Table headers={['Name', 'Description', 'Fields', 'Submissions', 'Status']}
+          <Table headers={['Name', 'Category', 'Description', 'Fields', 'Submissions', 'Status']}
             empty={templates.length === 0 && 'No forms yet.'}>
             {templates.map((t) => (
               <tr key={t.id} className={`hover:bg-slate-50 ${canEdit ? 'cursor-pointer' : ''}`}
                 onClick={() => canEdit && setEditing(t)}>
                 <td className="td font-medium">{t.name}</td>
+                <td className="td">
+                  <Badge color={t.category === 'technical' ? '#0ea5e9' : '#64748b'}>
+                    {t.category === 'technical' ? 'Technical' : 'General'}
+                  </Badge>
+                </td>
                 <td className="td text-slate-500">{t.description || '—'}</td>
                 <td className="td text-slate-500">{t.fields.map((f) => f.label).join(', ')}</td>
                 <td className="td">{t.submission_count}</td>
@@ -80,6 +85,8 @@ function TemplateModal({ template, onClose, onSaved }) {
   const [name, setName] = useState(template?.name || '');
   const [description, setDescription] = useState(template?.description || '');
   const [active, setActive] = useState(template?.active ?? 1);
+  const [category, setCategory] = useState(template?.category || 'general');
+  const [notifyEmail, setNotifyEmail] = useState(template?.notify_email || '');
   const [fields, setFields] = useState(template?.fields || [{ key: '', label: '', type: 'text', required: false }]);
   const [error, setError] = useState('');
 
@@ -93,9 +100,18 @@ function TemplateModal({ template, onClose, onSaved }) {
       .filter((f) => f.label)
       .map((f) => ({ ...f, key: f.key || slug(f.label), options: f.type === 'select' ? (f.options_raw ?? (f.options || []).join(', ')).split(',').map((o) => o.trim()).filter(Boolean) : undefined }));
     try {
-      const body = { name, description, active: Number(active), fields: cleaned };
+      const body = { name, description, active: Number(active), category, notify_email: notifyEmail.trim(), fields: cleaned };
       if (template) await api.put(`/form-templates/${template.id}`, body);
       else await api.post('/form-templates', body);
+      onSaved();
+    } catch (err) { setError(err.message); }
+  };
+
+  const remove = async () => {
+    setError('');
+    if (!window.confirm(`Delete "${template.name}"? This can't be undone.`)) return;
+    try {
+      await api.del(`/form-templates/${template.id}`);
       onSaved();
     } catch (err) { setError(err.message); }
   };
@@ -111,7 +127,24 @@ function TemplateModal({ template, onClose, onSaved }) {
               <option value="1">Active</option><option value="0">Inactive</option>
             </select>
           </Field>
+          <Field label="Category">
+            <select className="input" value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="general">General</option>
+              <option value="technical">Technical</option>
+            </select>
+          </Field>
           <Field label="Description" span><input className="input" value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
+          <Field label="Send to email address" span>
+            <input type="email" className="input" placeholder="e.g. quality@bakels.co.za"
+              value={notifyEmail} onChange={(e) => setNotifyEmail(e.target.value)} />
+          </Field>
+          <p className="text-xs text-slate-400 sm:col-span-2">
+            {notifyEmail
+              ? `Submissions of this form will be emailed to ${notifyEmail}.`
+              : category === 'technical'
+                ? 'No address set for this form — submissions fall back to the technical address set on Settings → Email → Technical.'
+                : 'No address set — submissions of this form will not be emailed anywhere.'}
+          </p>
         </div>
 
         <div>
@@ -142,9 +175,14 @@ function TemplateModal({ template, onClose, onSaved }) {
             onClick={() => setFields([...fields, { key: '', label: '', type: 'text', required: false }])}>+ Add field</button>
         </div>
 
-        <div className="flex justify-end gap-2">
-          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary">Save form</button>
+        <div className="flex items-center justify-between gap-2">
+          {template
+            ? <button type="button" className="text-xs text-red-500 hover:underline" onClick={remove}>Delete form</button>
+            : <span />}
+          <div className="flex gap-2">
+            <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+            <button className="btn-primary">Save form</button>
+          </div>
         </div>
       </form>
     </Modal>
@@ -155,12 +193,22 @@ function SubmissionModal({ submission, onClose }) {
   return (
     <Modal title={`${submission.template_name} — ${submission.customer_name || 'no customer'}`} onClose={onClose}>
       <div className="space-y-3">
-        {submission.template_fields.map((f) => {
+        {submission.template_fields.map((f, i) => {
+          // Headings are section dividers, not data.
+          if (f.type === 'heading') {
+            return (
+              <div key={f.key || `h${i}`} className="pt-2">
+                <h3 className="text-sm font-bold uppercase tracking-wide text-slate-700">{f.label}</h3>
+                <div className="mt-1 border-b border-slate-200" />
+              </div>
+            );
+          }
           const value = submission.data[f.key];
+          const isImage = f.type === 'photo' || f.type === 'signature';
           return (
             <div key={f.key}>
               <div className="label">{f.label}</div>
-              {f.type === 'photo' && value
+              {isImage && value
                 ? <img src={value} alt={f.label} className="max-h-64 rounded-lg border border-slate-200" />
                 : f.type === 'checkbox'
                   ? <div className="text-sm">{value ? '✓ Yes' : '✗ No'}</div>

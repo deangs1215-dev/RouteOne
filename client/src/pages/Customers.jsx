@@ -1,74 +1,75 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, fmtDate } from '../api';
-import { Card, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge } from '../components/ui';
+import { Card, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge, usePagination, PageSizeSelect, Pagination } from '../components/ui';
+import { useAuth } from '../auth';
 
 export default function Customers() {
+  const { user } = useAuth();
   const [rows, setRows] = useState(null);
   const [q, setQ] = useState('');
-  const [territories, setTerritories] = useState([]);
-  const [territoryId, setTerritoryId] = useState('');
   const [showNew, setShowNew] = useState(false);
+  const { page, setPage, pageSize, setPageSize, totalPages, pageRows } = usePagination(rows);
+  const canEdit = ['admin', 'manager', 'office'].includes(user.role);
 
   const load = () => {
     const params = new URLSearchParams();
     if (q) params.set('q', q);
-    if (territoryId) params.set('territory_id', territoryId);
     api.get(`/customers?${params}`).then(setRows).catch(console.error);
   };
 
-  useEffect(() => { load(); }, [q, territoryId]);
-  useEffect(() => { api.get('/territories').then(setTerritories).catch(() => {}); }, []);
+  useEffect(() => { load(); }, [q]);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-bold">Customers</h1>
-        <button className="btn-primary" onClick={() => setShowNew(true)}>+ New customer</button>
+        {canEdit && <button className="btn-primary" onClick={() => setShowNew(true)}>+ New customer</button>}
       </div>
 
-      <div className="flex flex-wrap gap-3">
-        <input className="input max-w-xs" placeholder="Search name, code or city…" value={q} onChange={(e) => setQ(e.target.value)} />
-        <select className="input max-w-[200px]" value={territoryId} onChange={(e) => setTerritoryId(e.target.value)}>
-          <option value="">All territories</option>
-          {territories.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-        </select>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-3">
+          <input className="input max-w-xs" placeholder="Search name, code or city…" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+        <PageSizeSelect value={pageSize} onChange={setPageSize} />
       </div>
 
       <Card>
         {!rows ? <Spinner /> : (
-          <Table headers={['Code', 'Name', 'Grade', 'City', 'Territory', 'Rep', 'Last order', 'Last visit', 'Status']}
-            empty={rows.length === 0 && 'No customers found.'}>
-            {rows.map((c) => (
-              <tr key={c.id} className="hover:bg-slate-50">
-                <td className="td text-slate-500">{c.code}</td>
-                <td className="td font-medium"><Link className="hover:text-brand-600" to={`/customers/${c.id}`}>{c.name}</Link></td>
-                <td className="td"><GradeBadge grade={c.classification} /></td>
-                <td className="td text-slate-500">{c.city}</td>
-                <td className="td text-slate-500">{c.territory_name || '—'}</td>
-                <td className="td text-slate-500">{c.rep_name || '—'}</td>
-                <td className="td text-slate-500">{fmtDate(c.last_order_at)}</td>
-                <td className="td text-slate-500">{fmtDate(c.last_visit_at)}</td>
-                <td className="td">
-                  <Badge color={c.status === 'active' ? '#16a34a' : c.status === 'on_hold' ? '#f59e0b' : '#64748b'}>
-                    {c.status.replace('_', ' ')}
-                  </Badge>
-                </td>
-              </tr>
-            ))}
-          </Table>
+          <>
+            <Table headers={['Code', 'Name', 'Grade', 'City', 'Rep', 'Last order', 'Last visit', 'Status']}
+              empty={rows.length === 0 && 'No customers found.'} emptyIcon="🔍">
+              {pageRows.map((c) => (
+                <tr key={c.id} className="hover:bg-slate-50">
+                  <td className="td text-slate-500">{c.code}</td>
+                  <td className="td font-medium"><Link className="hover:text-brand-600" to={`/customers/${c.id}`}>{c.name}</Link></td>
+                  <td className="td"><GradeBadge grade={c.classification} /></td>
+                  <td className="td text-slate-500">{c.city}</td>
+                  <td className="td text-slate-500">{c.rep_name || '—'}</td>
+                  <td className="td text-slate-500">{fmtDate(c.last_order_at)}</td>
+                  <td className="td text-slate-500">{fmtDate(c.last_visit_at)}</td>
+                  <td className="td">
+                    <Badge color={c.status === 'active' ? '#16a34a' : c.status === 'on_hold' ? '#f59e0b' : '#64748b'}>
+                      {c.status.replace('_', ' ')}
+                    </Badge>
+                  </td>
+                </tr>
+              ))}
+            </Table>
+            {rows.length > 0 && <Pagination page={page} totalPages={totalPages} onChange={setPage} />}
+          </>
         )}
       </Card>
 
-      {showNew && <CustomerModal territories={territories} onClose={() => setShowNew(false)} onSaved={() => { setShowNew(false); load(); }} />}
+      {showNew && <CustomerModal onClose={() => setShowNew(false)} onSaved={() => { setShowNew(false); load(); }} />}
     </div>
   );
 }
 
-export function CustomerModal({ customer, territories, onClose, onSaved }) {
+export function CustomerModal({ customer, onClose, onSaved }) {
   const [form, setForm] = useState({
     name: customer?.name || '', classification: customer?.classification || 'B',
-    territory_id: customer?.territory_id || '', rep_id: customer?.rep_id || '',
+    rep_id: customer?.rep_id || '',
     contact_name: customer?.contact_name || '', phone: customer?.phone || '', email: customer?.email || '',
     address: customer?.address || '', city: customer?.city || '',
     credit_limit: customer?.credit_limit ?? 0, payment_terms: customer?.payment_terms || '30 days',
@@ -89,7 +90,7 @@ export function CustomerModal({ customer, territories, onClose, onSaved }) {
     setBusy(true);
     setError('');
     try {
-      const body = { ...form, territory_id: form.territory_id || null, rep_id: form.rep_id || null, credit_limit: Number(form.credit_limit) };
+      const body = { ...form, rep_id: form.rep_id || null, credit_limit: Number(form.credit_limit) };
       if (customer) await api.put(`/customers/${customer.id}`, body);
       else await api.post('/customers', body);
       onSaved();
@@ -113,12 +114,6 @@ export function CustomerModal({ customer, territories, onClose, onSaved }) {
           <Field label="Status">
             <select className="input" value={form.status} onChange={set('status')}>
               <option value="active">Active</option><option value="on_hold">On hold</option><option value="closed">Closed</option>
-            </select>
-          </Field>
-          <Field label="Territory">
-            <select className="input" value={form.territory_id} onChange={set('territory_id')}>
-              <option value="">—</option>
-              {territories.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
             </select>
           </Field>
           <Field label="Assigned rep">

@@ -4,7 +4,7 @@ import { api, fmtDateTime } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
 import { MobileHeader } from './MobileApp';
 
-export default function FormDetail() {
+export default function FormDetail({ base = '/mobile' }) {
   const { id } = useParams();
   const [submission, setSubmission] = useState(null);
   const [error, setError] = useState('');
@@ -15,7 +15,7 @@ export default function FormDetail() {
 
   if (!submission) return (
     <>
-      <MobileHeader title="Form" back="/mobile/customers" />
+      <MobileHeader title="Form" back={`${base}/customers`} />
       {error ? <div className="p-4"><ErrorNote error={error} /></div> : <Spinner />}
     </>
   );
@@ -27,7 +27,7 @@ export default function FormDetail() {
     ? fields.map((f) => ({ label: f.label || f.key, type: f.type, value: submission.data?.[f.key] }))
     : Object.entries(submission.data || {}).map(([key, value]) => ({ label: key, type: undefined, value }));
 
-  const backTo = submission.customer_id ? `/mobile/customers/${submission.customer_id}` : '/mobile/customers';
+  const backTo = submission.customer_id ? `${base}/customers/${submission.customer_id}` : `${base}/customers`;
 
   return (
     <>
@@ -41,12 +41,19 @@ export default function FormDetail() {
 
         <div className="card p-4 space-y-4">
           {entries.map((e, i) => (
-            <div key={i} className="border-b border-slate-100 last:border-b-0 pb-3 last:pb-0">
-              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">{e.label}</div>
-              <div className="text-sm text-slate-800">
-                {renderAnswer(e)}
+            e.type === 'heading' ? (
+              <div key={i} className="pt-2 first:pt-0">
+                <div className="text-sm font-bold uppercase tracking-wide text-slate-700">{e.label}</div>
+                <div className="mt-1 border-b border-slate-200" />
               </div>
-            </div>
+            ) : (
+              <div key={i} className="border-b border-slate-100 last:border-b-0 pb-3 last:pb-0">
+                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">{e.label}</div>
+                <div className="text-sm text-slate-800">
+                  {renderAnswer(e)}
+                </div>
+              </div>
+            )
           ))}
           {entries.length === 0 && <div className="text-sm text-slate-400">No data captured.</div>}
         </div>
@@ -57,8 +64,8 @@ export default function FormDetail() {
 
 function renderAnswer({ type, value }) {
   if (value === undefined || value === null || value === '') return <span className="text-slate-400">(empty)</span>;
-  // Photos are stored as file paths (e.g. /uploads/…); data URLs may also appear.
-  const isImage = type === 'photo' ||
+  // Photos & signatures are stored as file paths (e.g. /uploads/…); data URLs may also appear.
+  const isImage = type === 'photo' || type === 'signature' ||
     (typeof value === 'string' && (value.startsWith('data:image') || /\.(png|jpe?g|webp|gif)$/i.test(value)));
   if (isImage && typeof value === 'string') {
     return <img src={value} alt="" className="max-w-full h-auto rounded-lg border border-slate-200" />;

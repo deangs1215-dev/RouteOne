@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { api, fmtR, fmtDateTime } from '../api';
 import { Card, Table, Spinner, OrderStatusBadge, ErrorNote } from '../components/ui';
+import { useAuth } from '../auth';
 
 const NEXT_ACTIONS = {
   draft: [['submitted', 'Submit order']],
@@ -14,8 +15,11 @@ const NEXT_ACTIONS = {
 export default function OrderDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const canChangeStatus = ['admin', 'manager', 'office'].includes(user.role);
   const [order, setOrder] = useState(null);
   const [error, setError] = useState('');
+  const [emailNote, setEmailNote] = useState('');
 
   const load = () => api.get(`/orders/${id}`).then(setOrder).catch(console.error);
   useEffect(() => { load(); }, [id]);
@@ -36,7 +40,6 @@ export default function OrderDetail() {
     } catch (e) { setError(e.message); }
   };
 
-  const [emailNote, setEmailNote] = useState('');
   const sendMail = async (path) => {
     setEmailNote('');
     try {
@@ -56,13 +59,14 @@ export default function OrderDetail() {
           <div className="text-sm text-slate-500">
             <Link className="hover:text-brand-600 font-medium" to={`/customers/${order.customer_id}`}>{order.customer_name}</Link>
             {' '}· {fmtDateTime(order.order_date)} · Rep: {order.rep_name || '—'} · Terms: {order.payment_terms}
+            {' '}· Warehouse: {order.warehouse_name ? `${order.warehouse_name} (${order.warehouse_code})` : '—'}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <button className="btn-secondary" onClick={() => sendMail(`/orders/${id}/email`)}>✉ Orders dept</button>
           <button className="btn-secondary" onClick={() => sendMail(`/orders/${id}/email-customer`)}>✉ Confirmation to customer</button>
           <button className="btn-secondary" onClick={repeat}>Repeat order</button>
-          {NEXT_ACTIONS[order.status].map(([status, label]) => (
+          {canChangeStatus && NEXT_ACTIONS[order.status].map(([status, label]) => (
             <button key={status} className={status === 'cancelled' ? 'btn-danger' : 'btn-primary'} onClick={() => setStatus(status)}>
               {label}
             </button>

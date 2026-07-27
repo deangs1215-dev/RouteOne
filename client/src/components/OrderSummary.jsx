@@ -18,8 +18,9 @@ export default function OrderSummary({ order, items, customer, type = 'order', s
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="border-b-2 border-brand-600 pb-4">
+      <div className="flex items-start justify-between border-b-2 border-brand-600 pb-4">
         <h1 className="text-3xl font-bold text-navy-900">{title}</h1>
+        <img src="/bakels-logo.png" alt="Bakels" className="h-5 shrink-0" />
       </div>
 
       {/* Meta info and Bill To */}
@@ -37,6 +38,17 @@ export default function OrderSummary({ order, items, customer, type = 'order', s
             <div>
               <span className="text-xs font-semibold text-slate-500 uppercase">Account</span>
               <div className="text-sm text-slate-700">{order.customer_code}</div>
+            </div>
+          )}
+          {(customer?.warehouse_name || order.warehouse_name) && (
+            <div>
+              <span className="text-xs font-semibold text-slate-500 uppercase">Warehouse</span>
+              <div className="text-sm text-slate-700">
+                {customer?.warehouse_name || order.warehouse_name}
+                {(customer?.warehouse_code || order.warehouse_code) && (
+                  <span className="ml-1 text-xs text-slate-400">({customer?.warehouse_code || order.warehouse_code})</span>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -68,7 +80,10 @@ export default function OrderSummary({ order, items, customer, type = 'order', s
                   <div className="font-medium">{item.product_name}</div>
                   <div className="text-xs text-slate-500">{item.product_code}</div>
                 </td>
-                <td className="px-4 py-3 text-right text-slate-700">{fmtR(item.unit_price)}</td>
+                <td className="px-4 py-3 text-right text-slate-700">
+                  {fmtR(item.unit_price)}
+                  {item.kg_price != null && <div className="text-xs text-slate-400">{fmtR(item.kg_price)}/kg</div>}
+                </td>
                 <td className="px-4 py-3 text-right font-medium text-slate-700">
                   {item.qty} {item.uom}
                 </td>

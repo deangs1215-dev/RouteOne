@@ -1,7 +1,7 @@
 // Live map: customer pins coloured by coverage state, reps' last known
 // positions, and today's check-ins.
 import { useEffect, useState } from 'react';
-import { api, fmtDateTime } from '../api';
+import { api, fmtDateTime, todayISO } from '../api';
 import { Card, Spinner } from '../components/ui';
 import MapView from '../components/MapView';
 
@@ -13,7 +13,7 @@ export default function LiveMap() {
   const load = () => {
     api.get('/coverage').then(setCoverage).catch(console.error);
     api.get('/locations/latest').then(setRepLocations).catch(() => {});
-    api.get(`/visits?date=${new Date().toISOString().slice(0, 10)}`).then(setVisitsToday).catch(() => {});
+    api.get(`/visits?date=${todayISO()}`).then(setVisitsToday).catch(() => {});
   };
   useEffect(() => {
     load();

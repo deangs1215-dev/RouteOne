@@ -93,6 +93,16 @@ export function getOutbox() {
   try { return JSON.parse(localStorage.getItem(OUTBOX_KEY)) || []; } catch { return []; }
 }
 
+export async function clearOfflineData() {
+  localStorage.removeItem(SNAPSHOT_KEY);
+  localStorage.removeItem(OUTBOX_KEY);
+  if ('caches' in window) {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key.startsWith('fsp-')).map((key) => caches.delete(key)));
+  }
+  emit();
+}
+
 export function queueWrite(method, path, body) {
   const outbox = getOutbox();
   outbox.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), method, path, body, queued_at: new Date().toISOString() });
@@ -130,7 +140,7 @@ export async function flushOutbox() {
 // Wire up connectivity events once at app start. Nothing runs while logged
 // out - a snapshot call without a token would just 401.
 export function initOffline() {
-  const loggedIn = () => !!localStorage.getItem('fsp_token');
+  const loggedIn = () => !!localStorage.getItem('fsp_session');
   window.addEventListener('online', () => {
     emit();
     if (loggedIn()) flushOutbox().then(refreshSnapshot);

@@ -1,5 +1,5 @@
 // Small shared UI primitives used across all pages.
-import { useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 export function Badge({ color = '#64748b', children }) {
   return (
@@ -62,34 +62,121 @@ export function Stat({ label, value, sub, accent = 'text-slate-900' }) {
   );
 }
 
-export function Table({ headers, children, empty }) {
+// Friendly "nothing here" state — icon + message, reused by Table below and
+// by mobile pages that render cards instead of tables.
+export function EmptyState({ children, icon = '🗂️' }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-slate-200">
-        <thead>
-          <tr>{headers.map((h, i) => <th key={i} className="th">{h}</th>)}</tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">{children}</tbody>
-      </table>
-      {empty && <div className="py-10 text-center text-sm text-slate-400">{empty}</div>}
+    <div className="flex flex-col items-center gap-2 py-12 text-center">
+      <span className="text-3xl opacity-40">{icon}</span>
+      <span className="text-sm text-slate-400">{children}</span>
     </div>
   );
 }
 
-export function Modal({ title, onClose, children, wide }) {
+// Each header is either a plain string (left-aligned) or { label, align } so a
+// numeric column's heading can line up with its right-aligned values.
+export function Table({ headers, children, empty, emptyIcon }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full divide-y divide-slate-200">
+        <thead>
+          <tr>{headers.map((h, i) => {
+            const label = typeof h === 'string' ? h : h.label;
+            const align = typeof h === 'string' ? 'left' : h.align;
+            return <th key={i} className={`th ${align === 'right' ? 'text-right' : ''}`}>{label}</th>;
+          })}</tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">{children}</tbody>
+      </table>
+      {empty && <EmptyState icon={emptyIcon}>{empty}</EmptyState>}
+    </div>
+  );
+}
+
+// Slices `rows` into pages, defaulting to 20/page. Resets to page 1 whenever
+// the row set itself changes (new search/filter), but not when just the
+// page size changes size mid-browse - only reset there if the current page
+// would now be out of range.
+export function usePagination(rows, initialPageSize = 20) {
+  const [pageSize, setPageSize] = useState(initialPageSize);
+  const [page, setPage] = useState(1);
+  const count = rows ? rows.length : 0;
+  const totalPages = Math.max(1, Math.ceil(count / pageSize));
+
+  useEffect(() => { setPage(1); }, [count]);
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [pageSize, totalPages]);
+
+  const pageRows = useMemo(
+    () => (rows ? rows.slice((page - 1) * pageSize, page * pageSize) : []),
+    [rows, page, pageSize]
+  );
+
+  return { page, setPage, pageSize, setPageSize, totalPages, pageRows };
+}
+
+export function PageSizeSelect({ value, onChange }) {
+  return (
+    <label className="flex items-center gap-2 text-sm text-slate-500">
+      Show
+      <select className="input w-auto" value={value} onChange={(e) => onChange(Number(e.target.value))}>
+        <option value={20}>20</option>
+        <option value={50}>50</option>
+        <option value={100}>100</option>
+      </select>
+      at a time
+    </label>
+  );
+}
+
+// Windowed page numbers with ellipses, e.g. 1 … 4 5 [6] 7 8 … 30
+export function Pagination({ page, totalPages, onChange }) {
+  const pages = useMemo(() => {
+    const window = 1;
+    const items = [];
+    for (let p = 1; p <= totalPages; p++) {
+      if (p === 1 || p === totalPages || Math.abs(p - page) <= window) items.push(p);
+      else if (items[items.length - 1] !== '…') items.push('…');
+    }
+    return items;
+  }, [page, totalPages]);
+
+  if (totalPages <= 1) return null;
+
+  const btn = (active) =>
+    `min-w-[2rem] rounded-lg px-2 py-1 text-sm ${active ? 'bg-brand-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`;
+
+  return (
+    <div className="mt-4 flex flex-wrap items-center justify-center gap-1 border-t border-slate-100 pt-4">
+      <button className={btn(false)} disabled={page === 1} onClick={() => onChange(page - 1)}>‹ Prev</button>
+      {pages.map((p, i) =>
+        p === '…' ? (
+          <span key={`e${i}`} className="px-1 text-slate-400">…</span>
+        ) : (
+          <button key={p} className={btn(p === page)} onClick={() => onChange(p)}>{p}</button>
+        )
+      )}
+      <button className={btn(false)} disabled={page === totalPages} onClick={() => onChange(page + 1)}>Next ›</button>
+    </div>
+  );
+}
+
+// `footer` renders pinned below the scrollable body (e.g. action buttons) so
+// it stays visible without scrolling, even when the body content is long.
+export function Modal({ title, onClose, children, wide, footer }) {
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/50 p-4 overflow-y-auto" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`card mt-8 w-full ${wide ? 'max-w-3xl' : 'max-w-lg'} p-0`}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/50 p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className={`card mt-8 flex max-h-[calc(100vh-4rem)] w-full flex-col ${wide ? 'max-w-3xl' : 'max-w-lg'} p-0`}>
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
           <h3 className="font-semibold">{title}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="overflow-y-auto p-5">{children}</div>
+        {footer && <div className="border-t border-slate-100 px-5 py-3">{footer}</div>}
       </div>
     </div>
   );

@@ -1,17 +1,14 @@
 import { useState } from 'react';
-import { api } from '../api';
+import { api, addDaysISO } from '../api';
 import { Modal, Field, ErrorNote } from './ui';
 
 // Quick follow-up date options (same set as TaskCreateModal)
-const quickDates = () => {
-  const today = new Date();
-  return {
-    Today: today.toISOString().slice(0, 10),
-    Tomorrow: new Date(today.getTime() + 86400000).toISOString().slice(0, 10),
-    '3 Days': new Date(today.getTime() + 3 * 86400000).toISOString().slice(0, 10),
-    '7 Days': new Date(today.getTime() + 7 * 86400000).toISOString().slice(0, 10)
-  };
-};
+const quickDates = () => ({
+  Today: addDaysISO(0),
+  Tomorrow: addDaysISO(1),
+  '3 Days': addDaysISO(3),
+  '7 Days': addDaysISO(7)
+});
 
 export default function TaskRescheduleModal({ task, onClose, onSaved }) {
   const [date, setDate] = useState(task.follow_up_date || '');

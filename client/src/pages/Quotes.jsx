@@ -38,7 +38,7 @@ export default function Quotes() {
       <Card>
         {!rows ? <Spinner /> : (
           <Table headers={['Number', 'Customer', 'Rep', 'Date', 'Valid until', 'Status', 'Total']}
-            empty={rows.length === 0 && 'No quotes found.'}>
+            empty={rows.length === 0 && 'No quotes found.'} emptyIcon="📄">
             {rows.map((qu) => (
               <tr key={qu.id} className="hover:bg-slate-50">
                 <td className="td font-medium"><Link className="hover:text-brand-600" to={`/quotes/${qu.id}`}>{qu.number}</Link></td>

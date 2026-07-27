@@ -1,10 +1,12 @@
 // Thin Leaflet wrapper. Markers: [{ lat, lng, label, color, radius, popup }].
 // Polyline (optional): ordered [lat, lng] pairs for the route line.
+// fitMarkers (optional): subset of points to fit the viewport to — use it when
+// some markers (e.g. other reps' customers) shouldn't pull the zoom wide.
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-export default function MapView({ markers = [], line = null, height = 380 }) {
+export default function MapView({ markers = [], line = null, height = 380, fitMarkers = null, lineDashed = true }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const layerRef = useRef(null);
@@ -38,14 +40,17 @@ export default function MapView({ markers = [], line = null, height = 380 }) {
       }
     }
     if (line && line.length > 1) {
-      L.polyline(line, { color: '#1a7ea8', weight: 3, opacity: 0.7, dashArray: '6 6' }).addTo(layer);
+      L.polyline(line, { color: '#1a7ea8', weight: 4, opacity: 0.8, dashArray: lineDashed ? '6 6' : null }).addTo(layer);
     }
-    if (points.length > 0) {
-      mapRef.current.fitBounds(L.latLngBounds(points.map((m) => [m.lat, m.lng])), { padding: [30, 30], maxZoom: 14 });
+    // Fit to the requested subset if given, otherwise to all drawn points.
+    const fitPoints = (fitMarkers && fitMarkers.length ? fitMarkers : markers)
+      .filter((m) => m.lat != null && m.lng != null);
+    if (fitPoints.length > 0) {
+      mapRef.current.fitBounds(L.latLngBounds(fitPoints.map((m) => [m.lat, m.lng])), { padding: [30, 30], maxZoom: 14 });
     } else {
       mapRef.current.setView([-33.92, 18.6], 10); // Cape Town default
     }
-  }, [JSON.stringify(markers), JSON.stringify(line)]);
+  }, [JSON.stringify(markers), JSON.stringify(line), JSON.stringify(fitMarkers), lineDashed]);
 
   useEffect(() => () => { mapRef.current?.remove(); mapRef.current = null; }, []);
 

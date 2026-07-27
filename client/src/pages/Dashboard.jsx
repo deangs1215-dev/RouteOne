@@ -2,8 +2,11 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime } from '../api';
 import { Card, Stat, Table, Spinner, OrderStatusBadge } from '../components/ui';
+import { useAuth } from '../auth';
 
 export default function Dashboard() {
+  const { user } = useAuth();
+  const isRep = user.role === 'rep';
   const [data, setData] = useState(null);
 
   useEffect(() => {
@@ -27,28 +30,30 @@ export default function Dashboard() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card title="Sales by rep (month to date)">
-          <div className="space-y-3">
-            {salesByRep.map((r) => {
-              const pct = r.sales_target ? Math.min(100, (r.sales_mtd / r.sales_target) * 100) : 0;
-              return (
-                <div key={r.id}>
-                  <div className="flex items-baseline justify-between text-sm">
-                    <span className="font-medium">{r.name}</span>
-                    <span>{fmtR(r.sales_mtd)}
-                      {r.sales_target > 0 && <span className="ml-1 text-xs text-slate-400">/ {fmtR(r.sales_target)}</span>}
-                    </span>
+        {!isRep && (
+          <Card title="Sales by rep (month to date)">
+            <div className="space-y-3">
+              {salesByRep.map((r) => {
+                const pct = r.sales_target ? Math.min(100, (r.sales_mtd / r.sales_target) * 100) : 0;
+                return (
+                  <div key={r.id}>
+                    <div className="flex items-baseline justify-between text-sm">
+                      <span className="font-medium">{r.name}</span>
+                      <span>{fmtR(r.sales_mtd)}
+                        {r.sales_target > 0 && <span className="ml-1 text-xs text-slate-400">/ {fmtR(r.sales_target)}</span>}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-2 rounded-full bg-slate-100">
+                      <div className="h-2 rounded-full bg-brand-500" style={{ width: `${pct}%` }} />
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-400">{r.orders_mtd} orders · {r.visits_mtd} visits</div>
                   </div>
-                  <div className="mt-1 h-2 rounded-full bg-slate-100">
-                    <div className="h-2 rounded-full bg-brand-500" style={{ width: `${pct}%` }} />
-                  </div>
-                  <div className="mt-0.5 text-xs text-slate-400">{r.orders_mtd} orders · {r.visits_mtd} visits</div>
-                </div>
-              );
-            })}
-            {salesByRep.length === 0 && <div className="text-sm text-slate-400">No reps yet.</div>}
-          </div>
-        </Card>
+                );
+              })}
+              {salesByRep.length === 0 && <div className="text-sm text-slate-400">No reps yet.</div>}
+            </div>
+          </Card>
+        )}
 
         <Card title="Sales trend (last 14 days)">
           <div className="flex h-40 items-end gap-1">

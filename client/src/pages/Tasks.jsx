@@ -1,23 +1,26 @@
 import { useEffect, useState, useMemo } from 'react';
-import { api, fmtDate } from '../api';
+import { api, fmtDate, todayISO } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
-import PageHeader from '../components/PageHeader';
+import { useAuth } from '../auth';
 
 const TASK_TYPES = ['Call Customer', 'Visit Customer', 'Follow Up Quote', 'Follow Up Order', 'Resolve Query', 'Collect Payment', 'Deliver Sample', 'Other'];
 const STATUSES = ['open', 'done'];
 
 export default function Tasks() {
+  const { user } = useAuth();
+  const isRep = user.role === 'rep';
   const [tasks, setTasks] = useState(null);
   const [users, setUsers] = useState([]);
   const [filter, setFilter] = useState({ rep: '', status: '', dueFrom: '', dueTo: '' });
   const [error, setError] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [selected, setSelected] = useState(new Set());
 
-  // Load reps and tasks
+  // Load reps (managers only - reps can't reassign or filter by rep) and tasks
   useEffect(() => {
     Promise.all([
-      api.get('/users?role=rep'),
+      isRep ? Promise.resolve([]) : api.get('/users?role=rep'),
       loadTasks()
     ]).then(([reps]) => setUsers(reps)).catch(e => setError(e.message));
   }, []);
@@ -48,7 +51,7 @@ export default function Tasks() {
     if (!tasks) return {};
     const byRep = {};
     const byType = {};
-    const overdue = new Date().toISOString().slice(0, 10);
+    const overdue = todayISO();
 
     tasks.forEach(t => {
       // By rep
@@ -99,7 +102,10 @@ export default function Tasks() {
 
   return (
     <>
-      <PageHeader title="Task Management" subtitle="Create, assign, and track tasks for your team" />
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-slate-900">{isRep ? 'My Tasks' : 'Task Management'}</h1>
+        <p className="text-sm text-slate-600">{isRep ? 'Track and follow up on your own tasks' : 'Create, assign, and track tasks for your team'}</p>
+      </div>
       <div className="space-y-6">
         <ErrorNote error={error} />
 
@@ -131,14 +137,16 @@ export default function Tasks() {
             <h3 className="font-semibold">Filters</h3>
             {selectedIds.length > 0 && (
               <div className="flex gap-2">
-                <select
-                  className="input text-sm"
-                  onChange={(e) => handleReassign(selectedIds, parseInt(e.target.value))}
-                  defaultValue=""
-                >
-                  <option value="">Reassign to...</option>
-                  {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-                </select>
+                {!isRep && (
+                  <select
+                    className="input text-sm"
+                    onChange={(e) => handleReassign(selectedIds, parseInt(e.target.value))}
+                    defaultValue=""
+                  >
+                    <option value="">Reassign to...</option>
+                    {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                  </select>
+                )}
                 <button
                   onClick={() => handleBulkDone(selectedIds)}
                   className="btn-primary text-sm px-3 py-1"
@@ -149,18 +157,20 @@ export default function Tasks() {
             )}
           </div>
 
-          <div className="grid grid-cols-4 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1">Rep</label>
-              <select
-                className="input"
-                value={filter.rep}
-                onChange={(e) => setFilter({ ...filter, rep: e.target.value })}
-              >
-                <option value="">All Reps</option>
-                {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-              </select>
-            </div>
+          <div className={`grid gap-3 ${isRep ? 'grid-cols-3' : 'grid-cols-4'}`}>
+            {!isRep && (
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Rep</label>
+                <select
+                  className="input"
+                  value={filter.rep}
+                  onChange={(e) => setFilter({ ...filter, rep: e.target.value })}
+                >
+                  <option value="">All Reps</option>
+                  {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+              </div>
+            )}
             <div>
               <label className="block text-xs font-semibold text-slate-600 mb-1">Status</label>
               <select
@@ -196,7 +206,7 @@ export default function Tasks() {
             onClick={() => setShowCreate(true)}
             className="btn-primary w-full"
           >
-            + Assign New Task
+            {isRep ? '+ Add Task' : '+ Assign New Task'}
           </button>
         </div>
 
@@ -227,7 +237,7 @@ export default function Tasks() {
                   </th>
                   <th className="px-4 py-3 text-left font-semibold">Customer</th>
                   <th className="px-4 py-3 text-left font-semibold">Task Type</th>
-                  <th className="px-4 py-3 text-left font-semibold">Assigned To</th>
+                  {!isRep && <th className="px-4 py-3 text-left font-semibold">Assigned To</th>}
                   <th className="px-4 py-3 text-left font-semibold">Due Date</th>
                   <th className="px-4 py-3 text-left font-semibold">Status</th>
                   <th className="px-4 py-3 text-left font-semibold">Actions</th>
@@ -253,7 +263,7 @@ export default function Tasks() {
                     </td>
                     <td className="px-4 py-3">{t.customer_name}</td>
                     <td className="px-4 py-3 text-xs">{t.task_type}</td>
-                    <td className="px-4 py-3 text-xs font-medium">{repName(t.assigned_to)}</td>
+                    {!isRep && <td className="px-4 py-3 text-xs font-medium">{repName(t.assigned_to)}</td>}
                     <td className="px-4 py-3 text-xs">{fmtDate(t.follow_up_date)}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-block px-2 py-1 rounded text-xs font-semibold ${
@@ -272,9 +282,7 @@ export default function Tasks() {
                         </button>
                       )}
                       <button
-                        onClick={() => {
-                          // TODO: Edit task
-                        }}
+                        onClick={() => setEditing(t)}
                         className="text-xs text-slate-600 hover:text-slate-700 font-medium"
                       >
                         Edit
@@ -291,8 +299,19 @@ export default function Tasks() {
         {showCreate && (
           <CreateTaskModal
             users={users}
+            isRep={isRep}
+            currentUserId={user.id}
             onClose={() => setShowCreate(false)}
             onCreated={() => { setShowCreate(false); loadTasks(); }}
+          />
+        )}
+
+        {/* Edit Task Modal */}
+        {editing && (
+          <EditTaskModal
+            task={editing}
+            onClose={() => setEditing(null)}
+            onSaved={() => { setEditing(null); loadTasks(); }}
           />
         )}
       </div>
@@ -300,10 +319,78 @@ export default function Tasks() {
   );
 }
 
-function CreateTaskModal({ users, onClose, onCreated }) {
+function EditTaskModal({ task, onClose, onSaved }) {
+  const [followUpDate, setFollowUpDate] = useState(task.follow_up_date);
+  const [notes, setNotes] = useState(task.notes || '');
+  const [status, setStatus] = useState(task.status);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setError('');
+    if (!followUpDate) return setError('Follow-up date is required');
+    setBusy(true);
+    try {
+      await api.put(`/tasks/${task.id}`, { follow_up_date: followUpDate, notes, status });
+      onSaved();
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg shadow-lg w-full max-w-md p-6 space-y-4">
+        <h2 className="text-lg font-semibold">Edit Task</h2>
+        <ErrorNote error={error} />
+
+        <div className="text-sm text-slate-600">{task.customer_name} · {task.task_type}</div>
+
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-1">Follow-Up Date *</label>
+          <input
+            type="date"
+            className="input w-full"
+            value={followUpDate}
+            onChange={(e) => setFollowUpDate(e.target.value)}
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-1">Status</label>
+          <select className="input w-full" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="open">Open</option>
+            <option value="done">Done</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-1">Notes</label>
+          <textarea
+            className="input w-full"
+            rows="3"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+          />
+        </div>
+
+        <div className="flex gap-2 border-t border-slate-100 pt-4">
+          <button className="btn-secondary flex-1" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn-primary flex-1" onClick={submit} disabled={busy}>
+            {busy ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateTaskModal({ users, isRep, currentUserId, onClose, onCreated }) {
   const [customers, setCustomers] = useState([]);
   const [custId, setCustId] = useState('');
-  const [repId, setRepId] = useState('');
+  const [repId, setRepId] = useState(isRep ? String(currentUserId) : '');
   const [taskType, setTaskType] = useState('');
   const [followUpDate, setFollowUpDate] = useState('');
   const [note, setNote] = useState('');
@@ -340,7 +427,7 @@ function CreateTaskModal({ users, onClose, onCreated }) {
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-lg w-full max-w-md p-6 space-y-4">
-        <h2 className="text-lg font-semibold">Assign New Task</h2>
+        <h2 className="text-lg font-semibold">{isRep ? 'Add Task' : 'Assign New Task'}</h2>
         <ErrorNote error={error} />
 
         <div>
@@ -351,13 +438,15 @@ function CreateTaskModal({ users, onClose, onCreated }) {
           </select>
         </div>
 
-        <div>
-          <label className="block text-sm font-semibold text-slate-700 mb-1">Assign To *</label>
-          <select className="input w-full" value={repId} onChange={(e) => setRepId(e.target.value)}>
-            <option value="">Select rep...</option>
-            {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-          </select>
-        </div>
+        {!isRep && (
+          <div>
+            <label className="block text-sm font-semibold text-slate-700 mb-1">Assign To *</label>
+            <select className="input w-full" value={repId} onChange={(e) => setRepId(e.target.value)}>
+              <option value="">Select rep...</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </div>
+        )}
 
         <div>
           <label className="block text-sm font-semibold text-slate-700 mb-1">Task Type *</label>

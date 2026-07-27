@@ -2,11 +2,27 @@
 import { useState, useEffect } from 'react';
 import { Modal } from './ui';
 
+// value/onChange always use plain 'YYYY-MM-DD' strings, parsed and built
+// manually (never via Date#toISOString or `new Date(dateString)`) - both of
+// those convert through UTC, which silently shifts the date by a day in any
+// timezone ahead of UTC (e.g. SAST, UTC+2) as local midnight crosses back to
+// the previous day in UTC.
+const parseISODate = (v) => {
+  if (!v) return null;
+  const [y, m, d] = v.split('-').map(Number);
+  return { y, m: m - 1, d };
+};
+
 export default function DatePicker({ value, onChange, onClose, label = 'Select date' }) {
-  const [month, setMonth] = useState(value ? new Date(value) : new Date());
+  const initial = parseISODate(value);
+  const [month, setMonth] = useState(() => {
+    const now = new Date();
+    return new Date(initial ? initial.y : now.getFullYear(), initial ? initial.m : now.getMonth(), 1);
+  });
 
   useEffect(() => {
-    if (value) setMonth(new Date(value));
+    const parsed = parseISODate(value);
+    if (parsed) setMonth(new Date(parsed.y, parsed.m, 1));
   }, [value]);
 
   const year = month.getFullYear();
@@ -23,8 +39,7 @@ export default function DatePicker({ value, onChange, onClose, label = 'Select d
 
   const handleSelect = (day) => {
     if (day) {
-      const selected = new Date(year, monthNum, day);
-      const iso = selected.toISOString().slice(0, 10);
+      const iso = `${year}-${String(monthNum + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       onChange(iso);
       onClose();
     }
@@ -33,9 +48,9 @@ export default function DatePicker({ value, onChange, onClose, label = 'Select d
   const prevMonth = () => setMonth(new Date(year, monthNum - 1));
   const nextMonth = () => setMonth(new Date(year, monthNum + 1));
 
-  const selectedDate = value ? new Date(value) : null;
-  const isSelectedMonth = selectedDate && selectedDate.getFullYear() === year && selectedDate.getMonth() === monthNum;
-  const selectedDay = selectedDate?.getDate();
+  const selectedDate = parseISODate(value);
+  const isSelectedMonth = selectedDate && selectedDate.y === year && selectedDate.m === monthNum;
+  const selectedDay = selectedDate?.d;
 
   return (
     <Modal title={label} onClose={onClose}>

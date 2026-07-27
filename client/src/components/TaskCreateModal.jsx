@@ -1,19 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../api';
+import { api, addDaysISO } from '../api';
 import { Modal, Field, ErrorNote, Spinner } from './ui';
 
 const TASK_TYPES = ['Call Customer', 'Visit Customer', 'Follow Up Quote', 'Follow Up Order', 'Resolve Query', 'Collect Payment', 'Deliver Sample', 'Other'];
 
 // Quick follow-up date options
-const quickDates = () => {
-  const today = new Date();
-  return {
-    Today: today.toISOString().slice(0, 10),
-    Tomorrow: new Date(today.getTime() + 86400000).toISOString().slice(0, 10),
-    '3 Days': new Date(today.getTime() + 3 * 86400000).toISOString().slice(0, 10),
-    '7 Days': new Date(today.getTime() + 7 * 86400000).toISOString().slice(0, 10)
-  };
-};
+const quickDates = () => ({
+  Today: addDaysISO(0),
+  Tomorrow: addDaysISO(1),
+  '3 Days': addDaysISO(3),
+  '7 Days': addDaysISO(7)
+});
 
 export default function TaskCreateModal({ customerId, customerName, onClose, onCreated }) {
   const [customers, setCustomers] = useState([]);

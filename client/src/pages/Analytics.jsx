@@ -1,4 +1,4 @@
-// Analytics: trends, category/territory/product performance, margin, quote funnel.
+// Analytics: trends, product performance, margin, quote funnel.
 import { useEffect, useState } from 'react';
 import { api, fmtR } from '../api';
 import { Card, Stat, Table, Spinner } from '../components/ui';
@@ -26,9 +26,8 @@ export default function Analytics() {
   };
 
   if (!data) return <Spinner />;
-  const { totals, monthly, byCategory, byTerritory, topProducts, quoteFunnel } = data;
+  const { totals, monthly, topProducts, quoteFunnel } = data;
   const maxMonthly = Math.max(...monthly.map((m) => m.sales), 1);
-  const maxCat = Math.max(...byCategory.map((c) => c.revenue), 1);
 
   return (
     <div className="space-y-6">
@@ -64,50 +63,18 @@ export default function Analytics() {
         </div>
       </Card>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card title="Revenue by category">
-          <div className="space-y-3">
-            {byCategory.map((c) => (
-              <div key={c.category}>
-                <div className="flex justify-between text-sm">
-                  <span className="font-medium">{c.category}</span>
-                  <span>{fmtR(c.revenue)} <span className="text-xs text-slate-400">margin {fmtR(c.margin)}</span></span>
-                </div>
-                <div className="mt-1 h-2 rounded-full bg-slate-100">
-                  <div className="h-2 rounded-full bg-brand-500" style={{ width: `${(c.revenue / maxCat) * 100}%` }} />
-                </div>
-              </div>
-            ))}
-            {byCategory.length === 0 && <div className="text-sm text-slate-400">No sales in this period.</div>}
+      <div className="grid gap-6">
+        <Card title="Quote funnel">
+          <div className="grid grid-cols-4 gap-2 text-center">
+            <div><div className="text-xl font-bold">{quoteFunnel.total}</div><div className="text-[10px] uppercase text-slate-400">quoted</div></div>
+            <div><div className="text-xl font-bold text-emerald-600">{quoteFunnel.accepted}</div><div className="text-[10px] uppercase text-slate-400">accepted</div></div>
+            <div><div className="text-xl font-bold text-red-600">{quoteFunnel.rejected}</div><div className="text-[10px] uppercase text-slate-400">rejected</div></div>
+            <div><div className="text-xl font-bold text-sky-600">{quoteFunnel.open}</div><div className="text-[10px] uppercase text-slate-400">open</div></div>
+          </div>
+          <div className="mt-3 text-center text-xs text-slate-400">
+            {quoteFunnel.total > 0 ? `${Math.round((quoteFunnel.accepted / quoteFunnel.total) * 100)}% acceptance` : 'No quotes in period'} · accepted value {fmtR(quoteFunnel.accepted_value)}
           </div>
         </Card>
-
-        <div className="space-y-6">
-          <Card title="Revenue by territory">
-            <Table headers={['Territory', 'Customers', 'Orders', 'Revenue']}>
-              {byTerritory.map((t) => (
-                <tr key={t.territory}>
-                  <td className="td font-medium">{t.territory}</td>
-                  <td className="td">{t.customers}</td>
-                  <td className="td">{t.orders}</td>
-                  <td className="td font-medium">{fmtR(t.revenue)}</td>
-                </tr>
-              ))}
-            </Table>
-          </Card>
-
-          <Card title="Quote funnel">
-            <div className="grid grid-cols-4 gap-2 text-center">
-              <div><div className="text-xl font-bold">{quoteFunnel.total}</div><div className="text-[10px] uppercase text-slate-400">quoted</div></div>
-              <div><div className="text-xl font-bold text-emerald-600">{quoteFunnel.accepted}</div><div className="text-[10px] uppercase text-slate-400">accepted</div></div>
-              <div><div className="text-xl font-bold text-red-600">{quoteFunnel.rejected}</div><div className="text-[10px] uppercase text-slate-400">rejected</div></div>
-              <div><div className="text-xl font-bold text-sky-600">{quoteFunnel.open}</div><div className="text-[10px] uppercase text-slate-400">open</div></div>
-            </div>
-            <div className="mt-3 text-center text-xs text-slate-400">
-              {quoteFunnel.total > 0 ? `${Math.round((quoteFunnel.accepted / quoteFunnel.total) * 100)}% acceptance` : 'No quotes in period'} · accepted value {fmtR(quoteFunnel.accepted_value)}
-            </div>
-          </Card>
-        </div>
       </div>
 
       <Card title="Product performance">

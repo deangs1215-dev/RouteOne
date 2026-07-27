@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, fmtDate } from '../api';
+import { api, fmtDate, todayISO } from '../api';
 import { Modal, ErrorNote, Spinner } from './ui';
 import TaskCreateModal from './TaskCreateModal';
 import TaskRescheduleModal from './TaskRescheduleModal';
@@ -14,7 +14,7 @@ export default function CustomerTasksSheet({ customerId, customerName, onClose, 
   const [rescheduling, setRescheduling] = useState(null);
   const [creating, setCreating] = useState(false);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
 
   const load = () =>
     api.get(`/customers/${customerId}/tasks`)

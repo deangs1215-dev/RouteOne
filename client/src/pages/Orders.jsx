@@ -38,7 +38,7 @@ export default function Orders() {
       <Card>
         {!rows ? <Spinner /> : (
           <Table headers={['Number', 'Customer', 'Rep', 'Date', 'Lines', 'Status', 'Total']}
-            empty={rows.length === 0 && 'No orders found.'}>
+            empty={rows.length === 0 && 'No orders found.'} emptyIcon="🧾">
             {rows.map((o) => (
               <tr key={o.id} className="hover:bg-slate-50">
                 <td className="td font-medium"><Link className="hover:text-brand-600" to={`/orders/${o.id}`}>{o.number}</Link></td>

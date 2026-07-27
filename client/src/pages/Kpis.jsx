@@ -1,12 +1,12 @@
 // Rep KPIs per month: sales vs target, activity, route compliance, strike rate.
 import { useEffect, useState } from 'react';
-import { api, fmtR } from '../api';
+import { api, fmtR, todayISO } from '../api';
 import { Card, Table, Spinner } from '../components/ui';
 
 const pctColor = (pct) => (pct == null ? 'text-slate-400' : pct >= 90 ? 'text-emerald-600' : pct >= 60 ? 'text-amber-600' : 'text-red-600');
 
 export default function Kpis() {
-  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [month, setMonth] = useState(todayISO().slice(0, 7));
   const [data, setData] = useState(null);
 
   useEffect(() => {
@@ -25,7 +25,7 @@ export default function Kpis() {
         <>
           <div className="grid gap-4 lg:grid-cols-2">
             {data.kpis.map((k) => (
-              <Card key={k.rep_id} title={`${k.name}${k.territory ? ` — ${k.territory}` : ''}`}>
+              <Card key={k.rep_id} title={k.name}>
                 <div className="mb-3">
                   <div className="flex items-baseline justify-between text-sm">
                     <span className="text-slate-500">Sales vs target</span>
