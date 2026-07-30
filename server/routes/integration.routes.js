@@ -104,9 +104,12 @@ router.post('/integration/sync/:entity', requireRole('admin', 'manager', 'office
 });
 
 // Bulk re-match: pulls the live SYSPRO view again and assigns a rep to any
-// customer that currently has none, using branch + rep_code. Never touches a
-// customer that already has a rep - that stays app-managed once set, whether
-// it was assigned by a prior match run or manually in the app.
+// customer that currently has none, using branch + rep_code.
+//
+// Reassignment is handled by the customers sync now (SYSPRO is master for rep
+// ownership), so this is only a backfill for customers the sync could not place
+// - typically ones whose branch differs from their rep's home branch. It fills
+// nulls only, so re-running it is always safe.
 router.post('/integration/match-reps', requireRole('admin'), async (req, res) => {
   try {
     const rows = await getProvider().fetch('customers');

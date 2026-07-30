@@ -17,6 +17,8 @@ import 'dotenv/config'; // must run first - loads SECRET_KEY so the saved SYSPRO
 //         node server/import-reps.js --dry     (preview only, writes nothing)
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import path from 'path';
+import { pathToFileURL } from 'url';
 import { db } from './db.js';
 import { sysproConfig } from './integration/providers.js';
 
@@ -27,7 +29,7 @@ const DRY_RUN = process.argv.includes('--dry');
 // / non-active buckets, legals/IBT/misc, and export/inter-company desks. These
 // are skipped so we don't create logins for "LEGALS", "BOTSWANA", etc.
 // (MAX and G&P were confirmed as real reps and are intentionally NOT here.)
-const EXCLUDE_CODES = new Set([
+export const EXCLUDE_CODES = new Set([
   '00',  // SBO IBT
   '08', '10', '35', '37', '39', '49', '75', '76',           // H/ACC house accounts
   '55', '77', '107', '109',                                  // non-comm / non-active buckets
@@ -42,7 +44,7 @@ function firstNameSlug(name, repCode) {
   return slug || `rep${String(repCode).toLowerCase()}`;
 }
 
-async function fetchReps() {
+export async function fetchReps() {
   const sql = (await import('mssql')).default;
   const cfg = sysproConfig();
   if (!cfg.host || !cfg.database || !cfg.user) {
@@ -139,7 +141,12 @@ function run(reps) {
   return { created, skipped };
 }
 
-(async () => {
+// Only run the import when this file is executed directly - other scripts import
+// EXCLUDE_CODES and fetchReps from here for diagnostics (same guard as index.js).
+const isMain = process.argv[1] &&
+  pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
+
+if (isMain) (async () => {
   console.log(`\n${DRY_RUN ? '[DRY RUN] ' : ''}Importing reps from SYSPRO vw_FS_Reps...\n`);
   const reps = await fetchReps();
   console.log(`Fetched ${reps.length} rep/branch rows from SYSPRO.`);

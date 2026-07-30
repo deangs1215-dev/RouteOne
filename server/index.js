@@ -42,7 +42,7 @@ const configuredOrigins = (process.env.APP_ORIGIN || '')
   .filter(Boolean);
 const allowedOrigins = new Set(configuredOrigins.length
   ? configuredOrigins
-  : ['http://localhost:5190', 'http://127.0.0.1:5190']);
+  : ['http://localhost:4200', 'http://127.0.0.1:4200', 'http://localhost:5190', 'http://127.0.0.1:5190']);
 if (process.env.NODE_ENV === 'production' && !configuredOrigins.length) {
   throw new Error('APP_ORIGIN is required in production');
 }

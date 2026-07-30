@@ -6,15 +6,20 @@ import bcryptjs from 'bcryptjs';
 import crypto from 'crypto';
 
 const SALT_ROUNDS = 10;
-const FALLBACK_KEY = 'routeone-local-encryption-key-change-in-production';
+// No insecure fallback key. A missing SECRET_KEY used to warn and keep running
+// on a hardcoded key, which is how a test/staging box can silently encrypt real
+// SYSPRO/SMTP passwords under a key nobody wrote down - "the connection works"
+// right up until .env is edited and the old ciphertext stops decrypting, with
+// nothing but a scrolled-past console line explaining why. Required always, not
+// just when NODE_ENV=production - a box holding real customer data needs this
+// regardless of what NODE_ENV happens to be set to.
 if (!process.env.SECRET_KEY) {
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('SECRET_KEY is required in production');
-  }
-  console.warn('! SECRET_KEY is not set - falling back to an insecure hardcoded key. ' +
-    'Set SECRET_KEY in .env before storing any real secrets (see .env.example).');
+  throw new Error(
+    'SECRET_KEY is not set. Copy .env.example to .env and set SECRET_KEY - generate one with:\n' +
+    '  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"'
+  );
 }
-const ENCRYPTION_KEY = process.env.SECRET_KEY || FALLBACK_KEY;
+const ENCRYPTION_KEY = process.env.SECRET_KEY;
 
 // Hash a password (one-way, for user auth). Always use this, never raw plaintext.
 export async function hashPassword(plain) {

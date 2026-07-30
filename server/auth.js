@@ -25,10 +25,20 @@ function cookieValue(req, name) {
   return null;
 }
 
+// Secure cookies require HTTPS - a browser silently drops a Secure cookie
+// received over plain HTTP, which looks like "login works for a second then
+// bounces back to the login screen". Defaults to NODE_ENV=production, but
+// COOKIE_SECURE=0 is available as an explicit, documented escape hatch for an
+// internal HTTP-only deployment (e.g. a test server with no reverse proxy/TLS
+// in front of it yet). Never set this to 0 for anything internet-facing.
+const cookieSecure = process.env.COOKIE_SECURE !== undefined
+  ? process.env.COOKIE_SECURE === '1'
+  : process.env.NODE_ENV === 'production';
+
 export function setSessionCookie(res, token) {
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: cookieSecure,
     sameSite: 'strict',
     path: '/',
     maxAge: SESSION_MAX_AGE_MS
@@ -38,7 +48,7 @@ export function setSessionCookie(res, token) {
 export function clearSessionCookie(res) {
   res.clearCookie(SESSION_COOKIE, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: cookieSecure,
     sameSite: 'strict',
     path: '/'
   });

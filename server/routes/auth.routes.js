@@ -106,7 +106,10 @@ router.post('/forgot-password', async (req, res) => {
   db.prepare('UPDATE users SET reset_token_hash = ?, reset_token_expires = ? WHERE id = ?')
     .run(hashToken(token), expires, user.id);
 
-  const appOrigin = process.env.APP_ORIGIN || 'http://localhost:5190';
+  // APP_ORIGIN may list several allowed origins (comma-separated) when the app
+  // is reachable by both hostname and IP. Only the first is the canonical one -
+  // using the whole string here would build a broken reset URL.
+  const appOrigin = (process.env.APP_ORIGIN || '').split(',')[0].trim() || 'http://localhost:5190';
   const resetLink = `${appOrigin}/reset-password?token=${token}`;
   sendEmail(buildPasswordResetEmail(user, resetLink))
     .catch((e) => console.error('Password reset email failed:', e.message));

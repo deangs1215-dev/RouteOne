@@ -44,23 +44,29 @@ const upsertCustomer = (row) => {
   const existing = db.prepare('SELECT id FROM customers WHERE code = ?').get(row.code);
   const onHoldStatus = row.on_hold ? 'on_hold' : 'active';
   const warehouse = warehouseForCode(row.warehouse_code);
+  const repId = matchRep(row.warehouse_code, row.rep_code);
   if (existing) {
-    // ERP is the master for financial fields; app-managed fields (rep,
-    // territory, grading, GPS, visit frequency) are left alone.
+    // ERP is the master for financial fields AND for rep ownership - a customer
+    // reassigned in SYSPRO follows on the next sync, so the old rep stops seeing
+    // it. Territory, grading, GPS and visit frequency stay app-managed.
+    //
+    // rep_id uses COALESCE deliberately: matchRep returns null when the rep code
+    // has no user (house/export accounts) or the customer sits outside its rep's
+    // home branch. Assigning that null would un-assign customers that are
+    // currently matched, so a failed match leaves the existing rep in place.
     db.prepare(`
       UPDATE customers SET name = ?, contact_name = COALESCE(?, contact_name), phone = COALESCE(?, phone),
         email = COALESCE(?, email), address = COALESCE(?, address), city = COALESCE(?, city),
         credit_limit = ?, balance = ?, payment_terms = COALESCE(?, payment_terms),
         warehouse_id = COALESCE(?, warehouse_id),
+        rep_id = COALESCE(?, rep_id),
         status = CASE WHEN status = 'closed' THEN 'closed' ELSE ? END
       WHERE id = ?
     `).run(row.name, row.contact_name, row.phone, row.email, row.address, row.city,
-      row.credit_limit ?? 0, row.balance ?? 0, row.payment_terms, warehouse?.id ?? null, onHoldStatus, existing.id);
+      row.credit_limit ?? 0, row.balance ?? 0, row.payment_terms, warehouse?.id ?? null,
+      repId, onHoldStatus, existing.id);
   } else {
-    // A brand-new customer is auto-assigned to its matching rep on first
-    // sync; existing customers are never touched here (rep_id is app-managed
-    // once set - see the /integration/match-reps bulk backfill instead).
-    const repId = matchRep(row.warehouse_code, row.rep_code);
+    // A brand-new customer is auto-assigned to its matching rep on first sync.
     db.prepare(`
       INSERT INTO customers (code, name, contact_name, phone, email, address, city, credit_limit, balance, payment_terms, warehouse_id, status, rep_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
