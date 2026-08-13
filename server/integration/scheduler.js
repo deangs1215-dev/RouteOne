@@ -8,13 +8,21 @@ import { getProvider } from './providers.js';
 let running = false;
 
 // Run entities that are due (or all if trigger is 'manual')
+// A scheduled run syncs ONLY the entities whose own schedule says they are due;
+// a manual run ("sync now" from the Integration page) deliberately syncs
+// everything. This used to compare trigger === 'schedule' while the only
+// scheduled caller passes 'scheduled' - so the comparison was never true and
+// every tick re-synced all seven entities, ignoring their individual settings.
+// That is what dragged the 4.3M-row customer_pricing import into every hourly
+// run even when it was configured as daily. Keyed off 'manual' now so a
+// mismatch in the scheduled label cannot silently resurrect it.
 async function runAll(trigger = 'schedule', onlyDue = true) {
   if (running) return; // never overlap two syncs
   running = true;
   const results = [];
   try {
-    const entitiesToSync = onlyDue && trigger === 'schedule' ? getEntitiesDueNow() : SYNC_ENTITIES;
-    if (entitiesToSync.length === 0 && trigger === 'schedule') {
+    const entitiesToSync = onlyDue && trigger !== 'manual' ? getEntitiesDueNow() : SYNC_ENTITIES;
+    if (entitiesToSync.length === 0) {
       running = false;
       return [];
     }

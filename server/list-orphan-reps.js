@@ -11,14 +11,14 @@ import 'dotenv/config'; // must run first - loads SECRET_KEY so the saved SYSPRO
 //                have a user, so it is safe to re-run)
 //   NOT IN VIEW  SYSPRO customers reference this code but the reps view does not
 //                list it - either a closed/former rep, or the DBA view filters
-//                them out. Needs a decision: add to the view, add to
-//                EXCLUDE_CODES, or assign those customers by hand.
+//                them out. Needs a decision: fix the view, remove the code from
+//                REP_CODES, or assign those customers by hand.
 //
 // Writes nothing. Usage:  node server/list-orphan-reps.js
 
 import { db } from './db.js';
 import { getProvider } from './integration/providers.js';
-import { EXCLUDE_CODES, fetchReps } from './import-reps.js';
+import { REP_CODES, fetchReps } from './import-reps.js';
 
 const customers = await getProvider().fetch('customers');
 
@@ -63,7 +63,7 @@ for (const row of customers) {
   const branch = String(row.warehouse_code || '').trim();
   if (!repCode) continue;
   if (usersByCode.has(repCode)) continue;            // has a user - branch mismatch, not an orphan
-  if (EXCLUDE_CODES.has(repCode)) continue;          // deliberately excluded - expected
+  if (!REP_CODES.has(repCode)) continue;             // not a known field rep (house/export/etc) - expected
 
   if (!orphans.has(repCode)) {
     orphans.set(repCode, { customers: 0, branches: new Set(), examples: [], status: {} });
@@ -94,7 +94,7 @@ const rows = [...orphans.entries()]
 const total = rows.reduce((sum, r) => sum + r.customers, 0);
 
 console.log(`\n${rows.length} rep code(s) own ${total} unassigned customer(s) but have no login`);
-console.log(`and are not in EXCLUDE_CODES.\n`);
+console.log(`and ARE listed as real field reps in REP_CODES.\n`);
 console.table(rows);
 
 console.log('\nThose same customers by status:');

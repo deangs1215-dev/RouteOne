@@ -153,6 +153,14 @@ const upsertInvoice = (row) => {
 };
 
 const upsertCustomerPricing = (row) => {
+  // Convert Date objects from SQL Server to ISO strings, coerce all values to safe types
+  const toSafeValue = (v) => {
+    if (v === null || v === undefined) return null;
+    if (v instanceof Date) return v.toISOString().split('T')[0]; // YYYY-MM-DD
+    if (typeof v === 'number' || typeof v === 'string') return v;
+    return String(v); // fallback: stringify anything else
+  };
+
   db.prepare(`
     INSERT INTO syspro_customer_pricing (customer_code, product_code, contract_price, buying_group_price, price_code_price, contract_start_date, contract_end_date, buying_group_start_date, buying_group_end_date)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -167,19 +175,80 @@ const upsertCustomerPricing = (row) => {
       synced_at = datetime('now')
   `).run(
     row.customer_code, row.product_code,
-    row.contract_price ?? null, row.buying_group_price ?? null, row.price_code_price ?? null,
-    row.contract_start_date ?? null, row.contract_end_date ?? null,
-    row.buying_group_start_date ?? null, row.buying_group_end_date ?? null
+    toSafeValue(row.contract_price), toSafeValue(row.buying_group_price), toSafeValue(row.price_code_price),
+    toSafeValue(row.contract_start_date), toSafeValue(row.contract_end_date),
+    toSafeValue(row.buying_group_start_date), toSafeValue(row.buying_group_end_date)
   );
 };
 
-const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, customer_pricing: upsertCustomerPricing };
+// vw_FS_RepSalesByMonth gives one row per (year, month, branch, rep) - the
+// same rep code can appear under several branches, and a rep's actual sales
+// can be split across branches too, so rows are summed into a single
+// per-rep-per-month total using matchRep's branch+code disambiguation (same
+// rule customer sync already uses to resolve a rep code to a specific user).
+// A row with no matching rep (house/export codes, etc.) is skipped, not an error.
+//
+// Uses CustomerBranch (the branch the "Customer SalesPerson" code actually
+// belongs to), not TrnBranch (the transaction's branch) - a customer can be
+// invoiced from a different branch than their own, and matchRep needs the
+// branch paired with the salesperson code it was assigned under.
+// Returns false (not undefined) when a row is deliberately skipped - lets
+// runSync count "skipped, no match" separately from "matched and written"
+// instead of both silently counting as a plain success.
+const upsertRepSales = (row) => {
+  const repId = matchRep(row.CustomerBranch, row['Customer SalesPerson']);
+  if (!repId) return false;
+  const year = row.TrnYear;
+  const month = row.TrnMonth;
+  if (!year || !month) return false;
+  const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+  const salesValue = Number(row.NSV ?? 0);
+  db.prepare(`
+    INSERT INTO rep_monthly_sales (rep_id, month, sales_value)
+    VALUES (?, ?, ?)
+    ON CONFLICT(rep_id, month) DO UPDATE SET
+      sales_value = sales_value + excluded.sales_value,
+      synced_at = datetime('now')
+  `).run(repId, monthKey, salesValue);
+};
+
+const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales };
+
+// Entities whose upserter accumulates (SUM) rather than replaces must clear
+// their destination table before each run - otherwise re-syncing would keep
+// adding to the same rep-month total instead of recomputing it from scratch.
+const CLEAR_BEFORE_SYNC = {
+  rep_sales: () => db.prepare('DELETE FROM rep_monthly_sales').run()
+};
 
 // Order matters: customers reference warehouses; customer_pricing and invoices reference customers (and products).
 // Rep-to-warehouse assignment is managed manually in RouteOne (SalSalesperson branch data is
 // unreliable - the same rep code can show multiple conflicting branches), so "reps" is not synced here.
-export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'customer_pricing'];
+export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'customer_pricing', 'rep_sales'];
 const syncsInFlight = new Set();
+
+// Rows are committed in batches of this size, yielding to the event loop
+// between batches (see runSync). Measured on this exact path - 300k rows
+// through runSync/upsertCustomerPricing - with a 50ms timer probing how often
+// the event loop got a turn:
+//
+//   batch     total     worst stall   loop turns during the run
+//   single    9.4s      (blocked)     2      <- the bug: loop is dead throughout
+//   1 000     12.7s     246ms         149
+//   2 000     12.3s     270ms         138
+//   5 000     11.9s     436ms          61
+//   20 000    9.8s      1034ms         16
+//
+// Note how little throughput the small batches actually cost: 2k is 31% slower
+// than one big transaction, but the loop gets 138 turns instead of 2. The real
+// per-row work (value coercion, a 9-column upsert) dominates, so commit
+// overhead barely registers - which makes a small batch close to free. Total
+// time matters little now that this runs nightly; responsiveness is the point.
+//
+// Per-row cost is higher on the production box (1.2GB DB, slower shared disk),
+// so expect a larger stall there - tune it down via env without a redeploy if
+// the [sync] timings show it is still too coarse.
+const BATCH_SIZE = Number(process.env.SYNC_BATCH_SIZE) || 2000;
 
 export async function runSync(entity) {
   if (!UPSERTERS[entity]) throw new Error(`Unknown sync entity: ${entity}`);
@@ -188,28 +257,68 @@ export async function runSync(entity) {
   const runId = db.prepare('INSERT INTO sync_runs (source, entity) VALUES (?, ?)').run(source, entity).lastInsertRowid;
   syncsInFlight.add(entity);
   try {
+    const fetchStart = Date.now();
     const rows = await getProvider().fetch(entity);
+    const fetchMs = Date.now() - fetchStart;
+    const writeStart = Date.now();
     let upserted = 0;
+    let skipped = 0;
     const errors = [];
-    // Wrapped in a single transaction - without this, better-sqlite3 commits
-    // each row individually, which is what made the ~13M-row customer_pricing
-    // sync take over an hour. Batching as one transaction cuts that to seconds.
-    const upsertAll = db.transaction((rows) => {
-      for (const row of rows) {
-        try {
-          UPSERTERS[entity](row);
-          upserted += 1;
-        } catch (e) {
-          errors.push(e.message);
-        }
+
+    const applyRow = (row) => {
+      try {
+        // An upserter returning false means "deliberately skipped, not an
+        // error" (e.g. rep_sales rows with no matching rep) - counted
+        // separately so a sync full of silent skips doesn't read as success.
+        if (UPSERTERS[entity](row) === false) skipped += 1;
+        else upserted += 1;
+      } catch (e) {
+        errors.push(e.message);
       }
-    });
-    upsertAll(rows);
+    };
+
+    // Row writes must be batched into transactions - committing each row
+    // individually is what made the multi-million-row customer_pricing sync
+    // take over an hour. But better-sqlite3 is synchronous, so wrapping the
+    // WHOLE run in one transaction blocked the event loop for ~20 minutes a
+    // run: the API served nothing (reps saw an endless spinner) and the health
+    // check timed out every hour. So: batch, then hand control back to the
+    // event loop between batches.
+    //
+    // The trade-off is that a batched run is no longer atomic. That is safe
+    // for the plain upsert entities - they mirror SYSPRO and every upsert is
+    // idempotent, so a run that dies halfway just leaves a mix of fresh and
+    // stale rows that the next run reconciles. Entities that CLEAR first are
+    // not safe that way: the table is emptied before it is repopulated, so a
+    // reader mid-run would see missing or half-summed totals. Those stay in a
+    // single atomic transaction - they are small enough (thousands of rows,
+    // not millions) that the blocking window is short.
+    if (CLEAR_BEFORE_SYNC[entity]) {
+      db.transaction(() => {
+        CLEAR_BEFORE_SYNC[entity]();
+        for (const row of rows) applyRow(row);
+      })();
+    } else {
+      // Indices rather than array slices - avoids copying batches out of a
+      // list that is already several million rows on this path.
+      const writeBatch = db.transaction((start, end) => {
+        for (let i = start; i < end; i++) applyRow(rows[i]);
+      });
+      for (let start = 0; start < rows.length; start += BATCH_SIZE) {
+        writeBatch(start, Math.min(start + BATCH_SIZE, rows.length));
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+    const writeMs = Date.now() - writeStart;
     db.prepare(`
-      UPDATE sync_runs SET status = 'completed', rows_read = ?, rows_upserted = ?, error = ?, finished_at = datetime('now')
+      UPDATE sync_runs SET status = 'completed', rows_read = ?, rows_upserted = ?, rows_skipped = ?, error = ?, finished_at = datetime('now')
       WHERE id = ?
-    `).run(rows.length, upserted, errors.length ? errors.slice(0, 10).join('; ') : null, runId);
-    return { run_id: runId, entity, rows_read: rows.length, rows_upserted: upserted, row_errors: errors.length };
+    `).run(rows.length, upserted, skipped, errors.length ? errors.slice(0, 10).join('; ') : null, runId);
+    // Split fetch vs write so a slow run can be attributed without guesswork -
+    // pulling millions of rows out of SYSPRO and writing them to SQLite are
+    // very different problems with very different fixes.
+    console.log(`[sync] ${entity}: ${rows.length} rows — fetch ${(fetchMs / 1000).toFixed(1)}s, write ${(writeMs / 1000).toFixed(1)}s`);
+    return { run_id: runId, entity, rows_read: rows.length, rows_upserted: upserted, rows_skipped: skipped, row_errors: errors.length, fetch_ms: fetchMs, write_ms: writeMs };
   } catch (e) {
     db.prepare(`
       UPDATE sync_runs SET status = 'failed', error = ?, finished_at = datetime('now') WHERE id = ?
