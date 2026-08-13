@@ -12,6 +12,7 @@ export default function CustomerDetail() {
   const { user } = useAuth();
   const [c, setC] = useState(null);
   const [intel, setIntel] = useState(null);
+  const [salesPushes, setSalesPushes] = useState([]);
   const [showEdit, setShowEdit] = useState(false);
   const [showRouteOneDetails, setShowRouteOneDetails] = useState(false);
   const [showContact, setShowContact] = useState(false);
@@ -22,6 +23,7 @@ export default function CustomerDetail() {
   useEffect(() => {
     load();
     api.get(`/intel/customer/${id}`).then(setIntel).catch(() => {});
+    api.get('/sales-pushes/active').then(setSalesPushes).catch(() => {});
   }, [id]);
 
   if (!c) return <Spinner />;
@@ -87,6 +89,16 @@ export default function CustomerDetail() {
           </dl>
         </Card>
       </div>
+
+      {salesPushes.length > 0 && (
+        <Card title="Selling tips">
+          {salesPushes.map((p) => (
+            <div key={p.id} className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-bold text-red-700 last:mb-0">
+              📢 {p.message}
+            </div>
+          ))}
+        </Card>
+      )}
 
       {intel && (
         <Card title="Sales intelligence">

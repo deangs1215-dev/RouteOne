@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db, logActivity } from '../db.js';
+import { db, logActivity, getLocalDateISO } from '../db.js';
 import { passwordIsStrong, requireRole, scopeForUser } from '../auth.js';
 import bcrypt from 'bcryptjs';
 
@@ -9,9 +9,13 @@ router.get('/dashboard', (req, res) => {
   const scope = scopeForUser(req.user);
   const repId = req.user.id;
 
+  // sales_mtd is SYSPRO's actual invoiced sales for this month (rep_monthly_sales,
+  // synced from vw_FS_RepSalesByMonth) - same source as Rep KPIs "vs target".
+  // Everything else here (orders/visits/customers) stays RouteOne-native, since
+  // rep_monthly_sales is a monthly total only - no daily or per-order detail.
   const stats = scope.isRep ? db.prepare(`
     SELECT
-      (SELECT COALESCE(SUM(total), 0) FROM orders WHERE rep_id = ? AND order_date >= date('now', 'start of month') AND status != 'cancelled') AS sales_mtd,
+      (SELECT COALESCE(sales_value, 0) FROM rep_monthly_sales WHERE rep_id = ? AND month = strftime('%Y-%m', 'now')) AS sales_mtd,
       (SELECT COUNT(*) FROM orders WHERE rep_id = ? AND date(order_date) = date('now') AND status != 'cancelled') AS orders_today,
       (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(check_in_at) = date('now') AND status = 'completed') AS visits_today,
       (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(planned_date) = date('now') AND status = 'planned') AS visits_pending,
@@ -19,7 +23,7 @@ router.get('/dashboard', (req, res) => {
       (SELECT COALESCE(AVG(total), 0) FROM orders WHERE rep_id = ? AND order_date >= date('now', '-30 days') AND status != 'cancelled') AS avg_order_value
   `).get(repId, repId, repId, repId, repId, repId) : db.prepare(`
     SELECT
-      (SELECT COALESCE(SUM(total), 0) FROM orders WHERE order_date >= date('now', 'start of month') AND status != 'cancelled') AS sales_mtd,
+      (SELECT COALESCE(SUM(sales_value), 0) FROM rep_monthly_sales WHERE month = strftime('%Y-%m', 'now')) AS sales_mtd,
       (SELECT COUNT(*) FROM orders WHERE date(order_date) = date('now') AND status != 'cancelled') AS orders_today,
       (SELECT COUNT(*) FROM visits WHERE date(check_in_at) = date('now') AND status = 'completed') AS visits_today,
       (SELECT COUNT(*) FROM visits WHERE date(planned_date) = date('now') AND status = 'planned') AS visits_pending,
@@ -30,7 +34,7 @@ router.get('/dashboard', (req, res) => {
   // "Sales by rep" leaderboard doesn't apply to a single rep's own dashboard.
   const salesByRep = scope.isRep ? [] : db.prepare(`
     SELECT u.id, u.name, u.sales_target,
-      COALESCE(SUM(CASE WHEN o.order_date >= date('now', 'start of month') AND o.status != 'cancelled' THEN o.total END), 0) AS sales_mtd,
+      COALESCE((SELECT sales_value FROM rep_monthly_sales rm WHERE rm.rep_id = u.id AND rm.month = strftime('%Y-%m', 'now')), 0) AS sales_mtd,
       COUNT(DISTINCT CASE WHEN o.order_date >= date('now', 'start of month') AND o.status != 'cancelled' THEN o.id END) AS orders_mtd,
       (SELECT COUNT(*) FROM visits v WHERE v.rep_id = u.id AND v.check_in_at >= date('now', 'start of month') AND v.status = 'completed') AS visits_mtd
     FROM users u
@@ -67,11 +71,20 @@ router.get('/dashboard', (req, res) => {
     ORDER BY o.order_date DESC LIMIT 10
   `).all(...(scope.isRep ? [repId] : []));
 
-  const salesTrend = db.prepare(`
+  // GROUP BY only returns days that had at least one order, so a quiet day is
+  // simply absent from the rows rather than a zero - zero-fill every day in
+  // the window here so the chart always draws 14 bars, not just the days with
+  // sales.
+  const salesByDay = db.prepare(`
     SELECT date(order_date) AS day, COALESCE(SUM(total), 0) AS total
     FROM orders WHERE order_date >= date('now', '-14 days') AND status != 'cancelled' ${scope.isRep ? 'AND rep_id = ?' : ''}
-    GROUP BY day ORDER BY day
+    GROUP BY day
   `).all(...(scope.isRep ? [repId] : []));
+  const salesByDayMap = Object.fromEntries(salesByDay.map((r) => [r.day, r.total]));
+  const salesTrend = Array.from({ length: 14 }, (_, i) => {
+    const day = getLocalDateISO(i - 13);
+    return { day, total: salesByDayMap[day] || 0 };
+  });
 
   res.json({ stats, salesByRep, topCustomers, atRisk, recentOrders, salesTrend });
 });

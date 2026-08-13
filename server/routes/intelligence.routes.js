@@ -186,11 +186,32 @@ router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), (req,
   const days = clamp(parseInt(req.query.days || '90', 10), 7, 365);
   const window = `-${days} days`;
 
-  const monthly = db.prepare(`
-    SELECT strftime('%Y-%m', order_date) AS month, COALESCE(SUM(total), 0) AS sales, COUNT(*) AS orders
-    FROM orders o WHERE status != 'cancelled' AND order_date >= date('now', '-365 days') ${repFilter}
-    GROUP BY month ORDER BY month
+  // "sales" is SYSPRO's actual invoiced total (rep_monthly_sales, synced from
+  // vw_FS_RepSalesByMonth) - same source as Rep KPIs. "orders" stays
+  // RouteOne-native (order count has no equivalent in a monthly sales total).
+  // The two are grouped separately and merged by month, since a month can
+  // exist in one source without the other.
+  //
+  // Year-to-date (Jan 1 of the current year through now), not a trailing
+  // 365-day window - the chart is meant to read as "this year's months", so
+  // it should reset to just January at the start of a new year rather than
+  // keep showing last December.
+  const salesByMonth = db.prepare(`
+    SELECT month, COALESCE(SUM(sales_value), 0) AS sales
+    FROM rep_monthly_sales
+    WHERE month >= strftime('%Y-01', 'now') ${scope.isRep ? 'AND rep_id = ?' : ''}
+    GROUP BY month
   `).all(...repParam);
+  const ordersByMonth = db.prepare(`
+    SELECT strftime('%Y-%m', order_date) AS month, COUNT(*) AS orders
+    FROM orders o WHERE status != 'cancelled' AND order_date >= date('now', 'start of year') ${repFilter}
+    GROUP BY month
+  `).all(...repParam);
+  const salesMap = Object.fromEntries(salesByMonth.map((r) => [r.month, r.sales]));
+  const ordersMap = Object.fromEntries(ordersByMonth.map((r) => [r.month, r.orders]));
+  const monthly = [...new Set([...salesByMonth.map((r) => r.month), ...ordersByMonth.map((r) => r.month)])]
+    .sort()
+    .map((month) => ({ month, sales: salesMap[month] || 0, orders: ordersMap[month] || 0 }));
 
   const topProducts = db.prepare(`
     SELECT p.code, p.name, SUM(i.qty) AS units, SUM(i.line_total) AS revenue,
@@ -210,9 +231,12 @@ router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), (req,
     FROM quotes WHERE quote_date >= date('now', ?) ${scope.isRep ? 'AND rep_id = ?' : ''}
   `).get(window, ...repParam);
 
-  const totals = db.prepare(`
-    SELECT COALESCE(SUM(o.total), 0) AS revenue, COUNT(o.id) AS orders,
-      COUNT(DISTINCT o.customer_id) AS active_customers, COALESCE(AVG(o.total), 0) AS aov
+  // Orders/AOV/buying-customers and the margin % basis stay period-based
+  // (order_date within the selected day window) - period_revenue here is
+  // only the denominator for margin_pct, not shown to the user directly.
+  const orderStats = db.prepare(`
+    SELECT COUNT(o.id) AS orders, COUNT(DISTINCT o.customer_id) AS active_customers,
+      COALESCE(AVG(o.total), 0) AS aov, COALESCE(SUM(o.total), 0) AS period_revenue
     FROM orders o WHERE o.status != 'cancelled' AND o.order_date >= date('now', ?) ${repFilter}
   `).get(window, ...repParam);
   const margin = db.prepare(`
@@ -221,8 +245,22 @@ router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), (req,
     JOIN orders o ON o.id = i.order_id AND o.status != 'cancelled' AND o.order_date >= date('now', ?) ${repFilter}
     JOIN products p ON p.id = i.product_id
   `).get(window, ...repParam);
-  totals.margin = margin.margin;
-  totals.margin_pct = totals.revenue ? Math.round((margin.margin / totals.revenue) * 100) : 0;
+
+  // "Revenue" is a fixed month-to-date figure (SYSPRO's actual invoiced
+  // sales, same source as Rep KPIs) - not tied to the day-period selector.
+  const revenueMtd = db.prepare(`
+    SELECT COALESCE(SUM(sales_value), 0) AS revenue
+    FROM rep_monthly_sales WHERE month = strftime('%Y-%m', 'now') ${scope.isRep ? 'AND rep_id = ?' : ''}
+  `).get(...repParam);
+
+  const totals = {
+    revenue: revenueMtd.revenue,
+    orders: orderStats.orders,
+    active_customers: orderStats.active_customers,
+    aov: orderStats.aov,
+    margin: margin.margin,
+    margin_pct: orderStats.period_revenue ? Math.round((margin.margin / orderStats.period_revenue) * 100) : 0
+  };
 
   res.json({ days, totals, monthly, topProducts, quoteFunnel });
 });

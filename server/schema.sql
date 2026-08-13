@@ -318,6 +318,22 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id, invoice_date);
 
+-- Rep sales totals by month, synced from SYSPRO's vw_FS_RepSalesByMonth
+-- (actual invoiced sales, credited to the customer's currently-assigned rep -
+-- not the app's own order-capture). Used for the Rep KPIs "sales vs target"
+-- figure and the Monthly History table. One row per rep per month - a sync
+-- run replaces the whole table, since a rep's SYSPRO sales can be split
+-- across branches and must be summed into a single total here.
+CREATE TABLE IF NOT EXISTS rep_monthly_sales (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rep_id INTEGER NOT NULL REFERENCES users(id),
+  month TEXT NOT NULL,                     -- YYYY-MM
+  sales_value REAL NOT NULL DEFAULT 0,
+  synced_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(rep_id, month)
+);
+CREATE INDEX IF NOT EXISTS idx_rep_monthly_sales_rep_month ON rep_monthly_sales(rep_id, month);
+
 -- Phase 4: SYSPRO sync + email integration ------------------------------------
 
 -- One row per sync run per entity (customers / products / stock / prices).
@@ -328,17 +344,23 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   status TEXT DEFAULT 'running',           -- running / completed / failed
   rows_read INTEGER DEFAULT 0,
   rows_upserted INTEGER DEFAULT 0,
+  rows_skipped INTEGER DEFAULT 0,          -- upserter deliberately skipped the row (not an error) - e.g. no matching rep
   error TEXT,
   started_at TEXT DEFAULT (datetime('now')),
   finished_at TEXT
 );
 
--- Configured email recipients for order/quote distribution (admin setup).
+-- Configured email recipients for order distribution and technical-form
+-- notifications (admin setup). category separates the two lists shown on the
+-- Email Settings page - 'orders' recipients appear as checkboxes when
+-- confirming an order; 'technical' recipients are notified when a
+-- technical-category form is submitted (see buildFormEmail in integration/email.js).
 CREATE TABLE IF NOT EXISTS email_recipients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,                      -- e.g., "Finance", "Management", "Accounts"
   email TEXT NOT NULL UNIQUE,
   description TEXT,
+  category TEXT NOT NULL DEFAULT 'orders', -- 'orders' | 'technical'
   created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -433,6 +455,22 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Sales push notifications: a manager broadcasts "push this product" to every
+-- rep. Not tied to any one customer's purchase history (unlike the "others
+-- buy, they don't" suggestions in intelligence.routes.js) - it's a flat
+-- announcement shown to all reps on every customer they open, highlighted in
+-- the Selling tips card until a manager turns it off.
+CREATE TABLE IF NOT EXISTS sales_pushes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sales_pushes_active ON sales_pushes(active, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_route_cycles_rep ON route_cycles(rep_id, active);
 CREATE INDEX IF NOT EXISTS idx_route_cycle_stops_cycle ON route_cycle_stops(cycle_id, week_no, weekday);

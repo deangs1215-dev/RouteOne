@@ -18,6 +18,7 @@ const NAV = [
   { to: '/kpis', label: 'Rep KPIs', icon: 'kpis' },
   { to: '/analytics', label: 'Analytics', icon: 'analytics' },
   { to: '/ai', label: 'Sales AI', icon: 'ai' },
+  { to: '/sales-push', label: 'Sales Push', icon: 'ai', adminOnly: true },
   { to: '/forms', label: 'Forms', icon: 'forms' },
   { to: '/documents', label: 'Documents', icon: 'documents' },
   {
@@ -28,7 +29,8 @@ const NAV = [
       { to: '/email', label: 'Email Settings' },
       { to: '/users', label: 'Users' },
       { to: '/integration', label: 'Integration' },
-      { to: '/backups', label: 'Backups' }
+      { to: '/backups', label: 'Backups' },
+      { to: '/monitoring', label: 'Monitoring' }
     ]
   }
 ];

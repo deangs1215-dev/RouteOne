@@ -118,6 +118,7 @@ export default function RepCustomer({ base = '/mobile' }) {
   const [fillingForm, setFillingForm] = useState(null);
   const [formsDone, setFormsDone] = useState([]);
   const [intel, setIntel] = useState(null);
+  const [salesPushes, setSalesPushes] = useState([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [checkInMenuOpen, setCheckInMenuOpen] = useState(false);
   const [checkInAddressPrompt, setCheckInAddressPrompt] = useState(null); // 'onsite_manual' | 'offsite'
@@ -167,6 +168,7 @@ export default function RepCustomer({ base = '/mobile' }) {
     load().catch(console.error);
     api.get('/form-templates').then((ts) => setTemplates(ts.filter((t) => t.active))).catch(() => {});
     api.get(`/intel/customer/${id}`).then(setIntel).catch(() => {});
+    api.get('/sales-pushes/active').then(setSalesPushes).catch(() => {});
     api.get('/visits/open').then(setOpenVisit).catch(() => {});
     loadTasks();
   }, [id]);
@@ -545,24 +547,31 @@ export default function RepCustomer({ base = '/mobile' }) {
           </div>
         )}
 
-        {/* Selling tips from the intelligence engine */}
-        {c.status !== 'prospect' && intel && (intel.suggested_products.length > 0 || intel.lapsed_products.length > 0 || intel.risk_score >= 40) && (
+        {/* Selling tips from the intelligence engine, plus any manager-broadcast
+            sales push (not customer-specific — see sales-pushes.routes.js).
+            Shows once either has loaded, so a push doesn't wait on intel. */}
+        {c.status !== 'prospect' && (salesPushes.length > 0 || (intel && (intel.suggested_products.length > 0 || intel.lapsed_products.length > 0 || intel.risk_score >= 40))) && (
           <div className="card p-4">
             <h2 className="mb-2 text-sm font-semibold text-slate-600">Selling tips</h2>
+            {salesPushes.map((p) => (
+              <div key={p.id} className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-bold text-red-700">
+                📢 {p.message}
+              </div>
+            ))}
             {/* Risk banner for the 40-69 band; at 70+ the AI alerts card below carries it. */}
-            {intel.risk_score >= 40 && !intel.actions?.some((a) => a.type === 'churn') && (
+            {intel && intel.risk_score >= 40 && !intel.actions?.some((a) => a.type === 'churn') && (
               <div className={`mb-2 rounded-lg px-3 py-2 text-xs ${intel.risk_score >= 70 ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
                 Churn risk {intel.risk_score}/100 — last order {intel.last_order_at ? `${intel.recency_days} days ago` : 'never'}
                 {intel.decline_pct > 0 && `, spend down ${intel.decline_pct}%`}
               </div>
             )}
-            {intel.lapsed_products.length > 0 && (
+            {intel && intel.lapsed_products.length > 0 && (
               <div className="mb-2">
                 <div className="text-[10px] font-semibold uppercase text-slate-400">Stopped buying — win back</div>
                 {intel.lapsed_products.map((p) => <div key={p.id} className="text-sm">• {p.name}</div>)}
               </div>
             )}
-            {intel.suggested_products.length > 0 && (
+            {intel && intel.suggested_products.length > 0 && (
               <div>
                 <div className="text-[10px] font-semibold uppercase text-slate-400">Others buy, they don't — pitch</div>
                 {intel.suggested_products.map((p) => <div key={p.id} className="text-sm">• {p.name}</div>)}
@@ -730,6 +739,7 @@ export default function RepCustomer({ base = '/mobile' }) {
                         {v.outcome && <div className="mt-0.5 text-xs text-slate-400">Outcome: {v.outcome.replace('_', ' ')}{v.rep_name ? ` · ${v.rep_name}` : ''}</div>}
                         {v.check_in_type === 'offsite' && <div className="mt-0.5 text-xs text-slate-400">☕ Offsite{v.check_in_address ? ` — ${v.check_in_address}` : ''}</div>}
                         {v.check_in_type === 'onsite_manual' && <div className="mt-0.5 text-xs text-slate-400">📍 Manual address{v.check_in_address ? ` — ${v.check_in_address}` : ''}</div>}
+                        <VisitPhotosTimeline visitId={v.id} />
                       </div>
                     );
                   })}
@@ -1398,6 +1408,49 @@ function FormProductField({ value, products, onChange }) {
             </button>
           ))}
           {matches.length === 0 && <div className="py-3 text-center text-xs text-slate-400">No products match.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VisitPhotosTimeline({ visitId }) {
+  const [photos, setPhotos] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!expanded || !visitId) return;
+    api.get(`/visits/${visitId}/photos`)
+      .then(setPhotos)
+      .catch(() => setPhotos([]));
+  }, [visitId, expanded]);
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-xs font-semibold text-slate-500 hover:text-slate-700"
+      >
+        <span>{expanded ? '▼' : '▶'}</span>
+        📸 Photos
+      </button>
+      {expanded && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {photos === null ? (
+            <div className="text-xs text-slate-400">Loading…</div>
+          ) : photos.length === 0 ? (
+            <div className="text-xs text-slate-400">No photos</div>
+          ) : (
+            photos.map((p) => (
+              <img
+                key={p.id}
+                src={p.path}
+                alt="Visit photo"
+                className="h-16 w-16 rounded-lg object-cover border border-slate-200"
+              />
+            ))
+          )}
         </div>
       )}
     </div>

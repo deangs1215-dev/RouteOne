@@ -32,6 +32,8 @@ const QuoteDetail = lazy(() => import('./pages/QuoteDetail'));
 const FormsAdmin = lazy(() => import('./pages/FormsAdmin'));
 const Documents = lazy(() => import('./pages/Documents'));
 const EmailSettings = lazy(() => import('./pages/EmailSettings'));
+const SalesPush = lazy(() => import('./pages/SalesPush'));
+const Monitoring = lazy(() => import('./pages/Monitoring'));
 const Visits = lazy(() => import('./pages/Visits'));
 const RoutesPage = lazy(() => import('./pages/Routes'));
 const LiveMap = lazy(() => import('./pages/LiveMap'));
@@ -97,8 +99,10 @@ export default function App() {
           {!isRep && <Route path="/team" element={<Team />} />}
           {!isRep && <Route path="/team/:id" element={<RepDetail />} />}
           {!isRep && <Route path="/email" element={<EmailSettings />} />}
+          {['admin', 'manager'].includes(user.role) && <Route path="/sales-push" element={<SalesPush />} />}
           {!isRep && <Route path="/integration" element={<Integration />} />}
           {!isRep && <Route path="/backups" element={<Backups />} />}
+          {!isRep && <Route path="/monitoring" element={<Monitoring />} />}
           {!isRep && <Route path="/users" element={<Users />} />}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

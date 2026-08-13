@@ -65,7 +65,6 @@ export default function Dashboard() {
                 </div>
               </div>
             ))}
-            {salesTrend.length === 0 && <div className="text-sm text-slate-400">No orders in the last 14 days.</div>}
           </div>
         </Card>
 
