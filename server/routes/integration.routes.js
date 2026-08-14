@@ -4,7 +4,7 @@ import { db, getSetting, setSetting, logActivity } from '../db.js';
 import { requireRole, scopeForUser } from '../auth.js';
 import { getProvider, testSyspro } from '../integration/providers.js';
 import { runSync, SYNC_ENTITIES, matchRep } from '../integration/sync.js';
-import { buildOrderEmail, buildOrderConfirmationEmail, buildQuoteEmail, sendEmail, attemptSend, sendTestEmail } from '../integration/email.js';
+import { buildOrderConfirmationEmail, buildQuoteEmail, sendEmail, attemptSend, sendTestEmail } from '../integration/email.js';
 import { sendAllRepDigests } from '../integration/repDigest.js';
 import { encryptSecret } from '../crypto.js';
 
@@ -15,10 +15,10 @@ const router = Router();
 const SETTING_KEYS = [
   'intg_source', 'syspro_host', 'syspro_port', 'syspro_db', 'syspro_user',
   'syspro_encrypt', 'syspro_trust_server_certificate',
-  'syspro_view_warehouses', 'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_customer_pricing', 'syspro_view_invoices',
+  'syspro_view_warehouses', 'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_customer_pricing', 'syspro_view_invoices', 'syspro_view_rep_sales',
    'email_transport', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_allow_invalid_cert', 'smtp_user', 'smtp_from',
   'graph_tenant_id', 'graph_client_id', 'graph_sender',
-  'orders_email', 'technical_email', 'email_auto_send', 'email_confirm_customer',
+  'technical_email', 'email_auto_send', 'email_confirm_customer',
   'sync_schedule', 'sync_daily_time',
   'warehouses_sync_schedule', 'warehouses_sync_daily_time',
   'customers_sync_schedule', 'customers_sync_daily_time',
@@ -26,6 +26,7 @@ const SETTING_KEYS = [
   'stock_sync_schedule', 'stock_sync_daily_time',
   'customer_pricing_sync_schedule', 'customer_pricing_sync_daily_time',
   'invoices_sync_schedule', 'invoices_sync_daily_time',
+  'rep_sales_sync_schedule', 'rep_sales_sync_daily_time',
   'rep_sync_schedule', 'rep_sync_daily_time',
   'rep_digest_enabled', 'rep_digest_time',
   // Company letterhead (email header/footer + PDF documents)
@@ -175,17 +176,6 @@ function canEmailDoc(user, table, id) {
   const doc = db.prepare(`SELECT rep_id FROM ${table} WHERE id = ?`).get(id);
   return !!doc && doc.rep_id === user.id;
 }
-
-router.post('/orders/:id/email', async (req, res) => {
-  if (!canEmailDoc(req.user, 'orders', req.params.id)) return res.status(403).json({ error: 'Not your order' });
-  try {
-    const result = await sendEmail(buildOrderEmail(req.params.id));
-    logActivity(req.user.id, 'email', 'order', req.params.id, { status: result.status });
-    res.json(result);
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
 
 router.post('/orders/:id/email-customer', async (req, res) => {
   if (!canEmailDoc(req.user, 'orders', req.params.id)) return res.status(403).json({ error: 'Not your order' });

@@ -1,7 +1,8 @@
-// Outbound email: orders go to the orders department for capture into SYSPRO;
-// quotes go to the customer. Every email is stored in email_log first - if
-// SMTP isn't configured (or fails) it stays 'pending'/'failed' and can be
-// previewed and resent from the Integration page.
+// Outbound email: orders and quotes go to the customer, the rep, and/or the
+// recipients configured in Email Settings, whichever the sender selects.
+// Every email is stored in email_log first - if SMTP isn't configured (or
+// fails) it stays 'pending'/'failed' and can be previewed and resent from the
+// Integration page.
 import { db, getSetting, VAT_RATE } from '../db.js';
 import { decryptSecret } from '../crypto.js';
 
@@ -221,7 +222,9 @@ export function buildOrderEmail(orderId) {
   return {
     kind: 'order',
     ref_id: order.id,
-    to_addr: getSetting('orders_email', ''),
+    // The caller always supplies to_addr (extra email, a configured
+    // recipient, etc.) - there is no longer a default internal address.
+    to_addr: '',
     cc_addr: order.rep_email || null,
     subject: `Sales order ${order.number} — ${order.customer_name} (${order.customer_code}) — ${fmtR(order.total)}`,
     body_html: wrap(`Sales order ${order.number}`, inner)
@@ -431,13 +434,10 @@ export async function attemptSend(emailId) {
   }
 
   try {
-    // Customer-facing documents (quote, and the order confirmation that goes to
-    // the customer rather than telesales) get the PDF attached. The telesales
-    // order email stays HTML-only for capture.
+    // Every order/quote email gets its PDF attached - there is no longer an
+    // internal, PDF-less recipient type.
     let attachments;
-    const ordersEmail = getSetting('orders_email', '');
-    const isCustomerDoc = email.kind === 'quote' || (email.kind === 'order' && email.to_addr !== ordersEmail);
-    if (isCustomerDoc) {
+    if (email.kind === 'order' || email.kind === 'quote') {
       try {
         const pdf = await pdfForEmail(email.kind, email.ref_id);
         if (pdf) attachments = [pdf];

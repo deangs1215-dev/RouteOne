@@ -174,20 +174,15 @@ function createOrder(user, b, res) {
     logActivity(user.id, 'create', 'order', orderId, { customer: customer.name });
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
-    // Submitted orders are emailed to the orders department for SYSPRO capture,
-    // and the customer gets a confirmation copy. The whole email block is
-    // best-effort: the order is already committed, so an email problem must
-    // never turn the response into an error.
+    // Submitted orders can be emailed to the customer, the rep, an ad-hoc
+    // address, and/or configured recipients - whichever the rep ticked on the
+    // capture screen. The whole email block is best-effort: the order is
+    // already committed, so an email problem must never turn the response
+    // into an error.
     try {
       if (order.status === 'submitted' && getSetting('email_auto_send', '1') === '1') {
-        // Orders-department (SYSPRO capture) and customer confirmation are
-        // opt-in - nothing sends unless the rep explicitly ticks the box on
-        // the capture screen.
-        if (b.send_to_orders === true) {
-          const draft = buildOrderEmail(orderId);
-          if (b.send_to_rep !== true) draft.cc_addr = null;
-          sendEmail(draft).catch((e) => console.error('Order email failed:', e.message));
-        }
+        // Customer confirmation is opt-in - nothing sends unless the rep
+        // explicitly ticks the box on the capture screen.
         if (b.send_to_customer === true && getSetting('email_confirm_customer', '1') === '1') {
           const confirmDraft = buildOrderConfirmationEmail(orderId);
           if (b.send_to_rep !== true) confirmDraft.cc_addr = null;
@@ -254,7 +249,7 @@ router.post('/orders/:id/repeat', (req, res) => {
 
 // Send an order to selected recipients (admin/manager only).
 router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (req, res) => {
-  const { recipients = [], send_to_rep, send_to_customer, send_to_orders } = req.body || {};
+  const { recipients = [], send_to_rep, send_to_customer } = req.body || {};
   const order = db.prepare(`
     SELECT o.*, c.name AS customer_name, c.email AS customer_email,
       u.name AS rep_name, u.email AS rep_email
@@ -307,11 +302,6 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
   // Send to customer
   if (send_to_customer && order.customer_email) {
     emailsToSend.push(buildOrderConfirmationEmail(order.id));
-  }
-
-  // Send to orders department (SYSPRO capture)
-  if (send_to_orders) {
-    emailsToSend.push(buildOrderEmail(order.id));
   }
 
   // Send all emails in parallel

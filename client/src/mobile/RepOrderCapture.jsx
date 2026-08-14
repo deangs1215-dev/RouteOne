@@ -37,10 +37,9 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   // position instead of its own top.
   useEffect(() => { if (showSummary) window.scrollTo(0, 0); }, [showSummary]);
   const [done, setDone] = useState(null); // { number?, queued? }
-  const [orderEmailInfo, setOrderEmailInfo] = useState(null); // { orders_email, recipients }
+  const [orderEmailInfo, setOrderEmailInfo] = useState(null); // { recipients }
   const [sendToRep, setSendToRep] = useState(false);
   const [sendToCustomer, setSendToCustomer] = useState(false);
-  const [sendToOrders, setSendToOrders] = useState(false); // unticked by default — nothing emails unless the rep ticks it
   const [extraEmail, setExtraEmail] = useState('');
   const [recipientIds, setRecipientIds] = useState(new Set()); // unticked by default — rep picks who gets it
 
@@ -104,7 +103,6 @@ export default function RepOrderCapture({ base = '/mobile' }) {
       signature: isQuote ? null : signature,
       send_to_rep: sendToRep,
       send_to_customer: sendToCustomer,
-      send_to_orders: sendToOrders,
       extra_email: trimmedExtra || null,
       recipient_ids: [...recipientIds]
     };
@@ -254,13 +252,6 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 <input type="checkbox" checked={sendToRep} onChange={(e) => setSendToRep(e.target.checked)} />
                 Send a copy to me{user?.email ? ` (${user.email})` : ''}
               </label>
-              {!isQuote && (
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={sendToOrders} disabled={!orderEmailInfo?.orders_email}
-                    onChange={(e) => setSendToOrders(e.target.checked)} />
-                  <span>Orders department{orderEmailInfo?.orders_email ? <span className="ml-1 text-xs text-slate-400">{orderEmailInfo.orders_email}</span> : ''}</span>
-                </label>
-              )}
 
               {/* Recipients configured in Settings — unticked by default, rep picks who gets it */}
               {orderEmailInfo?.recipients?.length > 0 && (

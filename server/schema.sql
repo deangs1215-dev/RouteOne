@@ -364,7 +364,7 @@ CREATE TABLE IF NOT EXISTS email_recipients (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
--- Outbound emails (orders to the orders department, quotes to customers).
+-- Outbound emails (orders and quotes to the customer, rep, and/or configured recipients).
 CREATE TABLE IF NOT EXISTS email_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,                      -- order / quote

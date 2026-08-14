@@ -63,7 +63,6 @@ export default function OrderDetail() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button className="btn-secondary" onClick={() => sendMail(`/orders/${id}/email`)}>✉ Orders dept</button>
           <button className="btn-secondary" onClick={() => sendMail(`/orders/${id}/email-customer`)}>✉ Confirmation to customer</button>
           <button className="btn-secondary" onClick={repeat}>Repeat order</button>
           {canChangeStatus && NEXT_ACTIONS[order.status].map(([status, label]) => (

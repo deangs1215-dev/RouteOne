@@ -8,7 +8,6 @@ export default function OrderSendModal({ order, kind = 'order', onClose, onSent 
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [sendToRep, setSendToRep] = useState(false);
   const [sendToCustomer, setSendToCustomer] = useState(false);
-  const [sendToOrders, setSendToOrders] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -43,7 +42,7 @@ export default function OrderSendModal({ order, kind = 'order', onClose, onSent 
     const selectedRecipients = Array.from(selectedIds);
 
     // At least one recipient or option must be selected
-    if (selectedRecipients.length === 0 && !sendToRep && !sendToCustomer && !sendToOrders) {
+    if (selectedRecipients.length === 0 && !sendToRep && !sendToCustomer) {
       return setError('Select at least one recipient or option');
     }
 
@@ -52,8 +51,7 @@ export default function OrderSendModal({ order, kind = 'order', onClose, onSent 
       await api.post(`/${kind === 'quote' ? 'quotes' : 'orders'}/${order.id}/send-email`, {
         recipients: selectedRecipients,
         send_to_rep: sendToRep,
-        send_to_customer: sendToCustomer,
-        ...(kind === 'quote' ? {} : { send_to_orders: sendToOrders })
+        send_to_customer: sendToCustomer
       });
       onSent?.();
     } catch (e) {
@@ -131,17 +129,6 @@ export default function OrderSendModal({ order, kind = 'order', onClose, onSent 
             />
             <span className="text-sm text-slate-700">Send copy to customer</span>
           </label>
-          {kind !== 'quote' && (
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={sendToOrders}
-                onChange={(e) => setSendToOrders(e.target.checked)}
-                className="w-4 h-4"
-              />
-              <span className="text-sm text-slate-700">Send to orders department</span>
-            </label>
-          )}
         </div>
 
         <div className="flex gap-2 border-t border-slate-100 pt-4">
