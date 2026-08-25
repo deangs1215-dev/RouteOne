@@ -223,11 +223,13 @@ export default function RepOrderCapture({ base = '/mobile' }) {
             const listPrice = (p.list_price || 0) * (p.conv_factor_alt_uom || p.pack_weight_kg || 1);
             const belowList = !isQuote && listPrice > 0 && price < listPrice ? listPrice - price : null;
             return (
-              <div key={p.id} className="card flex items-center gap-3 p-3">
+              <div key={p.id} className={`card flex items-center gap-3 p-3 ${
+                p.discontinued ? 'border-red-200 bg-red-50/50' : ''}`}>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">
-                    {p.name}
-                    {p.times_bought > 0 && <span className="ml-1.5 rounded bg-emerald-50 px-1 py-0.5 text-[10px] text-emerald-600">buys {p.times_bought}×</span>}
+                    <span className={p.discontinued ? 'text-red-700 line-through' : ''}>{p.name}</span>
+                    {p.discontinued && <span className="ml-1.5 rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700">discontinued</span>}
+                    {!p.discontinued && p.times_bought > 0 && <span className="ml-1.5 rounded bg-emerald-50 px-1 py-0.5 text-[10px] text-emerald-600">buys {p.times_bought}×</span>}
                   </div>
                   <div className="text-xs text-slate-400">
                     {p.code} · {fmtR(price)}
@@ -243,7 +245,9 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                     <div className="text-[10px] text-sky-600">💡 {nextBreak.min_qty}+ units → {fmtR(nextBreak.price)} each</div>
                   )}
                 </div>
-                {qty === 0 ? (
+                {p.discontinued ? (
+                  <span className="whitespace-nowrap text-[11px] font-medium text-red-600">unavailable</span>
+                ) : qty === 0 ? (
                   <button className="btn-secondary px-3" onClick={() => setQty(p.id, 1)}>+</button>
                 ) : (
                   <div className="flex items-center gap-2">

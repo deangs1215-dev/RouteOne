@@ -106,6 +106,10 @@ CREATE TABLE IF NOT EXISTS products (
   list_price REAL NOT NULL DEFAULT 0,
   cost_price REAL DEFAULT 0,
   stock_qty REAL DEFAULT 0,
+  -- SYSPRO InvMaster+.Discontinued. Run-out stock that is still being invoiced
+  -- stays visible in the catalogue (see docs/sql/vw_FS_Products-discontinued.sql)
+  -- so reps can see it exists, but always with active = 0 so it can't be ordered.
+  discontinued INTEGER DEFAULT 0,
   active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now'))
 );

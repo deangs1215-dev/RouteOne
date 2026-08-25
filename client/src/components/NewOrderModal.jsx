@@ -212,11 +212,15 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
             <input className="input" placeholder="Search by name or code..." value={search} onChange={(e) => setSearch(e.target.value)} />
             <div className="mt-1 card p-0 max-h-64 overflow-y-auto">
               {filtered.map((p) => (
-                <button key={p.id} className="flex w-full items-center justify-between border-b border-slate-100 px-4 py-2.5 text-left text-sm hover:bg-slate-50"
-                  onClick={() => addLine(p)}>
+                <button key={p.id} disabled={!!p.discontinued}
+                  title={p.discontinued ? 'Discontinued in SYSPRO — cannot be ordered' : undefined}
+                  className={`flex w-full items-center justify-between border-b border-slate-100 px-4 py-2.5 text-left text-sm ${
+                    p.discontinued ? 'cursor-not-allowed bg-red-50/50 opacity-60' : 'hover:bg-slate-50'}`}
+                  onClick={() => { if (!p.discontinued) addLine(p); }}>
                   <span>
-                    <span className="font-medium">{p.name}</span>
-                    {p.times_bought > 0 && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">bought {p.times_bought}x</span>}
+                    <span className={`font-medium ${p.discontinued ? 'text-red-700 line-through' : ''}`}>{p.name}</span>
+                    {p.discontinued && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">discontinued</span>}
+                    {!p.discontinued && p.times_bought > 0 && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">bought {p.times_bought}x</span>}
                     <span className="ml-2 text-xs text-slate-400">{p.code} · stock {p.stock_qty}</span>
                   </span>
                   <span className="text-right">

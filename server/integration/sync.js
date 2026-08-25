@@ -88,20 +88,32 @@ const upsertProduct = (row) => {
   // Null (not 1.0) when the view predates ConvFactAltUom - COALESCE below then
   // keeps any existing value, and productUnitPrice falls back to pack_weight_kg.
   const convFactorAltUom = row.conv_factor_alt_uom ?? null;
+  // SYSPRO's Discontinued flag drives BOTH columns: `discontinued` is what the
+  // UI badges in red, `active` is what actually blocks ordering (orders and
+  // quotes both resolve line items with "WHERE id = ? AND active = 1", so the
+  // rule holds server-side even if a client ignores the badge).
+  //
+  // Both are assigned unconditionally rather than via COALESCE: a product that
+  // comes OFF discontinued in SYSPRO has to become orderable again on the next
+  // sync, and COALESCE would strand it at active = 0 forever.
+  const discontinued = row.discontinued ? 1 : 0;
   const existing = db.prepare('SELECT id FROM products WHERE code = ?').get(row.code);
   if (existing) {
     db.prepare(`
       UPDATE products SET name = ?, category_id = COALESCE(?, category_id), description = COALESCE(?, description),
         uom = COALESCE(?, uom), pack_size = COALESCE(?, pack_size), pack_weight_kg = COALESCE(?, pack_weight_kg),
-        conv_factor_alt_uom = COALESCE(?, conv_factor_alt_uom), list_price = ?, cost_price = COALESCE(?, cost_price)
+        conv_factor_alt_uom = COALESCE(?, conv_factor_alt_uom), list_price = ?, cost_price = COALESCE(?, cost_price),
+        discontinued = ?, active = ?
       WHERE id = ?
-    `).run(row.name, categoryId, row.description, row.uom, row.pack_size, packWeight, convFactorAltUom, row.list_price ?? 0, row.cost_price, existing.id);
+    `).run(row.name, categoryId, row.description, row.uom, row.pack_size, packWeight, convFactorAltUom, row.list_price ?? 0, row.cost_price,
+      discontinued, discontinued ? 0 : 1, existing.id);
   } else {
     db.prepare(`
-      INSERT INTO products (code, name, category_id, description, uom, pack_size, pack_weight_kg, conv_factor_alt_uom, list_price, cost_price, stock_qty)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      INSERT INTO products (code, name, category_id, description, uom, pack_size, pack_weight_kg, conv_factor_alt_uom, list_price, cost_price, stock_qty, discontinued, active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
     `).run(row.code, row.name, categoryId, row.description || null, row.uom || 'each',
-      row.pack_size || null, packWeight, convFactorAltUom, row.list_price ?? 0, row.cost_price ?? 0);
+      row.pack_size || null, packWeight, convFactorAltUom, row.list_price ?? 0, row.cost_price ?? 0,
+      discontinued, discontinued ? 0 : 1);
   }
 };
 

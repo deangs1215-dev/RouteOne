@@ -50,6 +50,7 @@ for (const stmt of [
   'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 1',
   'ALTER TABLE products ADD COLUMN pack_weight_kg REAL',
   'ALTER TABLE products ADD COLUMN conv_factor_alt_uom REAL',
+  'ALTER TABLE products ADD COLUMN discontinued INTEGER DEFAULT 0',
   "ALTER TABLE visits ADD COLUMN check_in_type TEXT DEFAULT 'onsite'",
   'ALTER TABLE visits ADD COLUMN check_in_address TEXT',
   'ALTER TABLE orders ADD COLUMN signature TEXT',

@@ -132,8 +132,14 @@ router.post('/quotes', (req, res) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const item of b.items) {
-      const product = db.prepare('SELECT * FROM products WHERE id = ? AND active = 1').get(item.product_id);
+      // See the matching comment in orders.routes.js - same guard, clearer message.
+      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) throw new Error(`Product ${item.product_id} not found`);
+      if (!product.active) {
+        throw new Error(product.discontinued
+          ? `${product.name} has been discontinued and can no longer be quoted`
+          : `${product.name} is not available for quoting`);
+      }
       const qty = Number(item.qty);
       if (!Number.isFinite(qty) || qty <= 0 || qty > 1000000) throw new Error('Invalid quote quantity');
       const requestedPrice = Number(item.unit_price);

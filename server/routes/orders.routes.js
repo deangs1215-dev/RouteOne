@@ -143,8 +143,17 @@ function createOrder(user, b, res) {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const item of b.items) {
-      const product = db.prepare('SELECT * FROM products WHERE id = ? AND active = 1').get(item.product_id);
+      // Fetched without the active filter so a blocked line can say WHY it was
+      // rejected - a discontinued product may already sit in a saved draft or an
+      // offline cart from before it was flagged. The guard below is exactly as
+      // strict as the old "AND active = 1"; only the message improved.
+      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) throw new Error(`Product ${item.product_id} not found`);
+      if (!product.active) {
+        throw new Error(product.discontinued
+          ? `${product.name} has been discontinued and can no longer be ordered`
+          : `${product.name} is not available for ordering`);
+      }
       const qty = Number(item.qty);
       if (!Number.isFinite(qty) || qty <= 0 || qty > 1000000) throw new Error('Invalid order quantity');
       // Qty-aware pricing: quantity breaks from price rules apply per line.
