@@ -367,9 +367,11 @@ CREATE TABLE IF NOT EXISTS invoice_items (
   line_total REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
--- Drives the rep-scoping EXISTS in the invoice list - without it that becomes a
--- full scan of a ~285k-row table per request.
-CREATE INDEX IF NOT EXISTS idx_invoice_items_delivery_customer ON invoice_items(delivery_customer_id);
+-- NOTE: the index on delivery_customer_id is created in db.js's migration list,
+-- NOT here. schema.sql runs before those migrations and is not error-tolerant,
+-- so indexing a column that an existing database has not been migrated to yet
+-- crashes the process on startup. Any index over a newly-added column must go
+-- in the migration list, after the ALTER TABLE that adds it.
 
 -- Rep sales totals by month, synced from SYSPRO's vw_FS_RepSalesByMonth
 -- (actual invoiced sales, credited to the customer's currently-assigned rep -
