@@ -10,8 +10,25 @@ router.get('/invoices', (req, res) => {
   const where = [];
   const params = [];
 
-  if (scope.isRep) { where.push('u.id = ?'); params.push(req.user.id); }
-  else if (rep_id) { where.push('u.id = ?'); params.push(rep_id); }
+  // A rep owns an invoice if they own the account it was BILLED to, or any store
+  // it was DELIVERED to. Retail chains are invoiced centrally - PICK N PAY
+  // RETAILERS gets the invoice, individual stores get the goods - and reps are
+  // assigned to the stores. Scoping on the billed customer alone hid every
+  // group-billed invoice from the rep who services the store.
+  //
+  // One invoice can span stores belonging to different reps, so it can now be
+  // visible to more than one of them. That is deliberate and accurate: each rep
+  // sees an invoice that genuinely includes their customer.
+  //
+  // Delivery attribution only reaches as far back as invoice_items, which the
+  // lines view populates for 90 days - the same window as the invoice list.
+  const repScope = `(c.rep_id = ? OR EXISTS (
+      SELECT 1 FROM invoice_items ii
+      JOIN customers dc ON dc.id = ii.delivery_customer_id
+      WHERE ii.invoice_id = i.id AND dc.rep_id = ?
+    ))`;
+  if (scope.isRep) { where.push(repScope); params.push(req.user.id, req.user.id); }
+  else if (rep_id) { where.push(repScope); params.push(rep_id, rep_id); }
 
   if (q) { where.push('(i.number LIKE ? OR c.name LIKE ? OR i.customer_code LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
   if (status) { where.push('i.status = ?'); params.push(status); }
@@ -42,8 +59,17 @@ router.get('/invoices/:id', (req, res) => {
     WHERE i.id = ?
   `).get(req.params.id);
   if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  // Same ownership rule as the list: billed-to OR delivered-to. Without the
+  // delivery check a rep could see a group-billed invoice in the list and then
+  // get a 403 opening it.
   if (scopeForUser(req.user).isRep && invoice.rep_id !== req.user.id) {
-    return res.status(403).json({ error: 'Not your invoice' });
+    const deliveredToRep = db.prepare(`
+      SELECT 1 FROM invoice_items ii
+      JOIN customers dc ON dc.id = ii.delivery_customer_id
+      WHERE ii.invoice_id = ? AND dc.rep_id = ?
+      LIMIT 1
+    `).get(invoice.id, req.user.id);
+    if (!deliveredToRep) return res.status(403).json({ error: 'Not your invoice' });
   }
   delete invoice.rep_id;
 
@@ -54,10 +80,19 @@ router.get('/invoices/:id', (req, res) => {
   // can still adjust qty/price at invoicing time, or split/merge orders
   // across invoices, so that fallback is never treated as authoritative.
   let items = db.prepare(`
-    SELECT ii.product_code, ii.qty, ii.unit_price, ii.line_total, p.name AS product_name, p.uom
-    FROM invoice_items ii LEFT JOIN products p ON p.id = ii.product_id
+    SELECT ii.product_code, ii.qty, ii.unit_price, ii.line_total, p.name AS product_name, p.uom,
+      ii.delivery_customer_code, dc.name AS delivery_customer_name
+    FROM invoice_items ii
+    LEFT JOIN products p ON p.id = ii.product_id
+    LEFT JOIN customers dc ON dc.id = ii.delivery_customer_id
     WHERE ii.invoice_id = ?
   `).all(invoice.id);
+  // On a centrally-billed invoice the lines can span several stores, so the UI
+  // needs to say which store each line went to. Only meaningful when it differs
+  // from the billed customer - flagged here rather than compared in the client.
+  const deliveryStores = [...new Set(items.map((i) => i.delivery_customer_name).filter(Boolean))];
+  const isGroupBilled = deliveryStores.length > 0 &&
+    !(deliveryStores.length === 1 && deliveryStores[0] === invoice.customer_name);
   let itemsSource = items.length ? 'syspro' : null;
 
   if (!items.length && invoice.order_number) {
@@ -71,7 +106,7 @@ router.get('/invoices/:id', (req, res) => {
       itemsSource = 'order';
     }
   }
-  res.json({ ...invoice, items, items_source: itemsSource });
+  res.json({ ...invoice, items, items_source: itemsSource, is_group_billed: isGroupBilled, delivery_stores: deliveryStores });
 });
 
 export default router;

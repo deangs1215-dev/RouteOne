@@ -119,7 +119,13 @@ router.get('/products/for-customer/:customerId', (req, res) => {
     FROM products p
     LEFT JOIN product_categories c ON c.id = p.category_id
     LEFT JOIN customer_prices cp ON cp.product_id = p.id AND cp.customer_id = ?
-    WHERE p.active = 1
+    -- Discontinued run-out stock (active = 0) is deliberately included so the
+    -- order screens can show it struck through and badged rather than having it
+    -- silently disappear - a rep searching for a product they know exists needs
+    -- to see WHY it can't be ordered. The client disables the add control, and
+    -- the order/quote POST rejects the line anyway (both resolve items with
+    -- active = 1), so including it here cannot make it orderable.
+    WHERE p.active = 1 OR p.discontinued = 1
     ORDER BY p.name
   `).all(cid, cid, cid, cid, cid);
 

@@ -51,6 +51,11 @@ for (const stmt of [
   'ALTER TABLE products ADD COLUMN pack_weight_kg REAL',
   'ALTER TABLE products ADD COLUMN conv_factor_alt_uom REAL',
   'ALTER TABLE products ADD COLUMN discontinued INTEGER DEFAULT 0',
+  // Delivery store on an invoice line - differs from the invoice's billed
+  // customer under central/head-office billing. See invoices.routes.js.
+  'ALTER TABLE invoice_items ADD COLUMN delivery_customer_id INTEGER REFERENCES customers(id)',
+  'ALTER TABLE invoice_items ADD COLUMN delivery_customer_code TEXT',
+  'CREATE INDEX IF NOT EXISTS idx_invoice_items_delivery_customer ON invoice_items(delivery_customer_id)',
   "ALTER TABLE visits ADD COLUMN check_in_type TEXT DEFAULT 'onsite'",
   'ALTER TABLE visits ADD COLUMN check_in_address TEXT',
   'ALTER TABLE orders ADD COLUMN signature TEXT',

@@ -232,14 +232,37 @@ const upsertRepSales = (row) => {
 // so this table is fully wiped and rebuilt each run (see CLEAR_BEFORE_SYNC)
 // rather than upserted. A row whose invoice isn't synced yet (outside the
 // header view's own window, or a sync-order hiccup) is skipped, not an error.
+// Code -> customers.id, memoised for the duration of one sync run. The lines
+// view is ~285k rows over 90 days and the same store repeats across many of
+// them, so a per-row lookup would be a quarter-million redundant queries.
+// Cleared at the start of each run (see CLEAR_BEFORE_SYNC) so a customer synced
+// later in the day is picked up rather than cached as missing forever.
+let deliveryCustomerCache = new Map();
+const deliveryCustomerId = (code) => {
+  if (!code) return null;
+  if (deliveryCustomerCache.has(code)) return deliveryCustomerCache.get(code);
+  const id = db.prepare('SELECT id FROM customers WHERE code = ?').get(code)?.id ?? null;
+  deliveryCustomerCache.set(code, id);
+  return id;
+};
+
 const upsertInvoiceLine = (row) => {
   const invoice = db.prepare('SELECT id FROM invoices WHERE number = ?').get(row.invoice_number);
   if (!invoice) return false;
   const product = db.prepare('SELECT id FROM products WHERE code = ?').get(row.product_code);
+  // The store the goods went to. Under central billing this differs from the
+  // invoice's own customer (PICK N PAY RETAILERS billed, OAKDENE delivered) and
+  // it is what the rep is actually assigned to - see invoices.routes.js.
+  // Null when the view predates the column, or the store was never synced as a
+  // customer; scoping then falls back to the billed customer alone, i.e. the
+  // behaviour before this change.
+  const deliveryCode = row.delivery_customer_code ?? null;
   db.prepare(`
-    INSERT INTO invoice_items (invoice_id, product_id, product_code, qty, unit_price, line_total)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(invoice.id, product?.id ?? null, row.product_code, row.qty ?? 0, row.unit_price ?? 0, row.line_total ?? 0);
+    INSERT INTO invoice_items (invoice_id, product_id, product_code, delivery_customer_id, delivery_customer_code, qty, unit_price, line_total)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(invoice.id, product?.id ?? null, row.product_code,
+    deliveryCustomerId(deliveryCode), deliveryCode,
+    row.qty ?? 0, row.unit_price ?? 0, row.line_total ?? 0);
 };
 
 const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, invoice_lines: upsertInvoiceLine, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales };
@@ -250,7 +273,10 @@ const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, prod
 // invoice lines, instead of recomputing from scratch.
 const CLEAR_BEFORE_SYNC = {
   rep_sales: () => db.prepare('DELETE FROM rep_monthly_sales').run(),
-  invoice_lines: () => db.prepare('DELETE FROM invoice_items').run()
+  invoice_lines: () => {
+    db.prepare('DELETE FROM invoice_items').run();
+    deliveryCustomerCache = new Map();  // don't carry stale "not found" entries between runs
+  }
 };
 
 // Order matters: customers reference warehouses; customer_pricing and invoices reference customers (and products).

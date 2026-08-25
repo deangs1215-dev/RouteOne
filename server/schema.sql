@@ -343,22 +343,33 @@ CREATE TABLE IF NOT EXISTS invoices (
 CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id, invoice_date);
 
 -- Per-product invoice line detail, synced from SYSPRO's vw_FS_InvoiceLines
--- (see docs/sql/vw_FS_InvoiceLines.sql). That view only covers the last 30
--- days of invoices by design, so this table is wiped and fully rebuilt on
--- every sync (no stable natural key per line - the same product can appear
--- on more than one line of an invoice), same pattern as rep_monthly_sales.
--- Invoices outside that window simply have no rows here; the app falls back
--- to the linked RouteOne order's items as a best-effort approximation.
+-- (see docs/sql/vw_FS_InvoiceLines-delivery-customer.sql). That view covers the
+-- last 90 days of invoices, matching vw_FS_Invoices, so this table is wiped and
+-- fully rebuilt on every sync (no stable natural key per line - the same product
+-- can appear on more than one line of an invoice), same pattern as
+-- rep_monthly_sales. Invoices outside that window simply have no rows here; the
+-- app falls back to the linked RouteOne order's items as a best-effort guess.
+--
+-- delivery_customer_id is the STORE the goods went to (ArTrnDetail.Customer),
+-- which differs from invoices.customer_id (the billed account) whenever a
+-- retail chain is invoiced centrally - e.g. PICK N PAY RETAILERS billed for a
+-- delivery to OAKDENE MINI MARKET. Reps are assigned to the store, not the
+-- group account, so invoice visibility scopes on BOTH (see invoices.routes.js).
 CREATE TABLE IF NOT EXISTS invoice_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
   product_id INTEGER REFERENCES products(id),  -- NULL if the code doesn't match any synced product (discontinued, etc.)
   product_code TEXT NOT NULL,
+  delivery_customer_id INTEGER REFERENCES customers(id),  -- NULL if the store isn't a synced customer
+  delivery_customer_code TEXT,                            -- kept raw for diagnosing unresolved codes
   qty REAL NOT NULL,
   unit_price REAL NOT NULL,
   line_total REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
+-- Drives the rep-scoping EXISTS in the invoice list - without it that becomes a
+-- full scan of a ~285k-row table per request.
+CREATE INDEX IF NOT EXISTS idx_invoice_items_delivery_customer ON invoice_items(delivery_customer_id);
 
 -- Rep sales totals by month, synced from SYSPRO's vw_FS_RepSalesByMonth
 -- (actual invoiced sales, credited to the customer's currently-assigned rep -
