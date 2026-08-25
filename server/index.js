@@ -27,6 +27,7 @@ import documentRoutes from './routes/documents.routes.js';
 import backupRoutes from './routes/backups.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import salesPushesRoutes from './routes/sales-pushes.routes.js';
+import draftsRoutes from './routes/drafts.routes.js';
 import { startScheduler } from './integration/scheduler.js';
 import { startRepDigestScheduler } from './integration/repDigest.js';
 import { startBackupScheduler } from './backup.js';
@@ -148,6 +149,7 @@ app.use('/api', documentRoutes);
 app.use('/api', backupRoutes);
 app.use('/api', monitoringRoutes);
 app.use('/api', salesPushesRoutes);
+app.use('/api', draftsRoutes);
 app.use('/api', settingsRoutes);
 
 // Serve the built client in production. Vite fingerprints asset filenames, so

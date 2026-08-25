@@ -226,11 +226,18 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), (req, res)
   `).all(...(scope.isRep ? [req.user.id] : []));
 
   const kpis = reps.map((rep) => {
-    const sales = db.prepare(`
-      SELECT COALESCE(SUM(total), 0) AS total, COUNT(*) AS orders, COALESCE(AVG(total), 0) AS aov
+    // Orders/AOV are app-native activity (orders actually captured in RouteOne);
+    // the sales total itself comes from SYSPRO's actual invoiced sales
+    // (rep_monthly_sales, synced from vw_FS_RepSalesByMonth) so "vs target"
+    // reflects real sales, not just what happened to be placed through the app.
+    const orderStats = db.prepare(`
+      SELECT COUNT(*) AS orders, COALESCE(AVG(total), 0) AS aov
       FROM orders WHERE rep_id = ? AND status != 'cancelled'
         AND strftime('%Y-%m', order_date) = ?
     `).get(rep.id, month);
+    const repSales = db.prepare(`
+      SELECT sales_value FROM rep_monthly_sales WHERE rep_id = ? AND month = ?
+    `).get(rep.id, month) || { sales_value: 0 };
     const visits = db.prepare(`
       SELECT
         COUNT(CASE WHEN status = 'completed' THEN 1 END) AS completed,
@@ -257,15 +264,15 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), (req, res)
     return {
       rep_id: rep.id,
       name: rep.name,
-      sales: sales.total,
+      sales: repSales.sales_value,
       target,
-      target_pct: target ? Math.round((sales.total / target) * 100) : null,
-      orders: sales.orders,
-      avg_order_value: sales.aov,
+      target_pct: target ? Math.round((repSales.sales_value / target) * 100) : null,
+      orders: orderStats.orders,
+      avg_order_value: orderStats.aov,
       visits_completed: visits.completed,
       visits_missed: visits.missed,
       compliance_pct: visits.planned ? Math.round((visits.completed / visits.planned) * 100) : null,
-      strike_rate_pct: visits.completed ? Math.round((sales.orders / visits.completed) * 100) : null,
+      strike_rate_pct: visits.completed ? Math.round((orderStats.orders / visits.completed) * 100) : null,
       hours_on_site: Math.round(visits.hours_on_site * 10) / 10,
       customers_assigned: coverage.assigned,
       customers_visited: coverage.visited,
@@ -276,6 +283,41 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), (req, res)
   });
 
   res.json({ month, kpis: kpis.sort((a, b) => b.sales - a.sales) });
+});
+
+// Reps x current-calendar-year sales grid, for the "Monthly history" tab on
+// Rep KPIs. Sourced from rep_monthly_sales (SYSPRO's actual invoiced sales,
+// synced from vw_FS_RepSalesByMonth) - the same source as the current-month
+// "sales vs target" figure on /kpis, not RouteOne's own order-capture.
+router.get('/kpis/monthly-history', requireRole('admin', 'manager', 'office', 'rep'), (req, res) => {
+  const scope = scopeForUser(req.user);
+  const reps = db.prepare(`
+    SELECT u.id, u.name
+    FROM users u JOIN roles r ON r.id = u.role_id
+    WHERE r.name = 'rep' AND u.active = 1 ${scope.isRep ? 'AND u.id = ?' : ''}
+    ORDER BY u.name
+  `).all(...(scope.isRep ? [req.user.id] : []));
+
+  // January to December of the current calendar year (resets each January).
+  const year = new Date().getFullYear();
+  const months = Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`);
+
+  const salesByMonth = db.prepare(`
+    SELECT rep_id, month, sales_value
+    FROM rep_monthly_sales
+    WHERE month >= ? AND month <= ?
+  `).all(months[0], months[11]);
+
+  const byRep = new Map(reps.map((r) => [r.id, { rep_id: r.id, name: r.name, months: Object.fromEntries(months.map((m) => [m, 0])), total: 0 }]));
+  for (const row of salesByMonth) {
+    const entry = byRep.get(row.rep_id);
+    if (entry && row.month in entry.months) {
+      entry.months[row.month] = row.sales_value;
+      entry.total += row.sales_value;
+    }
+  }
+
+  res.json({ months, reps: [...byRep.values()].sort((a, b) => b.total - a.total) });
 });
 
 export default router;

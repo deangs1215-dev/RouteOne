@@ -5,23 +5,56 @@ import { Card, Table, Spinner } from '../components/ui';
 
 const pctColor = (pct) => (pct == null ? 'text-slate-400' : pct >= 90 ? 'text-emerald-600' : pct >= 60 ? 'text-amber-600' : 'text-red-600');
 
+// Short month label for a table column header, e.g. "2026-07" -> "Jul '26".
+const monthLabel = (m) => {
+  const [y, mo] = m.split('-');
+  const name = new Date(Number(y), Number(mo) - 1, 1).toLocaleString('en-ZA', { month: 'short' });
+  return `${name} '${y.slice(2)}`;
+};
+
 export default function Kpis() {
+  const [tab, setTab] = useState('current'); // 'current' | 'history'
   const [month, setMonth] = useState(todayISO().slice(0, 7));
   const [data, setData] = useState(null);
+  const [history, setHistory] = useState(null);
 
   useEffect(() => {
+    if (tab !== 'current') return;
     setData(null);
     api.get(`/kpis?month=${month}`).then(setData).catch(console.error);
-  }, [month]);
+  }, [tab, month]);
+
+  useEffect(() => {
+    if (tab !== 'history' || history) return;
+    api.get('/kpis/monthly-history').then(setHistory).catch(console.error);
+  }, [tab]);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-bold">Rep KPIs</h1>
-        <input className="input max-w-[170px]" type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+        {tab === 'current' && (
+          <input className="input max-w-[170px]" type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+        )}
       </div>
 
-      {!data ? <Spinner /> : (
+      <div className="flex gap-2 border-b border-slate-200">
+        <button
+          onClick={() => setTab('current')}
+          className={`px-3 py-2 text-sm font-semibold border-b-2 transition ${tab === 'current' ? 'border-brand-600 text-brand-600' : 'border-transparent text-slate-400'}`}
+        >
+          This month
+        </button>
+        <button
+          onClick={() => setTab('history')}
+          className={`px-3 py-2 text-sm font-semibold border-b-2 transition ${tab === 'history' ? 'border-brand-600 text-brand-600' : 'border-transparent text-slate-400'}`}
+        >
+          Monthly history
+        </button>
+      </div>
+
+      {tab === 'current' && (
+        !data ? <Spinner /> : (
         <>
           <div className="grid gap-4 lg:grid-cols-2">
             {data.kpis.map((k) => (
@@ -73,6 +106,28 @@ export default function Kpis() {
             </Table>
           </Card>
         </>
+        )
+      )}
+
+      {tab === 'history' && (
+        !history ? <Spinner /> : (
+          <Card title={`Monthly sales — ${monthLabel(history.months[0])} to ${monthLabel(history.months[history.months.length - 1])}`}>
+            <Table headers={['Rep', ...history.months.map((m) => ({ label: monthLabel(m), align: 'right' })), { label: '12-mo total', align: 'right' }]}
+              empty={history.reps.length === 0 && 'No reps found.'}>
+              {history.reps.map((r) => (
+                <tr key={r.rep_id} className="hover:bg-slate-50">
+                  <td className="td font-medium sticky left-0 bg-white">{r.name}</td>
+                  {history.months.map((m) => (
+                    <td key={m} className="td text-right text-slate-600">
+                      {r.months[m] > 0 ? fmtR(r.months[m]) : <span className="text-slate-300">—</span>}
+                    </td>
+                  ))}
+                  <td className="td text-right font-semibold">{fmtR(r.total)}</td>
+                </tr>
+              ))}
+            </Table>
+          </Card>
+        )
       )}
     </div>
   );

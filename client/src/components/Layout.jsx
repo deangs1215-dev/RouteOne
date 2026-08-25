@@ -145,9 +145,6 @@ export default function Layout() {
         <main className="p-4 lg:p-6">
           <Outlet />
         </main>
-        <footer className="flex flex-col items-center gap-1 py-6">
-          <img src="/navex-africa-logo.svg" alt="NAVEX Africa" className="h-8 opacity-80" />
-        </footer>
       </div>
     </div>
   );

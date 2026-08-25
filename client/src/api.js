@@ -68,6 +68,10 @@ export const api = {
 export const fmtR = (n) =>
   'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+// Whole-rand version for dashboard-style summaries where cents are just noise.
+export const fmtRWhole = (n) =>
+  'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
 export const fmtDate = (s) => (s ? new Date(s.replace(' ', 'T')).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' }) : '—');
 
 export const fmtDateTime = (s) => (s ? new Date(s.replace(' ', 'T')).toLocaleString('en-ZA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—');
@@ -118,14 +122,25 @@ export async function downloadFile(path, filename) {
   URL.revokeObjectURL(url);
 }
 
-// Current GPS position (best effort - visit check-in stamps).
+// Current GPS position (best effort - visit check-in stamps, onsite pins).
+// enableHighAccuracy asks the device to use its GPS chip rather than the
+// faster-but-much-less-precise WiFi/cell-tower/IP location the browser is
+// otherwise free to return - without it, a phone can report a position based
+// on the network it's connected to (e.g. the office's internet breakout)
+// instead of where the rep actually is. GPS can take several seconds to get
+// a fix (longer indoors), so the timeout is generous rather than the old 4s,
+// which usually expired before a real GPS reading ever came back.
+// error.code on failure: 1 = PERMISSION_DENIED, 2 = POSITION_UNAVAILABLE
+// (GPS/location services off, or no signal), 3 = TIMEOUT. Surfaced (not
+// swallowed) so the caller can tell the user what actually went wrong instead
+// of a generic "couldn't get your location".
 export function getPosition() {
   return new Promise((resolve) => {
-    if (!navigator.geolocation) return resolve({});
+    if (!navigator.geolocation) return resolve({ error: 0, errorMessage: 'Geolocation not supported on this device.' });
     navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-      () => resolve({}),
-      { timeout: 4000, maximumAge: 60000 }
+      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }),
+      (err) => resolve({ error: err.code, errorMessage: err.message }),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   });
 }

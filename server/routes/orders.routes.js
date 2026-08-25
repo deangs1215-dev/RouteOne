@@ -94,7 +94,7 @@ router.get('/orders/:id/pdf', async (req, res) => {
     return res.status(403).json({ error: 'Not your order' });
   }
   const items = db.prepare(`
-    SELECT i.*, p.pack_weight_kg FROM order_items i
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ?
   `).all(order.id);
   try {

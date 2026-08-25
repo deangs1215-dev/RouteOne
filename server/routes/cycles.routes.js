@@ -18,16 +18,17 @@ const mondayOf = (dt) => { const day = (dt.getDay() + 6) % 7; return addDays(dt,
 const weeksBetween = (a, b) => Math.round((mondayOf(b) - mondayOf(a)) / (7 * 86400000));
 
 // --- Import a schedule --------------------------------------------------------
-// Body: { rep_id, name?, rep_code?, start_date, repeat_count?, cycle_weeks?,
+// Body: { rep_id, name?, start_date, repeat_count?, cycle_weeks?,
 //         weeks: [{ week_no, days: { Monday:[codes], Tuesday:[...], ... } }] }
 // Weekday keys map Monday..Friday → 1..5. Codes resolve to customers via code.
+// rep_code is taken from the selected rep's own record, not the request body.
 router.post('/route-cycles/import', requireRole('admin', 'manager'), (req, res) => {
   const b = req.body || {};
   if (!b.rep_id) return res.status(400).json({ error: 'A rep must be selected' });
   if (!b.start_date) return res.status(400).json({ error: 'Start date is required' });
   if (!Array.isArray(b.weeks) || b.weeks.length === 0) return res.status(400).json({ error: 'No schedule weeks were provided' });
 
-  const rep = db.prepare('SELECT id, name FROM users WHERE id = ?').get(b.rep_id);
+  const rep = db.prepare('SELECT id, name, rep_code FROM users WHERE id = ?').get(b.rep_id);
   if (!rep) return res.status(404).json({ error: 'Rep not found' });
 
   const WEEKDAYS = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5 };
@@ -60,7 +61,7 @@ router.post('/route-cycles/import', requireRole('admin', 'manager'), (req, res) 
     const info = db.prepare(`
       INSERT INTO route_cycles (rep_id, name, rep_code, start_date, cycle_weeks, repeat_count, active)
       VALUES (?, ?, ?, ?, ?, ?, 1)
-    `).run(b.rep_id, b.name || `${rep.name} call cycle`, b.rep_code || null,
+    `).run(b.rep_id, b.name || `${rep.name} call cycle`, rep.rep_code || b.rep_code || null,
       b.start_date.slice(0, 10), cycleWeeks, Number(b.repeat_count) || 1);
     const cycleId = info.lastInsertRowid;
     const insert = db.prepare(`
@@ -91,6 +92,86 @@ router.get('/route-cycles', requireRole('admin', 'manager', 'office'), (req, res
     FROM route_cycles rc JOIN users u ON u.id = rc.rep_id
     ${where} ORDER BY rc.active DESC, rc.created_at DESC
   `).all(...params));
+});
+
+// --- Upcoming schedule (rep's own view, or office looking up any rep) -------
+// Projects the abstract Week 1..N pattern onto real calendar dates going
+// forward from today, so a rep can see what's actually coming up rather than
+// the raw template. Reuses the same date math as /route-compliance, but
+// forward-looking and broken out per weekday (not just a per-week total).
+// Registered ABOVE /route-cycles/:id - otherwise Express would match "upcoming"
+// as the :id param and this route would never be reached.
+router.get('/route-cycles/upcoming', (req, res) => {
+  const { isRep } = scopeForUser(req.user);
+  let repId;
+  if (isRep) {
+    if (req.query.rep_id && Number(req.query.rep_id) !== req.user.id) {
+      return res.status(403).json({ error: 'Reps can only view their own call cycle' });
+    }
+    repId = req.user.id;
+  } else {
+    repId = req.query.rep_id;
+    if (!repId) return res.status(400).json({ error: 'rep_id is required' });
+  }
+  const weeksAhead = Math.min(Math.max(Number(req.query.weeks) || 6, 1), 12);
+
+  const cycle = db.prepare('SELECT * FROM route_cycles WHERE rep_id = ? AND active = 1 ORDER BY created_at DESC LIMIT 1').get(repId);
+  if (!cycle) return res.json({ rep_id: Number(repId), has_cycle: false });
+
+  const stops = db.prepare(`
+    SELECT s.week_no, s.weekday, s.seq, s.customer_id, s.customer_code,
+      c.name AS customer_name, c.city AS customer_city
+    FROM route_cycle_stops s LEFT JOIN customers c ON c.id = s.customer_id
+    WHERE s.cycle_id = ? AND s.customer_id IS NOT NULL
+    ORDER BY s.week_no, s.weekday, s.seq
+  `).all(cycle.id);
+  const stopsByWeekNo = {};
+  for (const s of stops) (stopsByWeekNo[s.week_no] ||= []).push(s);
+
+  const WEEKDAY_NAME = { 1: 'monday', 2: 'tuesday', 3: 'wednesday', 4: 'thursday', 5: 'friday' };
+  const WEEKDAY_OFFSET = { 1: 0, 2: 1, 3: 2, 4: 3, 5: 4 }; // days after that week's Monday
+  const start = toDate(cycle.start_date);
+  const today = new Date();
+
+  const rangeStart = mondayOf(today < start ? start : today);
+  const rangeEnd = iso(addDays(rangeStart, weeksAhead * 7));
+  // Actual visit status (if any) for each customer on each concrete calendar
+  // date in the window - the cycle stops above are just the recurring
+  // template, this is what actually happened (or is planned) for that date.
+  const visitRows = db.prepare(`
+    SELECT customer_id, planned_date, status FROM visits
+    WHERE rep_id = ? AND planned_date >= ? AND planned_date < ?
+  `).all(repId, iso(rangeStart), rangeEnd);
+  const visitByCustomerDate = {};
+  for (const v of visitRows) visitByCustomerDate[`${v.customer_id}|${v.planned_date}`] = v.status;
+  const todayIso = iso(today);
+
+  const weeks = [];
+  let cursor = rangeStart;
+  for (let i = 0; i < weeksAhead; i++) {
+    const wSince = weeksBetween(start, cursor);
+    if (wSince >= 0) {
+      const weekNo = (wSince % cycle.cycle_weeks) + 1;
+      const days = { monday: [], tuesday: [], wednesday: [], thursday: [], friday: [] };
+      for (const s of stopsByWeekNo[weekNo] || []) {
+        const dayName = WEEKDAY_NAME[s.weekday];
+        if (!dayName) continue;
+        const date = iso(addDays(cursor, WEEKDAY_OFFSET[s.weekday]));
+        // No visit row yet: an untouched stop reads as "missed" once its date
+        // has passed, otherwise it's simply upcoming - not shown as a status.
+        const status = visitByCustomerDate[`${s.customer_id}|${date}`] || (date < todayIso ? 'missed' : null);
+        days[dayName].push({ customer_id: s.customer_id, code: s.customer_code, name: s.customer_name, city: s.customer_city, date, status });
+      }
+      weeks.push({ week_start: iso(cursor), cycle_week: weekNo, days });
+    }
+    cursor = addDays(cursor, 7);
+  }
+
+  res.json({
+    rep_id: Number(repId), has_cycle: true,
+    cycle: { id: cycle.id, name: cycle.name, cycle_weeks: cycle.cycle_weeks },
+    weeks
+  });
 });
 
 // Full grid for one cycle (for viewing/editing).

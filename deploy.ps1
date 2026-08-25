@@ -39,11 +39,31 @@ if ($DryRun) {
 }
 Log ""
 
-# Sync files using robocopy
-Log "[1] Syncing changed files..." "Cyan"
+# Build the client BEFORE touching the server, so a broken build aborts here
+# instead of leaving the server mid-sync. server/index.js serves ../dist as
+# static files - this has to exist and be current, or the browser just gets
+# whatever was last built there (silently stale, no error anywhere).
+if (-not $DryRun) {
+    Log "[1] Building client..." "Cyan"
+    Push-Location $LocalPath
+    try {
+        npm run build
+        if ($LASTEXITCODE -ne 0) {
+            Log "ERROR: Build failed - aborting deploy, server was not touched" "Red"
+            exit 1
+        }
+    } finally {
+        Pop-Location
+    }
+    Log ""
+}
+
+# Sync source files using robocopy
+Log "[2] Syncing changed files..." "Cyan"
 
 # Never sync server-owned state: the live database, its backups, uploaded
 # files, or the server's own .env (which holds APP_ORIGIN and secrets).
+# dist is synced separately below with /MIR (see step 3).
 # /R:1 /W:1 fails fast on a locked file instead of retrying for hours.
 $robocopyArgs = @(
     $LocalPath,
@@ -94,6 +114,24 @@ if ($DryRun) {
     exit 0
 }
 
+# Sync the built client. /MIR (mirror) deletes server-side files that no
+# longer exist locally - vite fingerprints every filename with a content
+# hash, so without /MIR every deploy would leave the previous build's chunks
+# behind forever. Safe here: dist is 100% generated output, nothing
+# server-owned lives in it.
+Log "`n[3] Syncing built client (dist)..." "Cyan"
+$distArgs = @(
+    (Join-Path $LocalPath "dist"),
+    (Join-Path $ServerDrive "dist"),
+    "/MIR", "/R:1", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS"
+)
+& robocopy @distArgs 2>&1 | Out-Null
+if ($LASTEXITCODE -ge 8) {
+    Log "ERROR: dist sync failed (robocopy exit $LASTEXITCODE)" "Red"
+    exit 1
+}
+Log "OK: dist synced" "Green"
+
 # Restart the app
 Log "`n[2] Restarting app on server..." "Cyan"
 
@@ -101,7 +139,7 @@ Log "NEXT: You need to restart npm on the server:" "Yellow"
 Log "`n  1. RDP into the server" "White"
 Log "  2. Stop the app: npm stop  (or Ctrl+C in the terminal)" "White"
 Log "  3. Start it: npm start" "White"
-Log "`n  Server path: Z:\ (C:\OneRoute\RouteOne on server)" "Gray"
+Log "`n  Server path: Z:\ (C:\RouteOne on server)" "Gray"
 
 # Try to check if app is responding
 Log "`n[3] Checking app status..." "Cyan"

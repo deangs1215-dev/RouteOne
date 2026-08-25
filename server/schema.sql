@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS products (
   description TEXT,
   uom TEXT DEFAULT 'each',
   pack_size TEXT,
-  pack_weight_kg REAL,             -- parsed from pack_size; list_price is per-kg, this converts to per-unit
+  pack_weight_kg REAL,             -- DEPRECATED: use conv_factor_alt_uom instead
+  conv_factor_alt_uom REAL,        -- SYSPRO ConvFactAltUom; list_price is per-kg, this converts to per-unit
   list_price REAL NOT NULL DEFAULT 0,
   cost_price REAL DEFAULT 0,
   stock_qty REAL DEFAULT 0,
@@ -289,6 +290,25 @@ CREATE TABLE IF NOT EXISTS form_submissions (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- In-progress order/quote/form captures a rep saved instead of submitting -
+-- e.g. connectivity dropped mid-capture, or they got pulled away and want to
+-- finish later. Server-side (not just device localStorage) so a draft follows
+-- the rep's login rather than being stuck on one phone. Personal to the rep
+-- who saved it - never shown to office/managers.
+CREATE TABLE IF NOT EXISTS drafts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rep_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,                      -- 'order' / 'quote' / 'form'
+  customer_id INTEGER REFERENCES customers(id),
+  template_id INTEGER REFERENCES form_templates(id),  -- forms only
+  visit_id INTEGER REFERENCES visits(id),
+  label TEXT,                              -- short summary shown in the drafts list
+  data TEXT NOT NULL DEFAULT '{}',         -- { items, notes } for order/quote; { data } for form
+  updated_at TEXT DEFAULT (datetime('now')),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_rep ON drafts(rep_id, kind);
+
 CREATE TABLE IF NOT EXISTS visit_photos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   visit_id INTEGER NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
@@ -317,6 +337,24 @@ CREATE TABLE IF NOT EXISTS invoices (
   created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id, invoice_date);
+
+-- Per-product invoice line detail, synced from SYSPRO's vw_FS_InvoiceLines
+-- (see docs/sql/vw_FS_InvoiceLines.sql). That view only covers the last 30
+-- days of invoices by design, so this table is wiped and fully rebuilt on
+-- every sync (no stable natural key per line - the same product can appear
+-- on more than one line of an invoice), same pattern as rep_monthly_sales.
+-- Invoices outside that window simply have no rows here; the app falls back
+-- to the linked RouteOne order's items as a best-effort approximation.
+CREATE TABLE IF NOT EXISTS invoice_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  product_id INTEGER REFERENCES products(id),  -- NULL if the code doesn't match any synced product (discontinued, etc.)
+  product_code TEXT NOT NULL,
+  qty REAL NOT NULL,
+  unit_price REAL NOT NULL,
+  line_total REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
 
 -- Rep sales totals by month, synced from SYSPRO's vw_FS_RepSalesByMonth
 -- (actual invoiced sales, credited to the customer's currently-assigned rep -

@@ -15,7 +15,7 @@ const router = Router();
 const SETTING_KEYS = [
   'intg_source', 'syspro_host', 'syspro_port', 'syspro_db', 'syspro_user',
   'syspro_encrypt', 'syspro_trust_server_certificate',
-  'syspro_view_warehouses', 'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_customer_pricing', 'syspro_view_invoices', 'syspro_view_rep_sales',
+  'syspro_view_warehouses', 'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_customer_pricing', 'syspro_view_invoices', 'syspro_view_invoice_lines', 'syspro_view_rep_sales',
    'email_transport', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_allow_invalid_cert', 'smtp_user', 'smtp_from',
   'graph_tenant_id', 'graph_client_id', 'graph_sender',
   'technical_email', 'email_auto_send', 'email_confirm_customer',
@@ -26,6 +26,7 @@ const SETTING_KEYS = [
   'stock_sync_schedule', 'stock_sync_daily_time',
   'customer_pricing_sync_schedule', 'customer_pricing_sync_daily_time',
   'invoices_sync_schedule', 'invoices_sync_daily_time',
+  'invoice_lines_sync_schedule', 'invoice_lines_sync_daily_time',
   'rep_sales_sync_schedule', 'rep_sales_sync_daily_time',
   'rep_sync_schedule', 'rep_sync_daily_time',
   'rep_digest_enabled', 'rep_digest_time',

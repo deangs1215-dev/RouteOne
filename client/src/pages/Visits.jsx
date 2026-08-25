@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 import { api, fmtDateTime, todayISO } from '../api';
 import { Card, Table, Modal, Field, Spinner, ErrorNote, VisitStatusBadge } from '../components/ui';
 import CycleImportModal from '../components/CycleImportModal';
+import CallCycleModal from '../components/CallCycleModal';
+import VisitPhotosModal from '../components/VisitPhotosModal';
 import { useAuth } from '../auth';
 
 export default function Visits() {
@@ -14,6 +16,8 @@ export default function Visits() {
   const [reps, setReps] = useState([]);
   const [showPlan, setShowPlan] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showCycle, setShowCycle] = useState(false);
+  const [viewPhotosVisit, setViewPhotosVisit] = useState(null);
 
   const load = () => {
     const params = new URLSearchParams();
@@ -35,7 +39,8 @@ export default function Visits() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-bold">Visits</h1>
         <div className="flex gap-2">
-          <button className="btn-secondary" onClick={() => setShowImport(true)}>Import call cycle</button>
+          <button className="btn-secondary" onClick={() => setShowCycle(true)}>Call cycle</button>
+          {!isRep && <button className="btn-secondary" onClick={() => setShowImport(true)}>Import call cycle</button>}
           <button className="btn-primary" onClick={() => setShowPlan(true)}>+ Plan visit</button>
         </div>
       </div>
@@ -53,7 +58,7 @@ export default function Visits() {
 
       <Card>
         {!rows ? <Spinner /> : (
-          <Table headers={isRep ? ['Customer', 'Check-in', 'Check-out', 'Status', 'Outcome', 'Orders'] : ['Customer', 'Rep', 'Check-in', 'Check-out', 'Status', 'Outcome', 'Orders']}
+          <Table headers={isRep ? ['Customer', 'Check-in', 'Check-out', 'Status', 'Outcome', 'Orders', 'Photos'] : ['Customer', 'Rep', 'Check-in', 'Check-out', 'Status', 'Outcome', 'Orders', 'Photos']}
             empty={rows.length === 0 && 'No visits found.'} emptyIcon="🚗">
             {rows.map((v) => (
               <tr key={v.id} className="hover:bg-slate-50">
@@ -67,6 +72,9 @@ export default function Visits() {
                 <td className="td"><VisitStatusBadge status={v.status} /></td>
                 <td className="td text-slate-500">{v.outcome ? v.outcome.replace('_', ' ') : '—'}</td>
                 <td className="td">{v.order_count > 0 ? `🧾 ${v.order_count}` : '—'}</td>
+                <td className="td">
+                  <ViewPhotosButton visitId={v.id} customerName={v.customer_name} onView={() => setViewPhotosVisit(v)} />
+                </td>
               </tr>
             ))}
           </Table>
@@ -74,6 +82,12 @@ export default function Visits() {
       </Card>
 
       {showPlan && <PlanVisitModal reps={reps} isRep={isRep} onClose={() => setShowPlan(false)} onSaved={() => { setShowPlan(false); load(); }} />}
+      {showCycle && (
+        <CallCycleModal
+          repId={repId ? Number(repId) : undefined}
+          onClose={() => setShowCycle(false)}
+        />
+      )}
       {showImport && (
         <CycleImportModal
           repId={repId ? Number(repId) : undefined}
@@ -81,7 +95,36 @@ export default function Visits() {
           onSaved={() => { setShowImport(false); load(); }}
         />
       )}
+      {viewPhotosVisit && (
+        <VisitPhotosModal
+          visitId={viewPhotosVisit.id}
+          visitCustomerName={viewPhotosVisit.customer_name}
+          onClose={() => setViewPhotosVisit(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function ViewPhotosButton({ visitId, customerName, onView }) {
+  const [photoCount, setPhotoCount] = useState(null);
+
+  useEffect(() => {
+    api.get(`/visits/${visitId}/summary`)
+      .then((summary) => setPhotoCount(summary.photo_count))
+      .catch(() => setPhotoCount(0));
+  }, [visitId]);
+
+  if (photoCount === null) return <span className="text-slate-300">…</span>;
+  if (photoCount === 0) return <span className="text-slate-400">—</span>;
+
+  return (
+    <button
+      onClick={onView}
+      className="text-sm font-semibold text-brand-600 hover:text-brand-700 hover:underline"
+    >
+      📸 {photoCount}
+    </button>
   );
 }
 

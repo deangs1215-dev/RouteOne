@@ -18,6 +18,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const [params] = useSearchParams();
   const visitId = params.get('visit');
   const isQuote = params.get('kind') === 'quote';
+  const [draftId, setDraftId] = useState(params.get('draft') || null);
   const navigate = useNavigate();
   const { user } = useAuth();
 
@@ -29,8 +30,20 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
   const [showSummary, setShowSummary] = useState(false); // review screen before final submit
   const [signature, setSignature] = useState(null); // customer signature - required before an order can be submitted (not required for quotes)
+
+  // Resuming a saved draft - load its cart/notes once, on top of whatever the
+  // for-customer product fetch below already sets up.
+  useEffect(() => {
+    if (!draftId) return;
+    api.get(`/drafts/${draftId}`).then((d) => {
+      setCart(d.data?.items || {});
+      setNotes(d.data?.notes || '');
+    }).catch(() => {});
+  }, [draftId]);
 
   // The product list can be scrolled far down before "Review" is tapped -
   // without this the review screen renders starting from that same scroll
@@ -78,9 +91,40 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     return next;
   });
 
+  // Once the cart or notes change again after a save, "Draft saved" is stale.
+  useEffect(() => { setDraftSaved(false); }, [cart, notes]);
+
   const cartLines = (products || []).filter((p) => cart[p.id]);
   const subtotal = cartLines.reduce((sum, p) => sum + cart[p.id] * unitPriceFor(p, cart[p.id]), 0);
   const total = subtotal * (1 + VAT_RATE);
+
+  // Saved server-side (not just this device) so the rep can pick it back up
+  // from any phone. Doesn't need a cart - a rep who only got as far as
+  // jotting a note before being pulled away can still save that.
+  const saveDraft = async () => {
+    setSavingDraft(true);
+    setError('');
+    setDraftSaved(false);
+    const payload = {
+      kind: isQuote ? 'quote' : 'order',
+      customer_id: Number(id),
+      visit_id: visitId ? Number(visitId) : null,
+      label: `${cartLines.length} product${cartLines.length === 1 ? '' : 's'}`,
+      data: { items: cart, notes }
+    };
+    try {
+      if (draftId) await api.put(`/drafts/${draftId}`, payload);
+      else {
+        const d = await api.post('/drafts', payload);
+        setDraftId(d.id);
+      }
+      setDraftSaved(true);
+    } catch (e) {
+      setError(e.message || 'Could not save draft - check your connection.');
+    } finally {
+      setSavingDraft(false);
+    }
+  };
 
   const confirmSubmit = async () => {
     // A quote isn't a binding sale, so no signature is required - only orders need one.
@@ -109,10 +153,12 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     const path = isQuote ? '/quotes' : '/orders';
     try {
       const doc = await api.post(path, payload);
+      if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
       setDone({ number: doc.number, total: doc.total });
     } catch (e) {
       if (e.isNetworkError) {
         queueWrite('POST', path, payload);
+        if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
         setDone({ queued: true, total });
       } else {
         setError(e.message);
@@ -148,7 +194,14 @@ export default function RepOrderCapture({ base = '/mobile' }) {
       {!showSummary && <MobileHeader title={`${noun} — ${customer.name}`} back={`${base}/customers/${id}`} />}
       {!showSummary && <div className="space-y-3 p-4 pb-36">
         <ErrorNote error={error} />
-        <input className="input" placeholder="Search products…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <div className="relative">
+          <input className="input pr-9" placeholder="Search products…" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {search && (
+            <button type="button" onClick={() => setSearch('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-full text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              aria-label="Clear search">✕</button>
+          )}
+        </div>
         {boughtCount > 0 && (
           <div className="flex gap-2 pb-1">
             <button className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${onlyBought ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}
@@ -164,6 +217,11 @@ export default function RepOrderCapture({ base = '/mobile' }) {
             const price = unitPriceFor(p, qty || 1);
             const kgPrice = kgPriceFor(p, price);
             const nextBreak = (p.price_breaks || []).find((b) => b.min_qty > (qty || 0));
+            // General (list) price, per unit - same conversion as the server's
+            // productUnitPrice(). Order screen only: shows how much below the
+            // general price the customer's price is.
+            const listPrice = (p.list_price || 0) * (p.conv_factor_alt_uom || p.pack_weight_kg || 1);
+            const belowList = !isQuote && listPrice > 0 && price < listPrice ? listPrice - price : null;
             return (
               <div key={p.id} className="card flex items-center gap-3 p-3">
                 <div className="min-w-0 flex-1">
@@ -173,6 +231,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                   </div>
                   <div className="text-xs text-slate-400">
                     {p.code} · {fmtR(price)}
+                    {belowList != null && <span className="ml-1 text-red-600 font-semibold">-{fmtR(belowList)}</span>}
                     {kgPrice != null && <span className="ml-1">({fmtR(kgPrice)}/kg)</span>}
                     {p.has_contract_price === 1 && <span className="ml-1 text-emerald-600">contract</span>}
                     {qty > 0 && price < p.price_breaks?.[0]?.price && <span className="ml-1 text-emerald-600">qty break</span>}
@@ -201,8 +260,17 @@ export default function RepOrderCapture({ base = '/mobile' }) {
 
         <div>
           <label className="label">{noun} notes</label>
-          <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional" />
+          <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+            placeholder="Optional" />
+          {notes.trim() && <div className="mt-1 text-xs text-emerald-600">✓ Saved with this {noun.toLowerCase()}</div>}
         </div>
+
+        {/* Save & come back later - e.g. connectivity drops or the rep gets
+            pulled away mid-capture. Doesn't need products in the cart. */}
+        <button className="btn-secondary w-full" onClick={saveDraft} disabled={savingDraft}>
+          {savingDraft ? 'Saving draft…' : draftSaved ? '✓ Draft saved' : `💾 Save as draft`}
+        </button>
       </div>}
 
       {/* Summary review screen */}

@@ -92,10 +92,14 @@ export const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '
 
 function docTable(items, doc) {
   const rows = items.map((i) => {
-    const kgPrice = i.pack_weight_kg > 0 ? i.unit_price / i.pack_weight_kg : null;
+    const kgFactor = i.conv_factor_alt_uom || i.pack_weight_kg;
+    const kgPrice = kgFactor > 0 ? i.unit_price / kgFactor : null;
     return `
     <tr>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">${esc(i.product_name)}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">
+        ${esc(i.product_name)}
+        ${i.product_code ? `<div style="color:#94a3b8;font-size:11px">${esc(i.product_code)}</div>` : ''}
+      </td>
       <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${i.qty} ${i.uom || ''}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right">
         ${fmtR(i.unit_price)}
@@ -173,7 +177,7 @@ async function pdfForEmail(kind, refId) {
     `).get(refId);
     if (!doc) return null;
     const items = db.prepare(`
-      SELECT i.*, p.pack_weight_kg FROM quote_items i
+      SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
       LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ?
     `).all(refId);
     return { filename: `Quotation-${doc.number}.pdf`, content: await buildDocumentPdf({ type: 'quote', doc, items, company }) };
@@ -184,7 +188,7 @@ async function pdfForEmail(kind, refId) {
   `).get(refId);
   if (!doc) return null;
   const items = db.prepare(`
-    SELECT i.*, p.pack_weight_kg FROM order_items i
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ?
   `).all(refId);
   return { filename: `Order-${doc.number}.pdf`, content: await buildDocumentPdf({ type: 'order', doc, items, company }) };
@@ -199,7 +203,7 @@ export function buildOrderEmail(orderId) {
   `).get(orderId);
   if (!order) throw new Error('Order not found');
   const items = db.prepare(`
-    SELECT i.*, p.pack_weight_kg FROM order_items i
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ?
   `).all(orderId);
 
@@ -241,7 +245,7 @@ export function buildOrderConfirmationEmail(orderId) {
   `).get(orderId);
   if (!order) throw new Error('Order not found');
   const items = db.prepare(`
-    SELECT i.*, p.pack_weight_kg FROM order_items i
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ?
   `).all(orderId);
 
@@ -275,7 +279,7 @@ export function buildQuoteEmail(quoteId) {
   `).get(quoteId);
   if (!quote) throw new Error('Quote not found');
   const items = db.prepare(`
-    SELECT i.*, p.pack_weight_kg FROM quote_items i
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ?
   `).all(quoteId);
 

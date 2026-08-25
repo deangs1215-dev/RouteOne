@@ -7,7 +7,8 @@ import { useEffect, useState } from 'react';
 import { Routes, Route, NavLink, Link, Navigate, useNavigate } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime, getPosition, todayISO } from '../api';
 import { useAuth } from '../auth';
-import { Spinner, VisitStatusBadge, OrderStatusBadge, Badge, EmptyState } from '../components/ui';
+import { Spinner, VisitStatusBadge, OrderStatusBadge, Badge, EmptyState, Modal } from '../components/ui';
+import VisitSummary from '../components/VisitSummary';
 import DatePicker from '../components/DatePicker';
 import CustomerTasksSheet from '../components/CustomerTasksSheet';
 import AddProspectModal from '../components/AddProspectModal';
@@ -21,6 +22,7 @@ import QuoteDetail from './QuoteDetail';
 import FormDetail from './FormDetail';
 import Tasks from './Tasks';
 import RepStockCheck from './RepStockCheck';
+import MyCycle from './MyCycle';
 
 // `new Date('YYYY-MM-DD')` parses as UTC midnight, so formatting it back for
 // display can show the wrong day in timezones behind UTC. Building the Date
@@ -75,6 +77,7 @@ function MobileAppShell() {
           <Route path="/orders" element={<RepOrders />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/stock" element={<RepStockCheck />} />
+          <Route path="/cycle" element={<MyCycle />} />
           <Route path="*" element={<Navigate to="/mobile" replace />} />
         </Routes>
       </div>
@@ -157,24 +160,99 @@ export function MobileHeader({ title, back }) {
   );
 }
 
+// Explicit "Clock in" action, shown at the top of the Home screen. Replaces
+// the old silent background GPS ping - that gave no feedback if it failed
+// (permission denied, no signal), so a rep could go a whole day with no
+// anchor point for route optimisation and never know why. This captures a
+// fresh, high-accuracy reading on tap and shows clear success/failure state.
+function ClockInCard({ dark = false }) {
+  const [status, setStatus] = useState(undefined); // undefined = loading
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const checkStatus = () => api.get('/routes/start').then(setStatus).catch(() => setStatus({ source: 'none' }));
+  useEffect(() => { checkStatus(); }, []);
+
+  const clockIn = async () => {
+    setBusy(true);
+    setError('');
+    const pos = await getPosition();
+    if (pos.lat == null) {
+      const messages = {
+        1: 'Location access is blocked for this app — check your phone\'s location permission settings, then try again.',
+        2: "Couldn't get a GPS fix — make sure Location Services/GPS is turned on, and try again outdoors or near a window.",
+        3: 'Getting your location took too long — try again, ideally with a clearer view of the sky.'
+      };
+      setError(messages[pos.error] || "Couldn't get your location — check GPS is on and try again.");
+      setBusy(false);
+      return;
+    }
+    try {
+      await api.post('/locations', pos);
+      await checkStatus();
+    } catch {
+      setError('Failed to save your location — try again.');
+    }
+    setBusy(false);
+  };
+
+  if (status === undefined) return null; // avoid flashing the button while checking
+  const clockedIn = status.source === 'gps_today';
+  // recorded_at is stored in UTC (SQLite's own datetime('now') default) - the
+  // explicit Z tells the browser to convert to local time for display,
+  // instead of misreading it as an already-local timestamp.
+  const time = clockedIn && status.recorded_at
+    ? new Date(status.recorded_at.replace(' ', 'T') + 'Z').toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })
+    : null;
+
+  if (dark) {
+    return (
+      <div className={`rounded-md border p-3 ${clockedIn ? 'border-emerald-700 bg-emerald-950/40' : 'border-corp-700 bg-corp-950'}`}>
+        {clockedIn ? (
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold text-emerald-400">✓ Clocked in{time ? ` at ${time}` : ''}</span>
+            <button onClick={clockIn} disabled={busy} className="text-xs text-slate-400 underline">{busy ? 'Updating…' : 'Refresh'}</button>
+          </div>
+        ) : (
+          <button onClick={clockIn} disabled={busy} className="w-full rounded-md bg-brass-500 px-4 py-2.5 text-sm font-semibold text-corp-950 disabled:opacity-60">
+            {busy ? 'Getting your location…' : '📍 Clock in'}
+          </button>
+        )}
+        {error && <div className="mt-2 text-xs text-red-400">{error}</div>}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`card p-3 ${clockedIn ? 'border border-emerald-200 bg-emerald-50' : ''}`}>
+      {clockedIn ? (
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold text-emerald-700">✓ Clocked in{time ? ` at ${time}` : ''}</span>
+          <button onClick={clockIn} disabled={busy} className="text-xs text-brand-600 underline">{busy ? 'Updating…' : 'Refresh'}</button>
+        </div>
+      ) : (
+        <button onClick={clockIn} disabled={busy} className="btn-primary w-full disabled:opacity-60">
+          {busy ? 'Getting your location…' : '📍 Clock in'}
+        </button>
+      )}
+      {error && <div className="mt-2 text-xs text-red-600">{error}</div>}
+    </div>
+  );
+}
+
 function Today() {
   const { user } = useAuth();
   const [data, setData] = useState(null);
   const [selectedDate, setSelectedDate] = useState(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [taskSheet, setTaskSheet] = useState(null); // { customer_id, customer_name }
+  const [visitSummaryId, setVisitSummaryId] = useState(null); // visit tapped for details (notes, outcome, etc.)
 
   const displayDate = selectedDate || todayISO();
 
   const loadDay = () => api.get(`/my-day?date=${displayDate}`).then(setData).catch(console.error);
 
-  useEffect(() => {
-    loadDay();
-    // Best-effort position ping so managers see reps on the live map.
-    getPosition().then((pos) => {
-      if (pos.lat != null) api.post('/locations', pos).catch(() => {});
-    });
-  }, [displayDate]);
+  useEffect(() => { loadDay(); }, [displayDate]);
 
   if (!data) return <><MobileHeader title="My day" /><Spinner /></>;
   const { visits, stats } = data;
@@ -186,6 +264,8 @@ function Today() {
     <>
       <MobileHeader title={`Hi ${user.name.split(' ')[0]} 👋`} />
       <div className="space-y-4 p-4">
+        <ClockInCard />
+
         {/* Date selector */}
         <button
           onClick={() => setShowDatePicker(true)}
@@ -193,6 +273,10 @@ function Today() {
         >
           📅 {dateStr}
         </button>
+
+        <Link to="/mobile/cycle" className="block w-full card p-3 text-center font-semibold text-slate-700 hover:bg-slate-50 transition">
+          🗓️ My call cycle
+        </Link>
 
         <div className="card p-4">
           <div className="flex justify-between text-sm">
@@ -235,6 +319,9 @@ function Today() {
                     {v.customer_lat != null && v.status !== 'completed' && (
                       <a className="btn-secondary px-2 py-1 text-xs" target="_blank" rel="noreferrer"
                         href={`https://www.google.com/maps/dir/?api=1&destination=${v.customer_lat},${v.customer_lng}`}>🧭</a>
+                    )}
+                    {(v.status === 'completed' || v.status === 'in_progress') && (
+                      <button className="text-xs font-medium text-brand-600 underline" onClick={() => setVisitSummaryId(v.id)}>Details</button>
                     )}
                     <VisitStatusBadge status={v.status} />
                   </div>
@@ -309,6 +396,12 @@ function Today() {
           onChanged={loadDay}
         />
       )}
+
+      {visitSummaryId && (
+        <Modal title="Visit details" onClose={() => setVisitSummaryId(null)}>
+          <VisitSummary visitId={visitSummaryId} />
+        </Modal>
+      )}
     </>
   );
 }
@@ -320,16 +413,12 @@ function TodayDark() {
   const [selectedDate, setSelectedDate] = useState(null);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [taskSheet, setTaskSheet] = useState(null);
+  const [visitSummaryId, setVisitSummaryId] = useState(null); // visit tapped for details (notes, outcome, etc.)
 
   const displayDate = selectedDate || todayISO();
   const loadDay = () => api.get(`/my-day?date=${displayDate}`).then(setData).catch(console.error);
 
-  useEffect(() => {
-    loadDay();
-    getPosition().then((pos) => {
-      if (pos.lat != null) api.post('/locations', pos).catch(() => {});
-    });
-  }, [displayDate]);
+  useEffect(() => { loadDay(); }, [displayDate]);
 
   if (!data) return <><MobileHeader title="My day" /><Spinner /></>;
   const { visits, stats } = data;
@@ -340,6 +429,8 @@ function TodayDark() {
     <>
       <MobileHeader title={`Good day, ${user.name.split(' ')[0]}`} />
       <div className="space-y-4 p-4">
+        <ClockInCard dark />
+
         <button
           onClick={() => setShowDatePicker(true)}
           className="w-full rounded-md border border-corp-700 bg-white px-4 py-3 text-left shadow-sm transition hover:border-brass-500"
@@ -347,6 +438,11 @@ function TodayDark() {
           <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">Schedule for</div>
           <div className="mt-0.5 font-bold text-corp-900">{dateStr}</div>
         </button>
+
+        <Link to="/mobile/cycle" className="block w-full rounded-md border border-corp-700 bg-white px-4 py-3 text-left shadow-sm transition hover:border-brass-500">
+          <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">Upcoming</div>
+          <div className="mt-0.5 font-bold text-corp-900">🗓️ My call cycle</div>
+        </Link>
 
         <div className="rounded-md border border-corp-800 bg-corp-950 p-4 text-white shadow-sm">
           <div className="flex items-baseline justify-between">
@@ -384,6 +480,9 @@ function TodayDark() {
                     <div className="truncate font-semibold text-corp-900">{v.customer_name}{v.customer_code && <span className="ml-1 font-normal text-slate-400">({v.customer_code})</span>}</div>
                     <div className="text-xs text-slate-400">{v.city} · {v.purpose}</div>
                   </Link>
+                  {(v.status === 'completed' || v.status === 'in_progress') && (
+                    <button className="text-xs font-medium text-corp-900 underline" onClick={() => setVisitSummaryId(v.id)}>Details</button>
+                  )}
                   <VisitStatusBadge status={v.status} />
                 </div>
 
@@ -435,6 +534,12 @@ function TodayDark() {
           onClose={() => setTaskSheet(null)}
           onChanged={loadDay}
         />
+      )}
+
+      {visitSummaryId && (
+        <Modal title="Visit details" onClose={() => setVisitSummaryId(null)}>
+          <VisitSummary visitId={visitSummaryId} />
+        </Modal>
       )}
     </>
   );
@@ -596,30 +701,75 @@ function CustomersDark() {
 }
 
 function RepOrders() {
+  const navigate = useNavigate();
+  const [tab, setTab] = useState('orders'); // 'orders' | 'drafts'
   const [rows, setRows] = useState(null);
+  const [drafts, setDrafts] = useState(null);
 
   useEffect(() => {
     api.get('/orders').then(setRows).catch(console.error);
+    api.get('/drafts').then(setDrafts).catch(() => setDrafts([]));
   }, []);
+
+  const resumeDraft = (d) => {
+    if (d.kind === 'form') navigate(`/mobile/customers/${d.customer_id}?formDraft=${d.id}`);
+    else navigate(`/mobile/customers/${d.customer_id}/order?kind=${d.kind}&draft=${d.id}`);
+  };
+
+  const discardDraft = async (id) => {
+    if (!window.confirm('Discard this draft? This can\'t be undone.')) return;
+    await api.del(`/drafts/${id}`).catch(() => {});
+    setDrafts((ds) => ds.filter((d) => d.id !== id));
+  };
+
+  const draftLabel = (d) => d.kind === 'form' ? (d.template_name || 'Form') : d.kind === 'quote' ? 'Quote' : 'Order';
 
   return (
     <>
       <MobileHeader title="My orders" />
-      <div className="p-4 space-y-2">
-        {!rows ? <Spinner /> : rows.map((o) => (
-          <div key={o.id} className="card p-3">
-            <div className="flex items-center justify-between">
-              <span className="font-medium">{o.number}</span>
-              <OrderStatusBadge status={o.status} />
-            </div>
-            <div className="mt-0.5 flex items-center justify-between text-xs text-slate-400">
-              <span>{o.customer_name} · {fmtDateTime(o.order_date)}</span>
-              <span className="text-sm font-semibold text-slate-700">{fmtR(o.total)}</span>
-            </div>
-          </div>
-        ))}
-        {rows && rows.length === 0 && <div className="card"><EmptyState icon="🧾">No orders yet.</EmptyState></div>}
+      <div className="flex gap-2 px-4 pt-3">
+        <button className={`rounded-full px-3 py-1 text-xs font-medium ${tab === 'orders' ? 'bg-brand-600 text-white' : 'border border-slate-200 bg-white text-slate-600'}`}
+          onClick={() => setTab('orders')}>Orders</button>
+        <button className={`rounded-full px-3 py-1 text-xs font-medium ${tab === 'drafts' ? 'bg-brand-600 text-white' : 'border border-slate-200 bg-white text-slate-600'}`}
+          onClick={() => setTab('drafts')}>Drafts{drafts?.length > 0 ? ` (${drafts.length})` : ''}</button>
       </div>
+
+      {tab === 'orders' ? (
+        <div className="p-4 space-y-2">
+          {!rows ? <Spinner /> : rows.map((o) => (
+            <div key={o.id} className="card p-3">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">{o.number}</span>
+                <OrderStatusBadge status={o.status} />
+              </div>
+              <div className="mt-0.5 flex items-center justify-between text-xs text-slate-400">
+                <span>{o.customer_name} · {fmtDateTime(o.order_date)}</span>
+                <span className="text-sm font-semibold text-slate-700">{fmtR(o.total)}</span>
+              </div>
+            </div>
+          ))}
+          {rows && rows.length === 0 && <div className="card"><EmptyState icon="🧾">No orders yet.</EmptyState></div>}
+        </div>
+      ) : (
+        <div className="p-4 space-y-2">
+          {!drafts ? <Spinner /> : drafts.map((d) => (
+            <div key={d.id} className="card p-3">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">{draftLabel(d)} draft</span>
+                <span className="text-xs text-slate-400">{fmtDateTime(d.updated_at)}</span>
+              </div>
+              <div className="mt-0.5 text-xs text-slate-400">
+                {d.customer_name || 'No customer'}{d.label ? ` · ${d.label}` : ''}
+              </div>
+              <div className="mt-2 flex gap-2">
+                <button className="btn-primary flex-1 py-1.5 text-xs" onClick={() => resumeDraft(d)}>Resume</button>
+                <button className="btn-secondary px-3 py-1.5 text-xs" onClick={() => discardDraft(d.id)}>Discard</button>
+              </div>
+            </div>
+          ))}
+          {drafts && drafts.length === 0 && <div className="card"><EmptyState icon="📝">No saved drafts.</EmptyState></div>}
+        </div>
+      )}
     </>
   );
 }

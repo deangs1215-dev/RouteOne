@@ -2,7 +2,7 @@
 // field forms, quick order and quote. Visits captured with no signal are
 // stored locally and logged to the server in one call when back online.
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime, getPosition, todayISO, toLocalDateTime } from '../api';
 import { Spinner, ErrorNote, GradeBadge, OrderStatusBadge, Modal, Field, EmptyState } from '../components/ui';
 import VisitSummary from '../components/VisitSummary';
@@ -106,6 +106,9 @@ function distanceM(lat1, lng1, lat2, lng2) {
 
 export default function RepCustomer({ base = '/mobile' }) {
   const { id } = useParams();
+  const [params] = useSearchParams();
+  const formDraftId = params.get('formDraft');
+  const [fillingFormDraft, setFillingFormDraft] = useState(null); // the draft record being resumed, if any
   const [c, setC] = useState(null);
   const [activeVisit, setActiveVisit] = useState(null);
   const [offlineVisit, setOfflineVisit] = useState(null); // { check_in_at, lat, lng }
@@ -172,6 +175,18 @@ export default function RepCustomer({ base = '/mobile' }) {
     api.get('/visits/open').then(setOpenVisit).catch(() => {});
     loadTasks();
   }, [id]);
+
+  // Arrived here from the Drafts screen to resume an in-progress form -
+  // reopen the fill modal pre-loaded with the saved answers.
+  useEffect(() => {
+    if (!formDraftId || templates.length === 0) return;
+    api.get(`/drafts/${formDraftId}`).then((draft) => {
+      const template = templates.find((t) => t.id === draft.template_id);
+      if (!template) return;
+      setFillingFormDraft(draft);
+      setFillingForm(template);
+    }).catch(() => {});
+  }, [formDraftId, templates]);
 
   if (!c) return <><MobileHeader title="Customer" back={`${base}/customers`} /><Spinner /></>;
 
@@ -936,8 +951,10 @@ export default function RepCustomer({ base = '/mobile' }) {
       {fillingForm && (
         <FormFillModal template={fillingForm} customerId={Number(id)}
           visitId={activeVisit?.status === 'in_progress' ? activeVisit.id : null}
-          onClose={() => setFillingForm(null)}
-          onDone={() => { setFormsDone((d) => [...d, fillingForm.id]); setFillingForm(null); }} />
+          draftId={fillingFormDraft?.id || null}
+          initialData={fillingFormDraft?.data?.data || null}
+          onClose={() => { setFillingForm(null); setFillingFormDraft(null); }}
+          onDone={() => { setFormsDone((d) => [...d, fillingForm.id]); setFillingForm(null); setFillingFormDraft(null); }} />
       )}
 
       {showFieldNotes && (
@@ -1234,12 +1251,29 @@ function OnsiteDetailsModal({ customerId, customer, onClose, onSaved }) {
 // the server stores them as files. Offline submissions queue in the outbox.
 // Field types: heading | text | email | number | date | select | checkbox |
 // photo | signature | product.
-function FormFillModal({ template, customerId, visitId, onClose, onDone }) {
-  const [data, setData] = useState({});
+function FormFillModal({ template, customerId, visitId, draftId, initialData, onClose, onDone }) {
+  const [data, setData] = useState(initialData || {});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
   const [products, setProducts] = useState(null);
   const set = (key, value) => setData((d) => ({ ...d, [key]: value }));
+
+  // Saved server-side so a rep can resume it later, even from another phone.
+  const saveDraft = async () => {
+    setSavingDraft(true);
+    setError('');
+    const payload = { kind: 'form', customer_id: customerId, template_id: template.id, visit_id: visitId, label: template.name, data: { data } };
+    try {
+      if (draftId) await api.put(`/drafts/${draftId}`, payload);
+      else await api.post('/drafts', payload);
+      onClose();
+    } catch (err) {
+      setError(err.message || 'Could not save draft - check your connection.');
+    } finally {
+      setSavingDraft(false);
+    }
+  };
 
   // Load the catalogue once if this form has any product-picker field.
   const hasProductField = (template.fields || []).some((f) => f.type === 'product');
@@ -1260,10 +1294,12 @@ function FormFillModal({ template, customerId, visitId, onClose, onDone }) {
     const payload = { template_id: template.id, customer_id: customerId, visit_id: visitId, data };
     try {
       await api.post('/form-submissions', payload);
+      if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
       onDone();
     } catch (err) {
       if (err.isNetworkError) {
         queueWrite('POST', '/form-submissions', payload);
+        if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
         onDone();
       } else {
         setError(err.message);
@@ -1321,8 +1357,11 @@ function FormFillModal({ template, customerId, visitId, onClose, onDone }) {
           );
         })}
         <div className="flex justify-end gap-2">
-          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" disabled={busy}>{busy ? 'Submitting…' : 'Submit form'}</button>
+          <button type="button" className="btn-secondary" onClick={onClose} disabled={busy || savingDraft}>Cancel</button>
+          <button type="button" className="btn-secondary" onClick={saveDraft} disabled={busy || savingDraft}>
+            {savingDraft ? 'Saving…' : '💾 Save draft'}
+          </button>
+          <button className="btn-primary" disabled={busy || savingDraft}>{busy ? 'Submitting…' : 'Submit form'}</button>
         </div>
       </form>
     </Modal>

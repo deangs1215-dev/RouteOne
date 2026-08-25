@@ -71,13 +71,20 @@ router.get('/dashboard', (req, res) => {
     ORDER BY o.order_date DESC LIMIT 10
   `).all(...(scope.isRep ? [repId] : []));
 
-  // GROUP BY only returns days that had at least one order, so a quiet day is
-  // simply absent from the rows rather than a zero - zero-fill every day in
-  // the window here so the chart always draws 14 bars, not just the days with
-  // sales.
+  // Sourced from invoices (SYSPRO's actual invoiced sales, synced from
+  // vw_FS_Invoices) rather than RouteOne's own orders table - reps capturing
+  // (or not capturing) orders in the app shouldn't make this chart look like
+  // sales stopped. Invoices has no rep_id of its own, so rep scoping goes
+  // through the customer it's billed to.
+  //
+  // GROUP BY only returns days that had at least one invoice, so a quiet day
+  // is simply absent from the rows rather than a zero - zero-fill every day
+  // in the window here so the chart always draws 14 bars, not just the days
+  // with sales.
   const salesByDay = db.prepare(`
-    SELECT date(order_date) AS day, COALESCE(SUM(total), 0) AS total
-    FROM orders WHERE order_date >= date('now', '-14 days') AND status != 'cancelled' ${scope.isRep ? 'AND rep_id = ?' : ''}
+    SELECT i.invoice_date AS day, COALESCE(SUM(i.total), 0) AS total
+    FROM invoices i ${scope.isRep ? 'JOIN customers c ON c.id = i.customer_id' : ''}
+    WHERE i.invoice_date >= date('now', '-14 days') ${scope.isRep ? 'AND c.rep_id = ?' : ''}
     GROUP BY day
   `).all(...(scope.isRep ? [repId] : []));
   const salesByDayMap = Object.fromEntries(salesByDay.map((r) => [r.day, r.total]));

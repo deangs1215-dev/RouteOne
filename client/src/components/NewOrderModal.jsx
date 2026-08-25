@@ -16,12 +16,12 @@ export function unitPriceFor(product, qty) {
   return applicable.length ? applicable[applicable.length - 1].price : product.effective_price;
 }
 
-// Price per kg for a given unit price, or null if pack weight isn't known.
-// pack_weight_kg is parsed server-side once at sync time (see db.js) - the
-// catalogue's list_price is itself a per-kg price, so this just reverses the
-// same multiplication to show the rep what they're paying per kg.
+// Price per kg for a given unit price, or null if the kg factor isn't known.
+// conv_factor_alt_uom is SYSPRO's own kg-per-selling-unit factor (see db.js) -
+// the catalogue's list_price is itself a per-kg price, so this just reverses
+// the same multiplication to show the rep what they're paying per kg.
 export function kgPriceFor(product, unitPrice) {
-  const kg = product.pack_weight_kg;
+  const kg = product.conv_factor_alt_uom || product.pack_weight_kg;
   return kg && kg > 0 ? unitPrice / kg : null;
 }
 

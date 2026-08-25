@@ -279,8 +279,8 @@ export function buildDaySummary(repId, date) {
       (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(check_in_at) = date(?) AND status = 'completed') AS visits_done,
       (SELECT COUNT(*) FROM orders WHERE rep_id = ? AND date(order_date) = date(?) AND status != 'cancelled') AS orders_today,
       (SELECT COALESCE(SUM(total), 0) FROM orders WHERE rep_id = ? AND date(order_date) = date(?) AND status != 'cancelled') AS sales_today,
-      (SELECT COALESCE(SUM(total), 0) FROM orders WHERE rep_id = ? AND order_date >= date('now', 'start of month') AND status != 'cancelled') AS sales_mtd
-  `).get(repId, date, repId, date, repId, date, repId);
+      (SELECT COALESCE(sales_value, 0) FROM rep_monthly_sales WHERE rep_id = ? AND month = ?) AS sales_mtd
+  `).get(repId, date, repId, date, repId, date, repId, date.slice(0, 7));
   // Target rolls automatically with the viewed date's month - a rep_budgets
   // figure for that month if set, otherwise the flat sales_target fallback.
   stats.target = repMonthTarget(repId, Number(date.slice(5, 7)));

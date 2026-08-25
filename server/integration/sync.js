@@ -85,20 +85,23 @@ const upsertProduct = (row) => {
       : db.prepare('INSERT INTO product_categories (name) VALUES (?)').run(row.category).lastInsertRowid;
   }
   const packWeight = packWeightKg(row.pack_size);
+  // Null (not 1.0) when the view predates ConvFactAltUom - COALESCE below then
+  // keeps any existing value, and productUnitPrice falls back to pack_weight_kg.
+  const convFactorAltUom = row.conv_factor_alt_uom ?? null;
   const existing = db.prepare('SELECT id FROM products WHERE code = ?').get(row.code);
   if (existing) {
     db.prepare(`
       UPDATE products SET name = ?, category_id = COALESCE(?, category_id), description = COALESCE(?, description),
         uom = COALESCE(?, uom), pack_size = COALESCE(?, pack_size), pack_weight_kg = COALESCE(?, pack_weight_kg),
-        list_price = ?, cost_price = COALESCE(?, cost_price)
+        conv_factor_alt_uom = COALESCE(?, conv_factor_alt_uom), list_price = ?, cost_price = COALESCE(?, cost_price)
       WHERE id = ?
-    `).run(row.name, categoryId, row.description, row.uom, row.pack_size, packWeight, row.list_price ?? 0, row.cost_price, existing.id);
+    `).run(row.name, categoryId, row.description, row.uom, row.pack_size, packWeight, convFactorAltUom, row.list_price ?? 0, row.cost_price, existing.id);
   } else {
     db.prepare(`
-      INSERT INTO products (code, name, category_id, description, uom, pack_size, pack_weight_kg, list_price, cost_price, stock_qty)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      INSERT INTO products (code, name, category_id, description, uom, pack_size, pack_weight_kg, conv_factor_alt_uom, list_price, cost_price, stock_qty)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `).run(row.code, row.name, categoryId, row.description || null, row.uom || 'each',
-      row.pack_size || null, packWeight, row.list_price ?? 0, row.cost_price ?? 0);
+      row.pack_size || null, packWeight, convFactorAltUom, row.list_price ?? 0, row.cost_price ?? 0);
   }
 };
 
@@ -212,19 +215,37 @@ const upsertRepSales = (row) => {
   `).run(repId, monthKey, salesValue);
 };
 
-const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales };
+// vw_FS_InvoiceLines has no stable per-line natural key (the same product can
+// appear on more than one line of an invoice - confirmed against live data),
+// so this table is fully wiped and rebuilt each run (see CLEAR_BEFORE_SYNC)
+// rather than upserted. A row whose invoice isn't synced yet (outside the
+// header view's own window, or a sync-order hiccup) is skipped, not an error.
+const upsertInvoiceLine = (row) => {
+  const invoice = db.prepare('SELECT id FROM invoices WHERE number = ?').get(row.invoice_number);
+  if (!invoice) return false;
+  const product = db.prepare('SELECT id FROM products WHERE code = ?').get(row.product_code);
+  db.prepare(`
+    INSERT INTO invoice_items (invoice_id, product_id, product_code, qty, unit_price, line_total)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(invoice.id, product?.id ?? null, row.product_code, row.qty ?? 0, row.unit_price ?? 0, row.line_total ?? 0);
+};
 
-// Entities whose upserter accumulates (SUM) rather than replaces must clear
-// their destination table before each run - otherwise re-syncing would keep
-// adding to the same rep-month total instead of recomputing it from scratch.
+const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, invoice_lines: upsertInvoiceLine, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales };
+
+// Entities whose upserter accumulates (SUM) or has no natural key to upsert
+// on must clear their destination table before each run - otherwise
+// re-syncing would keep adding to the same rep-month total, or duplicating
+// invoice lines, instead of recomputing from scratch.
 const CLEAR_BEFORE_SYNC = {
-  rep_sales: () => db.prepare('DELETE FROM rep_monthly_sales').run()
+  rep_sales: () => db.prepare('DELETE FROM rep_monthly_sales').run(),
+  invoice_lines: () => db.prepare('DELETE FROM invoice_items').run()
 };
 
 // Order matters: customers reference warehouses; customer_pricing and invoices reference customers (and products).
+// invoice_lines must come after invoices (resolves invoice_number -> invoice_id).
 // Rep-to-warehouse assignment is managed manually in RouteOne (SalSalesperson branch data is
 // unreliable - the same rep code can show multiple conflicting branches), so "reps" is not synced here.
-export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'customer_pricing', 'rep_sales'];
+export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'invoice_lines', 'customer_pricing', 'rep_sales'];
 const syncsInFlight = new Set();
 
 // Rows are committed in batches of this size, yielding to the event loop

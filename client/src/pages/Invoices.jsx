@@ -29,7 +29,7 @@ export default function Invoices() {
             empty={rows.length === 0 && 'No invoices found.'} emptyIcon="📋">
             {rows.map((inv) => (
               <tr key={inv.id} className="hover:bg-slate-50">
-                <td className="td font-medium">{inv.number}</td>
+                <td className="td font-medium"><Link className="hover:text-brand-600" to={`/invoices/${inv.id}`}>{inv.number}</Link></td>
                 <td className="td">{inv.customer_name || inv.customer_code}</td>
                 <td className="td text-slate-500">{fmtDate(inv.invoice_date)}</td>
                 <td className="td text-right text-slate-500">{fmtR(inv.subtotal)}</td>

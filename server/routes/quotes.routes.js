@@ -84,7 +84,7 @@ router.get('/quotes/:id/pdf', async (req, res) => {
     return res.status(403).json({ error: 'Not your quote' });
   }
   const items = db.prepare(`
-    SELECT i.*, p.pack_weight_kg FROM quote_items i
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ?
   `).all(quote.id);
   try {

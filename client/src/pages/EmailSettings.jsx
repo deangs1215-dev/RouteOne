@@ -15,7 +15,7 @@ export default function EmailSettings() {
   const [testTo, setTestTo] = useState('');
 
   const [recipients, setRecipients] = useState(null);
-  const [editing, setEditing] = useState(null); // null | 'new' | recipient
+  const [editing, setEditing] = useState(null); // null | { category } | recipient
 
   const load = () => {
     api.get('/integration/settings').then(setSettings).catch((e) => setError(e.message));
@@ -26,6 +26,9 @@ export default function EmailSettings() {
   useEffect(() => { load(); loadRecipients(); }, []);
 
   if (!settings) return <Spinner />;
+
+  const ordersRecipients = recipients?.filter((r) => r.category === 'orders') ?? null;
+  const technicalRecipients = recipients?.filter((r) => r.category === 'technical') ?? null;
 
   const set = (k) => (e) => setSettings({ ...settings, [k]: e.target.type === 'checkbox' ? (e.target.checked ? '1' : '0') : e.target.value });
 
@@ -135,13 +138,13 @@ export default function EmailSettings() {
           Configured email addresses will appear as checkboxes when reps or managers confirm an order.
           The order PDF will be emailed to selected addresses.
         </p>
-        {!recipients ? (
+        {!ordersRecipients ? (
           <Spinner />
         ) : (
           <>
             <Table headers={['Name', 'Email', 'Description', '']}
-              empty={recipients.length === 0 && 'No email recipients configured.'}>
-              {recipients.map((r) => (
+              empty={ordersRecipients.length === 0 && 'No email recipients configured.'}>
+              {ordersRecipients.map((r) => (
                 <tr key={r.id} className={`hover:bg-slate-50 ${canEdit ? 'cursor-pointer' : ''}`}
                   onClick={() => canEdit && setEditing(r)}>
                   <td className="td font-medium">{r.name}</td>
@@ -159,7 +162,7 @@ export default function EmailSettings() {
               ))}
             </Table>
             {canEdit && (
-              <button className="btn-primary mt-4" onClick={() => setEditing('new')}>
+              <button className="btn-primary mt-4" onClick={() => setEditing({ category: 'orders' })}>
                 + Add recipient
               </button>
             )}
@@ -171,13 +174,13 @@ export default function EmailSettings() {
         <p className="text-sm text-slate-500 mb-4">
           Configured email addresses will receive notifications when a form marked as Technical is completed in the field.
         </p>
-        {!recipients ? (
+        {!technicalRecipients ? (
           <Spinner />
         ) : (
           <>
             <Table headers={['Name', 'Email', 'Description', '']}
-              empty={recipients.length === 0 && 'No email recipients configured.'}>
-              {recipients.map((r) => (
+              empty={technicalRecipients.length === 0 && 'No email recipients configured.'}>
+              {technicalRecipients.map((r) => (
                 <tr key={r.id} className={`hover:bg-slate-50 ${canEdit ? 'cursor-pointer' : ''}`}
                   onClick={() => canEdit && setEditing(r)}>
                   <td className="td font-medium">{r.name}</td>
@@ -195,7 +198,7 @@ export default function EmailSettings() {
               ))}
             </Table>
             {canEdit && (
-              <button className="btn-primary mt-4" onClick={() => setEditing('new')}>
+              <button className="btn-primary mt-4" onClick={() => setEditing({ category: 'technical' })}>
                 + Add recipient
               </button>
             )}
@@ -204,7 +207,8 @@ export default function EmailSettings() {
       </Card>
 
       {editing && (
-        <RecipientModal recipient={editing === 'new' ? null : editing}
+        <RecipientModal recipient={editing.id ? editing : null}
+          category={editing.category}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); loadRecipients(); }}
           onError={setError}
@@ -214,7 +218,7 @@ export default function EmailSettings() {
   );
 }
 
-function RecipientModal({ recipient, onClose, onSaved, onError }) {
+function RecipientModal({ recipient, category, onClose, onSaved, onError }) {
   const [name, setName] = useState(recipient?.name || '');
   const [email, setEmail] = useState(recipient?.email || '');
   const [description, setDescription] = useState(recipient?.description || '');
@@ -231,7 +235,7 @@ function RecipientModal({ recipient, onClose, onSaved, onError }) {
       if (recipient) {
         await api.put(`/email-recipients/${recipient.id}`, { name, email, description });
       } else {
-        await api.post('/email-recipients', { name, email, description });
+        await api.post('/email-recipients', { name, email, description, category });
       }
       onSaved();
     } catch (e) {
@@ -258,7 +262,7 @@ function RecipientModal({ recipient, onClose, onSaved, onError }) {
   };
 
   return (
-    <Modal title={recipient ? 'Edit recipient' : 'New recipient'} onClose={onClose} wide>
+    <Modal title={recipient ? 'Edit recipient' : `New ${category === 'technical' ? 'technical' : 'orders'} recipient`} onClose={onClose} wide>
       <ErrorNote error={error} />
       <div className="space-y-4">
         <Field label="Name *">

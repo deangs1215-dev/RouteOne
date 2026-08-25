@@ -102,9 +102,23 @@ export function buildDocumentPdf({ type, doc, items, company }) {
     for (const it of items) {
       const name = `${it.product_name}`;
       const nameHeight = pdf.heightOfString(name, { width: 250 });
-      const kgPrice = it.pack_weight_kg > 0 ? it.unit_price / it.pack_weight_kg : null;
-      const rowH = Math.max(20, nameHeight + 8, kgPrice != null ? 30 : 20);
+      const kgFactor = it.conv_factor_alt_uom || it.pack_weight_kg;
+      const kgPrice = kgFactor > 0 ? it.unit_price / kgFactor : null;
+      // Order: just the product code. Quote: the full code, and the short
+      // code (its first 5 characters) on the line below.
+      const codeLines = it.product_code
+        ? (type === 'quote' ? [it.product_code, it.product_code.slice(0, 5)] : [it.product_code])
+        : [];
+      const codeHeight = codeLines.length * 10;
+      const rowH = Math.max(20, nameHeight + codeHeight + 8, kgPrice != null ? 30 : 20);
       pdf.fillColor(NAVY).fontSize(9.5).text(name, cols.product + 8, y + 5, { width: 250 });
+      let codeY = y + 5 + nameHeight + 2;
+      pdf.fillColor(GREY).fontSize(7.5);
+      for (const line of codeLines) {
+        pdf.text(line, cols.product + 8, codeY, { width: 250 });
+        codeY += 10;
+      }
+      pdf.fillColor(NAVY).fontSize(9.5);
       pdf.text(`${it.qty} ${it.uom || ''}`.trim(), cols.qty, y + 5, { width: 60, align: 'right' });
       pdf.text(fmtR(it.unit_price), cols.unit, y + 5, { width: 70, align: 'right' });
       if (kgPrice != null) {

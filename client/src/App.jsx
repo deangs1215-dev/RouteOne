@@ -47,6 +47,7 @@ const Team = lazy(() => import('./pages/Team'));
 const RepDetail = lazy(() => import('./pages/RepDetail'));
 const Tasks = lazy(() => import('./pages/Tasks'));
 const Invoices = lazy(() => import('./pages/Invoices'));
+const InvoiceDetail = lazy(() => import('./pages/InvoiceDetail'));
 const MobileApp = lazy(() => import('./mobile/MobileApp'));
 
 export default function App() {
@@ -83,6 +84,7 @@ export default function App() {
           <Route path="/orders" element={<Orders />} />
           <Route path="/orders/:id" element={<OrderDetail />} />
           <Route path="/invoices" element={<Invoices />} />
+          <Route path="/invoices/:id" element={<InvoiceDetail />} />
           <Route path="/quotes" element={<Quotes />} />
           <Route path="/quotes/:id" element={<QuoteDetail />} />
           <Route path="/forms" element={<FormsAdmin />} />

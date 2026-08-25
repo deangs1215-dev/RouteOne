@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api, fmtR, fmtDate, fmtDateTime } from '../api';
+import { api, fmtRWhole, fmtDate, fmtDateTime } from '../api';
 import { Card, Stat, Table, Spinner, OrderStatusBadge } from '../components/ui';
 import { useAuth } from '../auth';
 
@@ -22,11 +22,11 @@ export default function Dashboard() {
       <h1 className="text-xl font-bold">Dashboard</h1>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <Stat label="Sales MTD" value={fmtR(stats.sales_mtd)} accent="text-brand-600" />
+        <Stat label="Sales MTD" value={fmtRWhole(stats.sales_mtd)} accent="text-brand-600" />
         <Stat label="Orders today" value={stats.orders_today} />
         <Stat label="Visits today" value={stats.visits_today} sub={`${stats.visits_pending} still planned`} />
         <Stat label="Active customers" value={stats.active_customers} />
-        <Stat label="Avg order value" value={fmtR(stats.avg_order_value)} sub="last 30 days" />
+        <Stat label="Avg order value" value={fmtRWhole(stats.avg_order_value)} sub="last 30 days" />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -39,8 +39,8 @@ export default function Dashboard() {
                   <div key={r.id}>
                     <div className="flex items-baseline justify-between text-sm">
                       <span className="font-medium">{r.name}</span>
-                      <span>{fmtR(r.sales_mtd)}
-                        {r.sales_target > 0 && <span className="ml-1 text-xs text-slate-400">/ {fmtR(r.sales_target)}</span>}
+                      <span>{fmtRWhole(r.sales_mtd)}
+                        {r.sales_target > 0 && <span className="ml-1 text-xs text-slate-400">/ {fmtRWhole(r.sales_target)}</span>}
                       </span>
                     </div>
                     <div className="mt-1 h-2 rounded-full bg-slate-100">
@@ -61,7 +61,7 @@ export default function Dashboard() {
               <div key={d.day} className="group relative flex-1">
                 <div className="rounded-t bg-brand-500/80 hover:bg-brand-600" style={{ height: `${(d.total / maxTrend) * 150 + 4}px` }} />
                 <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 hidden -translate-x-1/2 whitespace-nowrap rounded bg-slate-800 px-2 py-1 text-xs text-white group-hover:block">
-                  {fmtDate(d.day)}: {fmtR(d.total)}
+                  {fmtDate(d.day)}: {fmtRWhole(d.total)}
                 </div>
               </div>
             ))}
@@ -75,7 +75,7 @@ export default function Dashboard() {
                 <td className="td font-medium"><Link className="hover:text-brand-600" to={`/customers/${c.id}`}>{c.name}</Link></td>
                 <td className="td text-slate-500">{c.city}</td>
                 <td className="td">{c.orders_mtd}</td>
-                <td className="td font-medium">{fmtR(c.sales_mtd)}</td>
+                <td className="td font-medium">{fmtRWhole(c.sales_mtd)}</td>
               </tr>
             ))}
           </Table>
@@ -103,7 +103,7 @@ export default function Dashboard() {
               <td className="td text-slate-500">{o.rep_name || '—'}</td>
               <td className="td text-slate-500">{fmtDateTime(o.order_date)}</td>
               <td className="td"><OrderStatusBadge status={o.status} /></td>
-              <td className="td font-medium">{fmtR(o.total)}</td>
+              <td className="td font-medium">{fmtRWhole(o.total)}</td>
             </tr>
           ))}
         </Table>

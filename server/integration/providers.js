@@ -11,6 +11,8 @@
 //  stock:     { code, warehouse_code, qty_available }  (one row per product per branch)
 //  prices:    { customer_code, product_code, price }   (contract prices)
 //  invoices:  { number, customer_code, order_number, invoice_date, due_date, subtotal, vat_amount, total, amount_paid, balance, status }
+//  invoice_lines: { invoice_number, product_code, qty, unit_price, line_total } - one row per invoice line, last 30 days only
+//  rep_sales: { TrnYear, TrnMonth, TrnBranch, CustomerBranch, 'Customer SalesPerson', 'Customer SP name', NSV } - one row per rep per month per branch
 import { getSetting } from '../db.js';
 import { decryptSecret } from '../crypto.js';
 
@@ -39,12 +41,18 @@ export function sysproConfig(overrides = {}) {
       products: getSetting('syspro_view_products', '') || 'vw_FS_Products',
       stock: getSetting('syspro_view_stock', '') || 'vw_FS_Stock',
       customer_pricing: getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
-      invoices: getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices'
+      invoices: getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices',
+      invoice_lines: getSetting('syspro_view_invoice_lines', '') || 'vw_FS_InvoiceLines',
+      rep_sales: getSetting('syspro_view_rep_sales', '') || 'vw_FS_RepSalesByMonth'
     }
   };
 }
 
-async function sysproPool(overrides) {
+// requestTimeout is per-call: most views answer in seconds, but the big ones
+// (customer_pricing is ~13M rows, stock/invoices are large too) can take many
+// minutes on a busy SYSPRO box. A blanket-high timeout would mask a genuinely
+// stuck connection on a small view, so callers pass what that entity needs.
+async function sysproPool(overrides, requestTimeout = 60000) {
   const sql = (await import('mssql')).default;
   const cfg = sysproConfig(overrides);
   if (!cfg.host || !cfg.database || !cfg.user) {
@@ -62,7 +70,7 @@ async function sysproPool(overrides) {
     },
     pool: { max: 2 },
     connectionTimeout: 10000,
-    requestTimeout: 60000
+    requestTimeout
   });
 }
 
@@ -91,12 +99,28 @@ const sysproProvider = {
       customers: 500000,
       products: 500000,
       stock: 1000000,
-      customer_pricing: 1000000,
-      invoices: 1000000
+      customer_pricing: 5000000,  // increased from 1M to handle ~13M SYSPRO view (will fetch TOP 5M)
+      invoices: 1000000,
+      invoice_lines: 500000,
+      rep_sales: 200000
     };
     const limit = limits[entity];
     if (!limit) throw new Error(`Unknown SYSPRO entity ${entity}`);
-    const pool = await sysproPool();
+    // Big views need far longer than the 60s default - customer_pricing alone
+    // is millions of rows and has been measured at ~20 min on a good run, so
+    // it gets 45 min of headroom for a busier SYSPRO box. Small reference
+    // views keep the short timeout so a hung connection surfaces quickly
+    // instead of blocking for the better part of an hour.
+    const timeouts = {
+      customer_pricing: 2700000, // 45 min (~20 min observed, generous headroom)
+      stock: 900000,             // 15 min
+      invoices: 900000,
+      invoice_lines: 600000,     // 10 min - only a 30-day window, but ArTrnDetail itself is huge
+      products: 600000,          // 10 min
+      customers: 600000,
+      rep_sales: 600000
+    };
+    const pool = await sysproPool(undefined, timeouts[entity] ?? 60000);
     try {
       const result = await pool.request().query(`SELECT TOP (${limit + 1}) * FROM ${quotedView}`);
       if (result.recordset.length > limit) {

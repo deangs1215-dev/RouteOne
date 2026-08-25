@@ -95,18 +95,33 @@ router.get('/products/for-customer/:customerId', (req, res) => {
     SELECT p.*, c.name AS category_name,
       COALESCE(cp.price, p.list_price) AS effective_price,
       CASE WHEN cp.price IS NOT NULL THEN 1 ELSE 0 END AS has_contract_price,
-      (SELECT COUNT(DISTINCT oi.order_id) FROM order_items oi
+      -- "Bought" combines RouteOne-captured orders (full history) with SYSPRO
+      -- invoices (invoice_items only ever holds a rolling 30-day window - see
+      -- providers.js - so this is recent-purchases-only, not full history).
+      -- Without the invoice side, a customer who buys via SYSPRO/phone and
+      -- rarely has a RouteOne order captured would show no purchase history
+      -- at all and the "Buys" filter would silently fall back to "All".
+      ((SELECT COUNT(DISTINCT oi.order_id) FROM order_items oi
          JOIN orders o ON o.id = oi.order_id
-         WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled') AS times_bought,
-      (SELECT MAX(o.order_date) FROM order_items oi
-         JOIN orders o ON o.id = oi.order_id
-         WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled') AS last_bought_at
+         WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled') +
+       (SELECT COUNT(DISTINCT ii.invoice_id) FROM invoice_items ii
+         JOIN invoices i ON i.id = ii.invoice_id
+         WHERE i.customer_id = ? AND ii.product_id = p.id)) AS times_bought,
+      (SELECT MAX(d) FROM (
+         SELECT MAX(o.order_date) AS d FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id
+           WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled'
+         UNION ALL
+         SELECT MAX(i.invoice_date) AS d FROM invoice_items ii
+           JOIN invoices i ON i.id = ii.invoice_id
+           WHERE i.customer_id = ? AND ii.product_id = p.id
+       )) AS last_bought_at
     FROM products p
     LEFT JOIN product_categories c ON c.id = p.category_id
     LEFT JOIN customer_prices cp ON cp.product_id = p.id AND cp.customer_id = ?
     WHERE p.active = 1
     ORDER BY p.name
-  `).all(cid, cid, cid);
+  `).all(cid, cid, cid, cid, cid);
 
   // Reps only see stock at their own branch/warehouse - not the company-wide
   // total - since that's what's actually on hand to fulfil the order from.
@@ -154,7 +169,7 @@ router.get('/products/for-customer/:customerId', (req, res) => {
       // SYSPRO contract/buying-group/price-code prices are per-KG, same as
       // list_price (see productUnitPrice in db.js) - must scale by pack weight
       // to get the real per-unit selling price, same as list_price does.
-      sysproEffectivePrice = perKgPrice != null ? perKgPrice * (p.pack_weight_kg || 1) : null;
+      sysproEffectivePrice = perKgPrice != null ? perKgPrice * (p.conv_factor_alt_uom || p.pack_weight_kg || 1) : null;
       if (contractPrice) sysproPricingTier = 'syspro_contract';
       else if (buyingGroupPrice) sysproPricingTier = 'syspro_buying_group';
       else if (syspro.price_code_price) sysproPricingTier = 'syspro_price_code';
@@ -284,9 +299,9 @@ router.get('/customer-pricing', (req, res) => {
     return res.status(400).json({ error: 'customer_code and product_code are required' });
   }
 
-  const product = db.prepare('SELECT list_price, pack_weight_kg FROM products WHERE code = ?').get(product_code);
+  const product = db.prepare('SELECT list_price, pack_weight_kg, conv_factor_alt_uom FROM products WHERE code = ?').get(product_code);
   if (!product) return res.status(404).json({ error: 'Product not found' });
-  const packWeight = product.pack_weight_kg || 1;
+  const packWeight = product.conv_factor_alt_uom || product.pack_weight_kg || 1;
 
   const override = db.prepare(`
     SELECT contract_price, buying_group_price, price_code_price,

@@ -49,6 +49,7 @@ for (const stmt of [
   'ALTER TABLE users ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)',
   'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 1',
   'ALTER TABLE products ADD COLUMN pack_weight_kg REAL',
+  'ALTER TABLE products ADD COLUMN conv_factor_alt_uom REAL',
   "ALTER TABLE visits ADD COLUMN check_in_type TEXT DEFAULT 'onsite'",
   'ALTER TABLE visits ADD COLUMN check_in_address TEXT',
   'ALTER TABLE orders ADD COLUMN signature TEXT',
@@ -70,7 +71,11 @@ for (const stmt of [
   'ALTER TABLE form_templates ADD COLUMN notify_email TEXT',
   'ALTER TABLE users ADD COLUMN documents_last_viewed_at TEXT',
   'ALTER TABLE users ADD COLUMN reset_token_hash TEXT',
-  'ALTER TABLE users ADD COLUMN reset_token_expires TEXT'
+  'ALTER TABLE users ADD COLUMN reset_token_expires TEXT',
+  'ALTER TABLE sync_runs ADD COLUMN rows_skipped INTEGER DEFAULT 0',
+  // Existing rows predate the Orders/Technical split - they were all Orders
+  // recipients (the only list that existed), so the default is correct for them.
+  "ALTER TABLE email_recipients ADD COLUMN category TEXT NOT NULL DEFAULT 'orders'"
 ]) {
   try { db.exec(stmt); } catch { /* column already exists */ }
 }
@@ -229,12 +234,13 @@ export function activeRules() {
 }
 
 // SYSPRO's catalogue price (products.list_price) is a per-KG price, not a
-// per-unit/per-pack price - confirmed against real data (e.g. a 25kg bag
-// priced per kg, not per bag). The real selling price for one unit is
-// list_price * the pack's weight in kg. pack_weight_kg is parsed once at
-// sync time (see packWeightKg below) and stored, not re-derived per request.
+// per-unit/per-pack price. conv_factor_alt_uom is SYSPRO's own ConvFactAltUom,
+// read straight from InvMaster - it replaces packWeightKg()'s string-parse of
+// pack_size, which mispriced products whose stocking UOM text doesn't equal the
+// selling-unit factor (see docs/sql/vw_FS_Products-ConvFactAltUom.sql).
+// Falls back to pack_weight_kg for products not yet re-synced.
 export function productUnitPrice(product) {
-  return product.list_price * (product.pack_weight_kg || 1);
+  return product.list_price * (product.conv_factor_alt_uom || product.pack_weight_kg || 1);
 }
 
 // Parses a pack_size like "BAG 25KG", "BUCKET 2.7", "CARTON12.5", "EACH 500G",
@@ -313,7 +319,7 @@ export function effectivePrice(customerId, productId, qty = 1) {
         inWindow(syspro.buying_group_start_date, syspro.buying_group_end_date)
         ? syspro.buying_group_price : null;
       const perKgPrice = contractPrice ?? groupPrice ?? syspro.price_code_price;
-      if (perKgPrice != null) return perKgPrice * (product.pack_weight_kg || 1);
+      if (perKgPrice != null) return perKgPrice * (product.conv_factor_alt_uom || product.pack_weight_kg || 1);
     }
   }
   const contract = db.prepare(

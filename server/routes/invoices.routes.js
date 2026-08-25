@@ -46,7 +46,32 @@ router.get('/invoices/:id', (req, res) => {
     return res.status(403).json({ error: 'Not your invoice' });
   }
   delete invoice.rep_id;
-  res.json(invoice);
+
+  // Prefer SYSPRO's own invoice line detail (vw_FS_InvoiceLines, synced into
+  // invoice_items) - authoritative, but only covers the last 30 days by
+  // design (see docs/sql/vw_FS_InvoiceLines.sql). Older invoices fall back to
+  // the linked RouteOne order's items as a best-effort approximation - SYSPRO
+  // can still adjust qty/price at invoicing time, or split/merge orders
+  // across invoices, so that fallback is never treated as authoritative.
+  let items = db.prepare(`
+    SELECT ii.product_code, ii.qty, ii.unit_price, ii.line_total, p.name AS product_name, p.uom
+    FROM invoice_items ii LEFT JOIN products p ON p.id = ii.product_id
+    WHERE ii.invoice_id = ?
+  `).all(invoice.id);
+  let itemsSource = items.length ? 'syspro' : null;
+
+  if (!items.length && invoice.order_number) {
+    const order = db.prepare('SELECT id FROM orders WHERE number = ?').get(invoice.order_number);
+    if (order) {
+      items = db.prepare(`
+        SELECT i.product_name, i.qty, i.uom, i.unit_price, i.line_total, p.code AS product_code
+        FROM order_items i LEFT JOIN products p ON p.id = i.product_id
+        WHERE i.order_id = ?
+      `).all(order.id);
+      itemsSource = 'order';
+    }
+  }
+  res.json({ ...invoice, items, items_source: itemsSource });
 });
 
 export default router;
