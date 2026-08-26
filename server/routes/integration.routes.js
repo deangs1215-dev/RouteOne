@@ -15,7 +15,7 @@ const router = Router();
 const SETTING_KEYS = [
   'intg_source', 'syspro_host', 'syspro_port', 'syspro_db', 'syspro_user',
   'syspro_encrypt', 'syspro_trust_server_certificate',
-  'syspro_view_warehouses', 'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_customer_pricing', 'syspro_view_invoices', 'syspro_view_invoice_lines', 'syspro_view_rep_sales',
+  'syspro_view_warehouses', 'syspro_view_customers', 'syspro_view_products', 'syspro_view_stock', 'syspro_view_customer_pricing', 'syspro_view_invoices', 'syspro_view_invoice_lines', 'syspro_view_rep_sales', 'syspro_view_customer_sales',
    'email_transport', 'smtp_host', 'smtp_port', 'smtp_secure', 'smtp_allow_invalid_cert', 'smtp_user', 'smtp_from',
   'graph_tenant_id', 'graph_client_id', 'graph_sender',
   'technical_email', 'email_auto_send', 'email_confirm_customer',

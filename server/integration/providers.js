@@ -13,6 +13,7 @@
 //  invoices:  { number, customer_code, order_number, invoice_date, due_date, subtotal, vat_amount, total, amount_paid, balance, status }
 //  invoice_lines: { invoice_number, product_code, qty, unit_price, line_total } - one row per invoice line, last 30 days only
 //  rep_sales: { TrnYear, TrnMonth, TrnBranch, CustomerBranch, 'Customer SalesPerson', 'Customer SP name', NSV } - one row per rep per month per branch
+//  customer_sales: { customer_code, trn_year, trn_month, nsv } - one row per customer per month, ex-VAT, last 13 months
 import { getSetting } from '../db.js';
 import { decryptSecret } from '../crypto.js';
 
@@ -43,7 +44,8 @@ export function sysproConfig(overrides = {}) {
       customer_pricing: getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
       invoices: getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices',
       invoice_lines: getSetting('syspro_view_invoice_lines', '') || 'vw_FS_InvoiceLines',
-      rep_sales: getSetting('syspro_view_rep_sales', '') || 'vw_FS_RepSalesByMonth'
+      rep_sales: getSetting('syspro_view_rep_sales', '') || 'vw_FS_RepSalesByMonth',
+      customer_sales: getSetting('syspro_view_customer_sales', '') || 'vw_FS_CustomerSalesByMonth'
     }
   };
 }
@@ -102,7 +104,8 @@ const sysproProvider = {
       customer_pricing: 5000000,  // increased from 1M to handle ~13M SYSPRO view (will fetch TOP 5M)
       invoices: 1000000,
       invoice_lines: 500000,
-      rep_sales: 200000
+      rep_sales: 200000,
+      customer_sales: 500000
     };
     const limit = limits[entity];
     if (!limit) throw new Error(`Unknown SYSPRO entity ${entity}`);
@@ -118,7 +121,8 @@ const sysproProvider = {
       invoice_lines: 600000,     // 10 min - only a 30-day window, but ArTrnDetail itself is huge
       products: 600000,          // 10 min
       customers: 600000,
-      rep_sales: 600000
+      rep_sales: 600000,
+      customer_sales: 600000
     };
     const pool = await sysproPool(undefined, timeouts[entity] ?? 60000);
     try {

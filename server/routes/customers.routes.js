@@ -96,14 +96,46 @@ router.get('/customers/:id', (req, res) => {
     FROM customer_prices cp JOIN products p ON p.id = cp.product_id
     WHERE cp.customer_id = ? ORDER BY p.name
   `).all(customer.id);
+  // order_count / sales_total / sales_mtd stay RouteOne-native: they measure
+  // order-capture activity in the app, which is a different question from
+  // "what has this customer actually bought".
   customer.stats = db.prepare(`
     SELECT
       COUNT(*) AS order_count,
       COALESCE(SUM(total), 0) AS sales_total,
-      COALESCE(SUM(CASE WHEN order_date >= date('now', 'start of month') THEN total END), 0) AS sales_mtd,
-      COALESCE(SUM(CASE WHEN order_date >= date('now', '-365 days') THEN total END), 0) AS sales_12m
+      COALESCE(SUM(CASE WHEN order_date >= date('now', 'start of month') THEN total END), 0) AS sales_mtd
     FROM orders WHERE customer_id = ? AND status != 'cancelled'
   `).get(customer.id);
+
+  // sales_12m is SYSPRO's actual invoiced sales, ex-VAT, over the rolling
+  // previous 12 months (customer_monthly_sales, synced from
+  // vw_FS_CustomerSalesByMonth) - NOT RouteOne's own orders. A customer who
+  // orders by phone or direct through SYSPRO was previously showing as though
+  // they had stopped buying.
+  //
+  // Keyed on customer CODE because that is what SYSPRO aggregates by, and it is
+  // the DELIVERY customer - so a store invoiced through a group account still
+  // gets credited its own sales.
+  //
+  // Window: the 11 completed months before this one, plus this month to date.
+  // strftime gives 'YYYY-MM' keys, compared as strings, which sort correctly.
+  const twelveMonthWindowStart = db.prepare(
+    "SELECT strftime('%Y-%m', date('now', 'start of month', '-11 months')) AS m"
+  ).get().m;
+  customer.stats.sales_12m = db.prepare(`
+    SELECT COALESCE(SUM(sales_value), 0) AS total
+    FROM customer_monthly_sales
+    WHERE customer_code = ? AND month >= ? AND month <= strftime('%Y-%m', 'now')
+  `).get(customer.code, twelveMonthWindowStart).total;
+
+  // Per-month figures for the same window, oldest first - lets the profile show
+  // a trend rather than a single number, and makes the total auditable.
+  customer.sales_by_month = db.prepare(`
+    SELECT month, sales_value
+    FROM customer_monthly_sales
+    WHERE customer_code = ? AND month >= ? AND month <= strftime('%Y-%m', 'now')
+    ORDER BY month
+  `).all(customer.code, twelveMonthWindowStart);
   // Rep-captured field intel (not from SYSPRO). Always present so the client
   // can render the card even before anything has been filled in.
   customer.intel_notes = db.prepare(`

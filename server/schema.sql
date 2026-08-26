@@ -380,6 +380,31 @@ CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id
 -- crashes the process on startup. Any index over a newly-added column must go
 -- in the migration list, after the ALTER TABLE that adds it.
 
+-- Customer sales totals by month, synced from SYSPRO's vw_FS_CustomerSalesByMonth
+-- (see docs/sql/vw_FS_CustomerSalesByMonth.sql). Ex-VAT NetSalesValue, same
+-- measure and same ProductClass filter as rep_monthly_sales, so customer and
+-- rep totals reconcile.
+--
+-- Drives "Sales 12 months" on the customer profile. That figure used to sum
+-- RouteOne's own orders table, so it only showed what was captured in the app;
+-- and it could not just be repointed at the invoices table, which holds 90 days
+-- and is keyed on the BILLED account (a group-billed store would read R0).
+--
+-- Keyed on customer_code rather than customer_id: the sync writes this before
+-- any guarantee that every code resolves to a synced customer, and an unmatched
+-- code should be kept rather than silently dropped.
+--
+-- Accumulates by SUM within a run, so it is wiped before each sync
+-- (CLEAR_BEFORE_SYNC), exactly like rep_monthly_sales.
+CREATE TABLE IF NOT EXISTS customer_monthly_sales (
+  customer_code TEXT NOT NULL,
+  month TEXT NOT NULL,                     -- 'YYYY-MM'
+  sales_value REAL NOT NULL DEFAULT 0,     -- ex-VAT
+  synced_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (customer_code, month)
+);
+CREATE INDEX IF NOT EXISTS idx_customer_monthly_sales_month ON customer_monthly_sales(customer_code, month);
+
 -- Rep sales totals by month, synced from SYSPRO's vw_FS_RepSalesByMonth
 -- (actual invoiced sales, credited to the customer's currently-assigned rep -
 -- not the app's own order-capture). Used for the Rep KPIs "sales vs target"

@@ -227,6 +227,26 @@ const upsertRepSales = (row) => {
   `).run(repId, monthKey, salesValue);
 };
 
+// Customer sales per month, ex-VAT, from vw_FS_CustomerSalesByMonth. Keyed on
+// the customer CODE, not id: a code with no matching synced customer is still
+// worth keeping (the customer may sync later), and dropping it would silently
+// understate that account. Rows accumulate by SUM within a run, so the table is
+// wiped first - see CLEAR_BEFORE_SYNC, same pattern as rep_monthly_sales.
+const upsertCustomerSales = (row) => {
+  const code = String(row.customer_code ?? '').trim();
+  const year = row.trn_year;
+  const month = row.trn_month;
+  if (!code || !year || !month) return false;
+  const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+  db.prepare(`
+    INSERT INTO customer_monthly_sales (customer_code, month, sales_value)
+    VALUES (?, ?, ?)
+    ON CONFLICT(customer_code, month) DO UPDATE SET
+      sales_value = sales_value + excluded.sales_value,
+      synced_at = datetime('now')
+  `).run(code, monthKey, Number(row.nsv ?? 0));
+};
+
 // vw_FS_InvoiceLines has no stable per-line natural key (the same product can
 // appear on more than one line of an invoice - confirmed against live data),
 // so this table is fully wiped and rebuilt each run (see CLEAR_BEFORE_SYNC)
@@ -265,7 +285,7 @@ const upsertInvoiceLine = (row) => {
     row.qty ?? 0, row.unit_price ?? 0, row.line_total ?? 0);
 };
 
-const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, invoice_lines: upsertInvoiceLine, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales };
+const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, invoice_lines: upsertInvoiceLine, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales, customer_sales: upsertCustomerSales };
 
 // Entities whose upserter accumulates (SUM) or has no natural key to upsert
 // on must clear their destination table before each run - otherwise
@@ -273,6 +293,7 @@ const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, prod
 // invoice lines, instead of recomputing from scratch.
 const CLEAR_BEFORE_SYNC = {
   rep_sales: () => db.prepare('DELETE FROM rep_monthly_sales').run(),
+  customer_sales: () => db.prepare('DELETE FROM customer_monthly_sales').run(),
   invoice_lines: () => {
     db.prepare('DELETE FROM invoice_items').run();
     deliveryCustomerCache = new Map();  // don't carry stale "not found" entries between runs
@@ -283,7 +304,7 @@ const CLEAR_BEFORE_SYNC = {
 // invoice_lines must come after invoices (resolves invoice_number -> invoice_id).
 // Rep-to-warehouse assignment is managed manually in RouteOne (SalSalesperson branch data is
 // unreliable - the same rep code can show multiple conflicting branches), so "reps" is not synced here.
-export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'invoice_lines', 'customer_pricing', 'rep_sales'];
+export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'invoice_lines', 'customer_pricing', 'rep_sales', 'customer_sales'];
 const syncsInFlight = new Set();
 
 // Rows are committed in batches of this size, yielding to the event loop

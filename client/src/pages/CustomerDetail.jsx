@@ -51,7 +51,9 @@ export default function CustomerDetail() {
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Stat label="Sales MTD" value={fmtR(c.stats.sales_mtd)} accent="text-brand-600" />
-        <Stat label="Sales 12 months" value={fmtR(c.stats.sales_12m)} />
+        {/* SYSPRO invoiced sales, not RouteOne order capture - the sub-label
+            says so because the two figures differ and reps will compare them. */}
+        <Stat label="Sales 12 months" value={fmtR(c.stats.sales_12m)} sub="SYSPRO invoiced, excl. VAT" />
         <Stat label="Total orders" value={c.stats.order_count} />
         <Stat label="Credit limit" value={fmtR(c.credit_limit)} sub={c.payment_terms} />
       </div>
