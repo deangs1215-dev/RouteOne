@@ -28,6 +28,7 @@ const SETTING_KEYS = [
   'invoices_sync_schedule', 'invoices_sync_daily_time',
   'invoice_lines_sync_schedule', 'invoice_lines_sync_daily_time',
   'rep_sales_sync_schedule', 'rep_sales_sync_daily_time',
+  'customer_sales_sync_schedule', 'customer_sales_sync_daily_time',
   'rep_sync_schedule', 'rep_sync_daily_time',
   'rep_digest_enabled', 'rep_digest_time',
   // Company letterhead (email header/footer + PDF documents)
