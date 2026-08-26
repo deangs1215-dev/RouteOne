@@ -6,6 +6,21 @@ html { -webkit-tap-highlight-color: transparent; }
 body { @apply bg-slate-100 text-slate-800 antialiased; }
 
 .card { @apply bg-white rounded-xl border border-slate-200 shadow-sm; }
+
+/* Modal panel height. On mobile browsers 100vh measures the viewport WITHOUT
+   the address bar, so a panel sized to it extends below what is actually
+   visible - the end of its scroll area, and any Submit button there, cannot be
+   reached however far the rep scrolls. dvh tracks the real visible height and
+   shrinks when browser chrome appears. The vh line is the fallback for engines
+   that don't support dvh; browsers that do simply take the second declaration.
+   The safe-area padding keeps the last control clear of the iOS home indicator. */
+.modal-panel {
+  max-height: calc(100vh - 4rem);
+  max-height: calc(100dvh - 4rem);
+}
+.modal-scroll {
+  padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+}
 .btn { @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed; }
 .btn-primary { @apply btn bg-brand-600 text-white hover:bg-brand-700; }
 .btn-secondary { @apply btn bg-white border border-slate-300 text-slate-700 hover:bg-slate-50; }

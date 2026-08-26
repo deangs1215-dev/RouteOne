@@ -1389,9 +1389,17 @@ function FormSignatureField({ value, onChange }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const ctxRef = useRef(null);
+  // A signature pad must set touch-action:none or a finger stroke scrolls the
+  // page instead of drawing - but that also makes it a 128px dead zone the rep
+  // cannot scroll over. Once the signature is done we swap the canvas for a
+  // plain image, which scrolls normally. Start in preview when resuming a draft
+  // that already has one.
+  const [signing, setSigning] = useState(!value);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
+  // Callback ref, not useEffect([]): the canvas unmounts when we switch to the
+  // preview, so setup has to run again each time it comes back for Re-sign.
+  const initCanvas = (canvas) => {
+    canvasRef.current = canvas;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     canvas.width = rect.width;
@@ -1402,7 +1410,7 @@ function FormSignatureField({ value, onChange }) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctxRef.current = ctx;
-  }, []);
+  };
 
   const pos = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1414,14 +1422,37 @@ function FormSignatureField({ value, onChange }) {
   const end = () => { if (!drawing.current) return; drawing.current = false; ctxRef.current.closePath(); onChange(canvasRef.current.toDataURL('image/png')); };
   const clear = () => { const c = canvasRef.current; ctxRef.current.clearRect(0, 0, c.width, c.height); onChange(''); };
 
+  if (!signing && value) {
+    return (
+      <div>
+        <div className="rounded-lg border border-slate-200 bg-white p-2">
+          <img src={value} alt="Signature" className="h-32 w-full object-contain" />
+        </div>
+        <button type="button" className="mt-1 text-xs text-brand-600 underline"
+          onClick={() => { onChange(''); setSigning(true); }}>
+          Re-sign
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="rounded-lg border-2 border-dashed border-slate-300 bg-white overflow-hidden">
-        <canvas ref={canvasRef} className="h-32 w-full bg-white" style={{ touchAction: 'none' }}
+        <canvas ref={initCanvas} className="h-32 w-full bg-white" style={{ touchAction: 'none' }}
           onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
           onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
       </div>
-      <button type="button" className="mt-1 text-xs text-slate-400 underline" onClick={clear}>Clear</button>
+      <div className="mt-1 flex items-center gap-3">
+        <button type="button" className="text-xs text-slate-400 underline" onClick={clear}>Clear</button>
+        {/* Ends the dead zone as soon as the customer has signed, so the rep can
+            scroll straight down to Submit. */}
+        <button type="button" className="text-xs font-medium text-brand-600 underline"
+          disabled={!value}
+          onClick={() => setSigning(false)}>
+          Done signing
+        </button>
+      </div>
     </div>
   );
 }
