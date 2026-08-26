@@ -28,6 +28,8 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const [onlyBought, setOnlyBought] = useState(false); // show only what this customer buys
   const [cart, setCart] = useState({}); // productId -> qty
   const [notes, setNotes] = useState('');
+  // Customer's own PO / reference - its own field, never merged into notes.
+  const [customerOrderNo, setCustomerOrderNo] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
@@ -42,6 +44,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     api.get(`/drafts/${draftId}`).then((d) => {
       setCart(d.data?.items || {});
       setNotes(d.data?.notes || '');
+      setCustomerOrderNo(d.data?.customer_order_no || '');
     }).catch(() => {});
   }, [draftId]);
 
@@ -92,7 +95,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   });
 
   // Once the cart or notes change again after a save, "Draft saved" is stale.
-  useEffect(() => { setDraftSaved(false); }, [cart, notes]);
+  useEffect(() => { setDraftSaved(false); }, [cart, notes, customerOrderNo]);
 
   const cartLines = (products || []).filter((p) => cart[p.id]);
   const subtotal = cartLines.reduce((sum, p) => sum + cart[p.id] * unitPriceFor(p, cart[p.id]), 0);
@@ -110,7 +113,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
       customer_id: Number(id),
       visit_id: visitId ? Number(visitId) : null,
       label: `${cartLines.length} product${cartLines.length === 1 ? '' : 's'}`,
-      data: { items: cart, notes }
+      data: { items: cart, notes, customer_order_no: customerOrderNo }
     };
     try {
       if (draftId) await api.put(`/drafts/${draftId}`, payload);
@@ -144,6 +147,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
       visit_id: visitId ? Number(visitId) : null,
       items: cartLines.map((p) => ({ product_id: p.id, qty: cart[p.id] })),
       notes: notes || null,
+      customer_order_no: isQuote ? undefined : customerOrderNo || null,
       signature: isQuote ? null : signature,
       send_to_rep: sendToRep,
       send_to_customer: sendToCustomer,
@@ -262,6 +266,17 @@ export default function RepOrderCapture({ base = '/mobile' }) {
           {filtered.length === 0 && <div className="card p-6 text-center text-sm text-slate-400">No products match.</div>}
         </div>
 
+        {!isQuote && (
+          <div>
+            <label className="label">Customer Order No. / Reference</label>
+            <input className="input" value={customerOrderNo} maxLength={100}
+              onChange={(e) => setCustomerOrderNo(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+              placeholder="Their PO or reference number" />
+            {customerOrderNo.trim() && <div className="mt-1 text-xs text-emerald-600">✓ Saved with this order</div>}
+          </div>
+        )}
+
         <div>
           <label className="label">{noun} notes</label>
           <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)}
@@ -292,6 +307,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 vat_amount: subtotal * VAT_RATE,
                 total,
                 notes,
+                customer_order_no: customerOrderNo || null,
                 customer_code: customer.code
               }}
               items={cartLines.map((p) => ({

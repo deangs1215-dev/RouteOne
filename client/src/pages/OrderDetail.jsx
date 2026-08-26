@@ -103,6 +103,12 @@ export default function OrderDetail() {
         </div>
       </Card>
 
+      {order.customer_order_no && (
+        <Card title="Customer Order No. / Reference">
+          <p className="text-sm font-medium text-slate-800">{order.customer_order_no}</p>
+        </Card>
+      )}
+
       {(order.notes || order.delivery_instructions) && (
         <Card title="Notes">
           {order.notes && <p className="text-sm"><span className="font-medium">Notes:</span> {order.notes}</p>}

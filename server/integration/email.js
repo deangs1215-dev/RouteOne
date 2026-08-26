@@ -217,6 +217,7 @@ export function buildOrderEmail(orderId) {
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Terms</td><td>${esc(order.payment_terms || '')}</td></tr>
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Rep</td><td>${esc(order.rep_name || '—')}</td></tr>
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Captured</td><td>${order.order_date}</td></tr>
+      ${order.customer_order_no ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Customer order no.</td><td><b>${esc(order.customer_order_no)}</b></td></tr>` : ''}
       ${order.notes ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Notes</td><td>${esc(order.notes)}</td></tr>` : ''}
       ${order.delivery_instructions ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Delivery notes</td><td>${esc(order.delivery_instructions)}</td></tr>` : ''}
     </table>
@@ -254,6 +255,7 @@ export function buildOrderConfirmationEmail(orderId) {
     <p>Thank you for your order! Here's a summary of what we received — our team is processing it now.</p>
     <table style="font-size:14px;margin-bottom:14px">
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Order reference</td><td><b>${order.number}</b></td></tr>
+      ${order.customer_order_no ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Your order no.</td><td><b>${esc(order.customer_order_no)}</b></td></tr>` : ''}
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Placed</td><td>${order.order_date}</td></tr>
       ${order.delivery_instructions ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Delivery notes</td><td>${esc(order.delivery_instructions)}</td></tr>` : ''}
     </table>

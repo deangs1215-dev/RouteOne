@@ -34,6 +34,14 @@ export default function OrderSummary({ order, items, customer, type = 'order', s
             <span className="text-xs font-semibold text-slate-500 uppercase">{dateLabel}</span>
             <div className="text-sm text-slate-700">{fmtDate(order.quote_date || order.order_date)}</div>
           </div>
+          {/* The customer's own reference sits directly under our order number -
+              it's what they quote back to us and reconcile against. */}
+          {order.customer_order_no && (
+            <div>
+              <span className="text-xs font-semibold text-slate-500 uppercase">Your Order No. / Ref</span>
+              <div className="text-sm font-medium text-slate-800">{order.customer_order_no}</div>
+            </div>
+          )}
           {order.customer_code && (
             <div>
               <span className="text-xs font-semibold text-slate-500 uppercase">Account</span>

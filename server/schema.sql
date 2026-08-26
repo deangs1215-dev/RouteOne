@@ -194,6 +194,13 @@ CREATE TABLE IF NOT EXISTS orders (
   subtotal REAL DEFAULT 0,
   vat_amount REAL DEFAULT 0,
   total REAL DEFAULT 0,
+  -- The CUSTOMER's own order number / reference for this order (their PO
+  -- number, requisition number, whatever they quote back to us). Deliberately
+  -- its own column rather than buried in notes: it is the key the customer
+  -- reconciles against, so it has to be reliably searchable and printable on
+  -- the confirmation, not free text someone has to read out of a paragraph.
+  -- Distinct from orders.number, which is RouteOne's own ORD-xxxxx.
+  customer_order_no TEXT,
   notes TEXT,
   delivery_instructions TEXT,
   signature TEXT,                         -- customer signature captured on-site (base64 PNG), required before submit

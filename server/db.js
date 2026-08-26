@@ -51,6 +51,8 @@ for (const stmt of [
   'ALTER TABLE products ADD COLUMN pack_weight_kg REAL',
   'ALTER TABLE products ADD COLUMN conv_factor_alt_uom REAL',
   'ALTER TABLE products ADD COLUMN discontinued INTEGER DEFAULT 0',
+  // The customer's own PO / reference for an order - see orders in schema.sql.
+  'ALTER TABLE orders ADD COLUMN customer_order_no TEXT',
   // Delivery store on an invoice line - differs from the invoice's billed
   // customer under central/head-office billing. See invoices.routes.js.
   'ALTER TABLE invoice_items ADD COLUMN delivery_customer_id INTEGER REFERENCES customers(id)',

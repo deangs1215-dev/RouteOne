@@ -67,6 +67,9 @@ export function buildDocumentPdf({ type, doc, items, company }) {
       [type === 'quote' ? 'Date' : 'Placed', (doc.quote_date || doc.order_date || '').slice(0, 16)]
     ];
     if (type === 'quote' && doc.valid_until) metaRows.push(['Valid until', doc.valid_until]);
+    // The customer's own reference belongs on the printed confirmation - it is
+    // what they file and reconcile the delivery against.
+    if (doc.customer_order_no) metaRows.push(['Your order no.', doc.customer_order_no]);
     if (doc.customer_code) metaRows.push(['Account', doc.customer_code]);
 
     pdf.fontSize(10).font('Helvetica');

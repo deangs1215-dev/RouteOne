@@ -33,6 +33,9 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   const [filterMode, setFilterMode] = useState('bought'); // 'bought' | 'all'
   const [lines, setLines] = useState([]); // { product, qty }
   const [notes, setNotes] = useState('');
+  // The customer's own PO / reference. Kept out of notes on purpose - it's the
+  // key they reconcile against, so it prints on the confirmation in its own row.
+  const [customerOrderNo, setCustomerOrderNo] = useState('');
   const [delivery, setDelivery] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -93,6 +96,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
         customer_id: Number(custId),
         items: lines.map((l) => ({ product_id: l.product.id, qty: Number(l.qty) })),
         notes: notes || null,
+        customer_order_no: kind === 'quote' ? undefined : customerOrderNo || null,
         delivery_instructions: kind === 'quote' ? undefined : delivery || null
       });
       setCreatedOrder(result);
@@ -133,6 +137,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
             vat_amount: vat,
             total: subtotal + vat,
             notes,
+            customer_order_no: customerOrderNo || null,
             customer_code: selectedCustomer?.code || ''
           }}
           items={lines.map((l) => {
@@ -273,6 +278,14 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
                 );
               })}
             </div>
+          )}
+
+          {kind !== 'quote' && (
+            <Field label="Customer Order No. / Reference">
+              <input className="input" value={customerOrderNo} maxLength={100}
+                placeholder="Their PO or reference number"
+                onChange={(e) => setCustomerOrderNo(e.target.value)} />
+            </Field>
           )}
 
           <div className="grid gap-4 sm:grid-cols-2">

@@ -41,7 +41,8 @@ router.get('/orders', (req, res) => {
   const params = [];
   if (scope.isRep) { where.push('o.rep_id = ?'); params.push(req.user.id); }
   else if (rep_id) { where.push('o.rep_id = ?'); params.push(rep_id); }
-  if (q) { where.push('(o.number LIKE ? OR c.name LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
+  // Customers phone in quoting their own PO number, so search matches it too.
+  if (q) { where.push('(o.number LIKE ? OR c.name LIKE ? OR o.customer_order_no LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
   if (status) { where.push('o.status = ?'); params.push(status); }
   if (customer_id) { where.push('o.customer_id = ?'); params.push(customer_id); }
   const rows = db.prepare(`
@@ -128,13 +129,18 @@ function createOrder(user, b, res) {
     }
   }
 
+  // The customer's own order number / reference. Trimmed and length-capped; it
+  // is printed on the confirmation and reconciled against by the customer, so
+  // it is stored in its own column rather than inside notes.
+  const customerOrderNo = String(b.customer_order_no ?? '').trim().slice(0, 100) || null;
+
   const create = db.transaction(() => {
     const number = nextNumber('ORD');
     const info = db.prepare(`
-      INSERT INTO orders (number, customer_id, rep_id, visit_id, warehouse_id, status, notes, delivery_instructions, signature)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (number, customer_id, rep_id, visit_id, warehouse_id, status, customer_order_no, notes, delivery_instructions, signature)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(number, b.customer_id, user.id, b.visit_id || null, customer.warehouse_id || null,
-      b.status === 'draft' ? 'draft' : 'submitted', b.notes || null, b.delivery_instructions || null, b.signature || null);
+      b.status === 'draft' ? 'draft' : 'submitted', customerOrderNo, b.notes || null, b.delivery_instructions || null, b.signature || null);
     const orderId = info.lastInsertRowid;
 
     let subtotal = 0;
