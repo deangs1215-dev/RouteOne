@@ -10,6 +10,8 @@ import VisitTimer, { visitDuration } from '../components/VisitTimer';
 import DatePicker from '../components/DatePicker';
 import TaskCreateModal from '../components/TaskCreateModal';
 import TaskRescheduleModal from '../components/TaskRescheduleModal';
+import CustomerNotes from '../components/CustomerNotes';
+import { useAuth } from '../auth';
 import { queueWrite } from '../offline';
 import { MobileHeader } from './MobileApp';
 
@@ -106,6 +108,7 @@ function distanceM(lat1, lng1, lat2, lng2) {
 
 export default function RepCustomer({ base = '/mobile' }) {
   const { id } = useParams();
+  const { user } = useAuth();
   const [params] = useSearchParams();
   const formDraftId = params.get('formDraft');
   const [fillingFormDraft, setFillingFormDraft] = useState(null); // the draft record being resumed, if any
@@ -734,10 +737,22 @@ export default function RepCustomer({ base = '/mobile' }) {
             const quotes = (c.recent_quotes || []).filter((q) => upTo(q.quote_date));
             const forms = (c.recent_forms || []).filter((f) => upTo(f.created_at));
             const invoices = (c.recent_invoices || []).filter((iv) => upTo(iv.invoice_date));
-            const nothing = visits.length === 0 && orders.length === 0 && quotes.length === 0 && forms.length === 0 && invoices.length === 0;
+            const notes = (c.notes || []).filter((n) => upTo(n.created_at));
+            const nothing = visits.length === 0 && orders.length === 0 && quotes.length === 0 && forms.length === 0 && invoices.length === 0 && notes.length === 0;
 
             return (
               <div className="space-y-4">
+                {/* Not a CollapsibleSection: that renders nothing when count is 0,
+                    which would hide the "log a note" button on exactly the
+                    customers with no contact history - the ones a rep most needs
+                    to log a call against. */}
+                <div>
+                  <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                    Notes &amp; activity {notes.length > 0 && <span className="font-semibold normal-case text-slate-400">({notes.length})</span>}
+                  </div>
+                  <CustomerNotes customerId={c.id} notes={notes} currentUserId={user?.id} onChanged={load} compact />
+                </div>
+
                 <CollapsibleSection title="Visits" count={visits.length}>
                   {visits.map((v) => {
                     const dur = visitDuration(v.check_in_at, v.check_out_at);

@@ -485,6 +485,34 @@ CREATE TABLE IF NOT EXISTS customer_intel (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Customer contact log: a rep records that something happened with a customer
+-- WITHOUT checking in or being on site - a phone call, an email, a WhatsApp,
+-- a meeting elsewhere.
+--
+-- Deliberately NOT stored as a visit. Visits drive the rep KPIs (compliance,
+-- coverage, strike rate in planning.routes.js), and those count every completed
+-- visit regardless of check_in_type - so logging phone calls as offsite visits
+-- would inflate a rep's visit numbers. Keeping contact separate means a rep can
+-- record real activity honestly without it distorting their visit metrics.
+--
+-- Append-only: a note is a record of what happened at a point in time, so it is
+-- never edited. A rep may delete their own mistakes (see customers.routes.js).
+-- Distinct from customer_intel, which is a single overwritten profile of what is
+-- currently true about the customer, not a history of events.
+CREATE TABLE IF NOT EXISTS customer_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  note_type TEXT NOT NULL DEFAULT 'note',  -- note / call / email / whatsapp / meeting / sample
+  note TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+-- Customer detail reads these newest-first for one customer.
+CREATE INDEX IF NOT EXISTS idx_customer_notes_customer ON customer_notes(customer_id, created_at DESC);
+-- "What has this rep been doing" - manager activity views and any future
+-- per-rep contact reporting.
+CREATE INDEX IF NOT EXISTS idx_customer_notes_user ON customer_notes(user_id, created_at DESC);
+
 -- Monthly sales budgets per rep (Jan-Dec).
 CREATE TABLE IF NOT EXISTS rep_budgets (
   rep_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

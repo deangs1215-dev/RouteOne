@@ -62,6 +62,12 @@ router.get('/customers/:id', (req, res) => {
     LEFT JOIN users u ON u.id = q.rep_id
     WHERE q.customer_id = ? ORDER BY q.quote_date DESC LIMIT 10
   `).all(customer.id);
+  // Contact logged without a visit - calls, emails, WhatsApps, meetings.
+  customer.notes = db.prepare(`
+    SELECT n.id, n.note_type, n.note, n.created_at, n.user_id, u.name AS rep_name
+    FROM customer_notes n JOIN users u ON u.id = n.user_id
+    WHERE n.customer_id = ? ORDER BY n.created_at DESC LIMIT 50
+  `).all(customer.id);
   customer.recent_forms = db.prepare(`
     SELECT s.id, s.created_at, t.name AS template_name, u.name AS rep_name
     FROM form_submissions s
@@ -256,6 +262,46 @@ router.post('/customers/:id/contacts', (req, res) => {
   res.json(db.prepare('SELECT * FROM customer_contacts WHERE id = ?').get(info.lastInsertRowid));
 });
 
+// Log contact with a customer without checking in - a call, email, WhatsApp,
+// meeting or general note. Deliberately not a visit: see the customer_notes
+// comment in schema.sql for why these must stay out of the visit KPIs.
+const NOTE_TYPES = ['note', 'call', 'email', 'whatsapp', 'meeting', 'sample'];
+
+router.post('/customers/:id/notes', (req, res) => {
+  const b = req.body || {};
+  const note = String(b.note ?? '').trim();
+  if (!note) return res.status(400).json({ error: 'Note text is required' });
+  if (note.length > 4000) return res.status(400).json({ error: 'Note is too long (max 4000 characters)' });
+  const noteType = NOTE_TYPES.includes(b.note_type) ? b.note_type : 'note';
+  const customer = db.prepare('SELECT id, rep_id FROM customers WHERE id = ?').get(req.params.id);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  if (scopeForUser(req.user).isRep && customer.rep_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your customer' });
+  }
+  const info = db.prepare(
+    'INSERT INTO customer_notes (customer_id, user_id, note_type, note) VALUES (?, ?, ?, ?)'
+  ).run(customer.id, req.user.id, noteType, note);
+  logActivity(req.user.id, 'create', 'customer_note', info.lastInsertRowid, { customer_id: customer.id, note_type: noteType });
+  res.json(db.prepare(`
+    SELECT n.id, n.note_type, n.note, n.created_at, n.user_id, u.name AS rep_name
+    FROM customer_notes n JOIN users u ON u.id = n.user_id WHERE n.id = ?
+  `).get(info.lastInsertRowid));
+});
+
+// Notes are append-only - a record of what happened doesn't get rewritten. The
+// author may remove their own mistake; a manager or admin may remove any.
+router.delete('/customer-notes/:id', (req, res) => {
+  const note = db.prepare('SELECT id, user_id FROM customer_notes WHERE id = ?').get(req.params.id);
+  if (!note) return res.status(404).json({ error: 'Note not found' });
+  const isOwner = note.user_id === req.user.id;
+  if (!isOwner && !['admin', 'manager'].includes(req.user.role_name)) {
+    return res.status(403).json({ error: 'You can only delete your own notes' });
+  }
+  db.prepare('DELETE FROM customer_notes WHERE id = ?').run(note.id);
+  logActivity(req.user.id, 'delete', 'customer_note', note.id);
+  res.json({ ok: true });
+});
+
 router.delete('/contacts/:id', (req, res) => {
   const contact = db.prepare(`
     SELECT cc.id, c.rep_id FROM customer_contacts cc JOIN customers c ON c.id = cc.customer_id
@@ -343,6 +389,14 @@ router.get('/customers/:id/timeline', (req, res) => {
     WHERE customer_id = ? AND invoice_date >= date('now', '-365 days')
   `).all(customer.id);
   timeline.push(...invoices.map(i => ({ ...i, date_for_sort: i.date })));
+
+  // Contact logged without a visit - calls, emails, WhatsApps, meetings.
+  const notes = db.prepare(`
+    SELECT 'note' AS type, n.id, n.note_type, n.note AS description, n.created_at AS date, u.name AS rep_name
+    FROM customer_notes n JOIN users u ON u.id = n.user_id
+    WHERE n.customer_id = ?
+  `).all(customer.id);
+  timeline.push(...notes.map(n => ({ ...n, date_for_sort: n.date })));
 
   // Sort by date descending (newest first); rows with no date sink to the bottom.
   const ts = (s) => (s ? new Date(String(s).replace(' ', 'T')).getTime() || 0 : 0);

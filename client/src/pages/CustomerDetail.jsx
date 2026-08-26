@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime } from '../api';
 import { Card, Stat, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge, OrderStatusBadge, VisitStatusBadge, QuoteStatusBadge } from '../components/ui';
 import VisitSummary from '../components/VisitSummary';
+import CustomerNotes from '../components/CustomerNotes';
 import LocationPicker from '../components/LocationPicker';
 import { CustomerModal } from './Customers';
 import { useAuth } from '../auth';
@@ -149,6 +150,14 @@ export default function CustomerDetail() {
             ))}
           </Table>
         </Card>
+
+        <CustomerNotes
+          customerId={c.id}
+          notes={c.notes || []}
+          currentUserId={user.id}
+          canDelete={['admin', 'manager'].includes(user.role)}
+          onChanged={load}
+        />
 
         <Card title="Visit history">
           <Table headers={['Date', 'Rep', 'Status', 'Outcome']} empty={c.recent_visits.length === 0 && 'No visits yet.'}>
