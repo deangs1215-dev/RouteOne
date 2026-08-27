@@ -96,14 +96,13 @@ router.get('/customers/:id', (req, res) => {
     FROM customer_prices cp JOIN products p ON p.id = cp.product_id
     WHERE cp.customer_id = ? ORDER BY p.name
   `).all(customer.id);
-  // order_count / sales_total / sales_mtd stay RouteOne-native: they measure
-  // order-capture activity in the app, which is a different question from
-  // "what has this customer actually bought".
+  // order_count / sales_total stay RouteOne-native: they measure order-capture
+  // activity in the app, which is a different question from what the customer
+  // has actually bought.
   customer.stats = db.prepare(`
     SELECT
       COUNT(*) AS order_count,
-      COALESCE(SUM(total), 0) AS sales_total,
-      COALESCE(SUM(CASE WHEN order_date >= date('now', 'start of month') THEN total END), 0) AS sales_mtd
+      COALESCE(SUM(total), 0) AS sales_total
     FROM orders WHERE customer_id = ? AND status != 'cancelled'
   `).get(customer.id);
 
@@ -122,6 +121,16 @@ router.get('/customers/:id', (req, res) => {
   const twelveMonthWindowStart = db.prepare(
     "SELECT strftime('%Y-%m', date('now', 'start of month', '-11 months')) AS m"
   ).get().m;
+  // sales_mtd is the same measure as sales_12m, restricted to the current
+  // calendar month. It previously summed RouteOne's own orders, which reported
+  // only what was captured in the app - e.g. MONDEOR HOMEBAKE SUPPLIES showed
+  // R4 683,17 from 2 captured orders against 5 SYSPRO invoices for the month.
+  customer.stats.sales_mtd = db.prepare(`
+    SELECT COALESCE(SUM(sales_value), 0) AS total
+    FROM customer_monthly_sales
+    WHERE customer_code = ? AND month = strftime('%Y-%m', 'now')
+  `).get(customer.code).total;
+
   customer.stats.sales_12m = db.prepare(`
     SELECT COALESCE(SUM(sales_value), 0) AS total
     FROM customer_monthly_sales
