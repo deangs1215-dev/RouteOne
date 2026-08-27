@@ -50,7 +50,7 @@ GO
 
 -- Grant back whatever the RouteOne read-only login needs
 --
--- GRANT SELECT ON dbo.vw_FS_Products TO [routeone_ro];
+-- GRANT SELECT ON dbo.vw_FS_Products TO [RouteOneApp];
 -- GO
 
 -- ============================================================

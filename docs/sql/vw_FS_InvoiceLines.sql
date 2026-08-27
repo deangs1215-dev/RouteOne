@@ -87,7 +87,7 @@ GO
 -- Grant back whatever the RouteOne read-only login needs (dropping a view
 -- drops its permissions with it).
 --
--- GRANT SELECT ON dbo.vw_FS_InvoiceLines TO [routeone_ro];
+-- GRANT SELECT ON dbo.vw_FS_InvoiceLines TO [RouteOneApp];
 -- GO
 
 -- ============================================================

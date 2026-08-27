@@ -74,7 +74,7 @@ GO
 
 -- Dropping a view drops its permissions - grant them back.
 --
--- GRANT SELECT ON dbo.vw_FS_Invoices TO [routeone_ro];
+-- GRANT SELECT ON dbo.vw_FS_Invoices TO [RouteOneApp];
 -- GO
 
 -- ============================================================

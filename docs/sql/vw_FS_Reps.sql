@@ -96,7 +96,7 @@ GO
 -- import-reps.js will start failing with a permissions error.
 -- Replace the principal name with the account RouteOne actually connects as.
 --
--- GRANT SELECT ON dbo.vw_FS_Reps TO [routeone_read];
+-- GRANT SELECT ON dbo.vw_FS_Reps TO [RouteOneApp];
 -- GO
 
 -- ============================================================
