@@ -1,12 +1,12 @@
 import { Router } from 'express';
-import { db, nextNumber, logActivity, effectivePrice, adjustOrderStock, VAT_RATE, getSetting } from '../db.js';
+import { db, nextNumber, logActivity, effectivePrice, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
 import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
 import { buildOrderEmail, buildOrderConfirmationEmail, sendEmail, wrap, esc, companyDetails } from '../integration/email.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
 
 const router = Router();
 
-const round2 = (n) => Math.round(n * 100) / 100;
+// round2 imported from db.js - see its comment for why (R1-028 floating-point fix).
 const isEmail = (s) => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 
 const fmtR = (n) => 'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });

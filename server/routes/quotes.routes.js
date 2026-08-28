@@ -1,11 +1,11 @@
 import { Router } from 'express';
-import { db, nextNumber, logActivity, effectivePrice, adjustOrderStock, VAT_RATE, getSetting } from '../db.js';
+import { db, nextNumber, logActivity, effectivePrice, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
 import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
 import { buildQuoteEmail, sendEmail, wrap, esc, companyDetails } from '../integration/email.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
 
 const router = Router();
-const round2 = (n) => Math.round(n * 100) / 100;
+// round2 imported from db.js - see its comment for why (R1-028 floating-point fix).
 const isEmail = (s) => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 
 const fmtR = (n) => 'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -69,7 +69,7 @@ router.get('/quotes/:id', (req, res) => {
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
   }
-  quote.items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ?').all(quote.id);
+  quote.items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
   res.json(quote);
 });
 
@@ -85,7 +85,7 @@ router.get('/quotes/:id/pdf', async (req, res) => {
   }
   const items = db.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
-    LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ?
+    LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
   `).all(quote.id);
   try {
     const pdf = await buildDocumentPdf({ type: 'quote', doc: quote, items, company: companyDetails() });
@@ -117,6 +117,18 @@ router.post('/quotes', (req, res) => {
     }
   }
 
+  // R1-017: quotation lines are always produced sorted by product code, lowest
+  // to highest - never by the order the rep tapped products in. Resolved and
+  // sorted here, once, before anything is inserted, so quote_items rows land in
+  // code order and every later read that trusts id/insertion order (the detail
+  // page, PDF, and confirmation email - none of which JOIN products just to
+  // re-derive an order) is correct with no further change.
+  const sortedItems = [...(b.items || [])].sort((a, b2) => {
+    const codeA = db.prepare('SELECT code FROM products WHERE id = ?').get(a.product_id)?.code || '';
+    const codeB = db.prepare('SELECT code FROM products WHERE id = ?').get(b2.product_id)?.code || '';
+    return codeA.localeCompare(codeB, undefined, { numeric: true, sensitivity: 'base' });
+  });
+
   const create = db.transaction(() => {
     const number = nextNumber('QUO');
     const validUntil = b.valid_until || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
@@ -131,7 +143,7 @@ router.post('/quotes', (req, res) => {
       INSERT INTO quote_items (quote_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    for (const item of b.items) {
+    for (const item of sortedItems) {
       // See the matching comment in orders.routes.js - same guard, clearer message.
       const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) throw new Error(`Product ${item.product_id} not found`);
@@ -162,7 +174,7 @@ router.post('/quotes', (req, res) => {
     const quoteId = create();
     logActivity(req.user.id, 'create', 'quote', quoteId, { customer: customer.name });
     const quote = db.prepare('SELECT * FROM quotes WHERE id = ?').get(quoteId);
-    quote.items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ?').all(quoteId);
+    quote.items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quoteId);
     // Email the customer their quote, same on/off switch as order auto-send.
     // Best-effort: the quote is committed, so email problems never fail the response.
     try {
@@ -228,7 +240,7 @@ router.post('/quotes/:id/convert', (req, res) => {
   if (quote.order_id) return res.status(400).json({ error: 'Quote already converted' });
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(quote.customer_id);
   if (customer.status === 'on_hold') return res.status(400).json({ error: 'Customer account is on hold - order blocked' });
-  const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ?').all(quote.id);
+  const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
 
   const convert = db.transaction(() => {
     const number = nextNumber('ORD');
@@ -266,7 +278,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
   `).get(req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
-  const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ?').all(quote.id);
+  const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
   const emailsToSend = [];
 
   // Send to configured recipients (empty selection = none, not a SQL error)

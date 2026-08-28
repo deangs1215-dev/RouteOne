@@ -6,7 +6,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, fmtR } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
 import OrderSummary from '../components/OrderSummary';
-import { unitPriceFor, kgPriceFor } from '../components/NewOrderModal';
+import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2 } from '../components/NewOrderModal';
 import { queueWrite } from '../offline';
 import { useAuth } from '../auth';
 import { MobileHeader } from './MobileApp';
@@ -26,6 +26,13 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const [products, setProducts] = useState(null);
   const [search, setSearch] = useState('');
   const [onlyBought, setOnlyBought] = useState(false); // show only what this customer buys
+  const [sortByCode, setSortByCode] = useState(false); // false = default order | true = SYSPRO stock code, lowest to highest
+  // R1-026: filter the list down to just what's already in the order, so a rep
+  // can find and edit an existing line's qty/price without re-searching the
+  // whole catalogue - the row itself (name, price, UOM, qty stepper/input) is
+  // identical whether reached this way or via search, so editing it here needs
+  // no separate "cart" UI or delete-and-re-add.
+  const [onlyInCart, setOnlyInCart] = useState(false);
   const [cart, setCart] = useState({}); // productId -> qty
   const [notes, setNotes] = useState('');
   // Customer's own PO / reference - its own field, never merged into notes.
@@ -81,11 +88,16 @@ export default function RepOrderCapture({ base = '/mobile' }) {
 
   const filtered = useMemo(() => {
     const s = search.toLowerCase();
-    return (products || []).filter((p) =>
+    const rows = (products || []).filter((p) =>
       (!s || p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s)) &&
-      (!onlyBought || p.times_bought > 0)
+      (!onlyBought || p.times_bought > 0) &&
+      (!onlyInCart || cart[p.id])
     );
-  }, [products, search, onlyBought]);
+    // numeric:true so a trailing-letter code (e.g. "8934700010 N") sorts next to
+    // its base code in numeric order, not as a plain string comparison would.
+    if (sortByCode) rows.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true, sensitivity: 'base' }));
+    return rows;
+  }, [products, search, onlyBought, sortByCode, onlyInCart, cart]);
 
   const setQty = (pid, qty) => setCart((c) => {
     const next = { ...c };
@@ -94,12 +106,36 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     return next;
   });
 
+  // R1-023: +/- must adjust from the TRUE current quantity, not the value the
+  // row happened to be showing when the tap started. The old onClick handlers
+  // called setQty(p.id, qty + 1) with `qty` read from the render closure - if
+  // a second tap fired before React re-rendered (a real risk on mobile touch,
+  // where a bounced touchend/click pair is common), both taps computed "+1"
+  // from the SAME stale qty and only one increment actually landed, so a rep
+  // could tap twice and see the quantity not change. Reading the previous
+  // value from inside the setCart updater instead guarantees each tap sees
+  // whatever the truly-latest quantity is, however many are already queued.
+  const adjustQty = (pid, delta) => setCart((c) => {
+    const value = (c[pid] || 0) + delta;
+    const next = { ...c };
+    if (value <= 0) delete next[pid];
+    else next[pid] = value;
+    return next;
+  });
+
   // Once the cart or notes change again after a save, "Draft saved" is stale.
   useEffect(() => { setDraftSaved(false); }, [cart, notes, customerOrderNo]);
 
   const cartLines = (products || []).filter((p) => cart[p.id]);
-  const subtotal = cartLines.reduce((sum, p) => sum + cart[p.id] * unitPriceFor(p, cart[p.id]), 0);
-  const total = subtotal * (1 + VAT_RATE);
+  // R1-027/028: round EACH line first, then sum, then round VAT on that
+  // rounded subtotal - the exact same order of operations orders.routes.js /
+  // quotes.routes.js use server-side, so this preview can never differ from
+  // what actually gets stored. round2 is the same epsilon-safe rounding as
+  // server/db.js's round2 - see NewOrderModal.jsx's copy for why plain
+  // Math.round(n*100)/100 misrounds at exact half-cent boundaries.
+  const subtotal = round2(cartLines.reduce((sum, p) => sum + round2(cart[p.id] * unitPriceFor(p, cart[p.id])), 0));
+  const vat = round2(subtotal * VAT_RATE);
+  const total = round2(subtotal + vat);
 
   // Saved server-side (not just this device) so the rep can pick it back up
   // from any phone. Doesn't need a cart - a rep who only got as far as
@@ -214,6 +250,16 @@ export default function RepOrderCapture({ base = '/mobile' }) {
               onClick={() => setOnlyBought(false)}>All products</button>
           </div>
         )}
+        <div className="flex gap-2 pb-1">
+          <button type="button" className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${sortByCode ? 'bg-brand-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}
+            onClick={() => setSortByCode((v) => !v)}>Sort: code ↑{sortByCode ? '' : ' (off)'}</button>
+          {cartLines.length > 0 && (
+            <button type="button" className={`whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium ${onlyInCart ? 'bg-brand-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}
+              onClick={() => setOnlyInCart((v) => !v)}>
+              🛒 In your order ({cartLines.length})
+            </button>
+          )}
+        </div>
 
         <div className="space-y-2">
           {filtered.map((p) => {
@@ -221,11 +267,14 @@ export default function RepOrderCapture({ base = '/mobile' }) {
             const price = unitPriceFor(p, qty || 1);
             const kgPrice = kgPriceFor(p, price);
             const nextBreak = (p.price_breaks || []).find((b) => b.min_qty > (qty || 0));
-            // General (list) price, per unit - same conversion as the server's
-            // productUnitPrice(). Order screen only: shows how much below the
-            // general price the customer's price is.
-            const listPrice = (p.list_price || 0) * (p.conv_factor_alt_uom || p.pack_weight_kg || 1);
+            // General (list) price, per unit - the "G Price" (R1-019). Order
+            // screen only: shows how much below it the customer's price is.
+            const listPrice = gPriceFor(p);
             const belowList = !isQuote && listPrice > 0 && price < listPrice ? listPrice - price : null;
+            // R1-020: % off G Price, specifically for SYSPRO negotiated pricing
+            // (contract/buying-group/price-code) - not RouteOne qty-break
+            // pricing, which belowList above already covers in Rand terms.
+            const gDiscountPct = p.syspro_pricing_tier ? discountPctFor(listPrice, p.effective_price) : null;
             return (
               <div key={p.id} className={`card flex items-center gap-3 p-3 ${
                 p.discontinued ? 'border-red-200 bg-red-50/50' : ''}`}>
@@ -236,10 +285,29 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                     {!p.discontinued && p.times_bought > 0 && <span className="ml-1.5 rounded bg-emerald-50 px-1 py-0.5 text-[10px] text-emerald-600">buys {p.times_bought}×</span>}
                   </div>
                   <div className="text-xs text-slate-400">
-                    {p.code} · {fmtR(price)}
+                    {/* R1-024: SYSPRO's own selling-unit UOM (products.uom, from
+                        vw_FS_Products.OtherUom), shown right where the rep
+                        decides the quantity - previously absent from this row
+                        entirely, so a rep had no way to tell here whether they
+                        were ordering EACH, KG, or something else. */}
+                    {p.code} · {fmtR(price)} / <span className="font-medium text-slate-500">{p.uom || 'each'}</span>
                     {belowList != null && <span className="ml-1 text-red-600 font-semibold">-{fmtR(belowList)}</span>}
                     {kgPrice != null && <span className="ml-1">({fmtR(kgPrice)}/kg)</span>}
-                    {p.has_contract_price === 1 && <span className="ml-1 text-emerald-600">contract</span>}
+                    {/* R1-018: SYSPRO's own pricing tier, not the generic
+                        has_contract_price flag - that flag is also set for
+                        buying-group and price-code pricing, so labelling all
+                        three "contract" mislabels prices that are not an
+                        actual negotiated contract. Mirrors the office order
+                        builder's three-way badge (NewOrderModal.jsx). */}
+                    {p.syspro_pricing_tier === 'syspro_contract' && <span className="ml-1 text-emerald-600">contract</span>}
+                    {p.syspro_pricing_tier === 'syspro_buying_group' && <span className="ml-1 text-blue-600">buying group</span>}
+                    {p.syspro_pricing_tier === 'syspro_price_code' && <span className="ml-1 text-purple-600">price code</span>}
+                    {!p.syspro_pricing_tier && p.has_contract_price === 1 && <span className="ml-1 text-emerald-600">contract</span>}
+                    {p.syspro_pricing_tier && listPrice > 0 && (
+                      <span className="ml-1">
+                        · G {fmtR(listPrice)}{gDiscountPct != null && <span className="font-medium text-emerald-600"> -{gDiscountPct}%</span>}
+                      </span>
+                    )}
                     {qty > 0 && price < p.price_breaks?.[0]?.price && <span className="ml-1 text-emerald-600">qty break</span>}
                     {p.stock_qty <= 0
                       ? <span className="ml-1 text-red-500 font-medium">out of stock</span>
@@ -252,12 +320,25 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 {p.discontinued ? (
                   <span className="whitespace-nowrap text-[11px] font-medium text-red-600">unavailable</span>
                 ) : qty === 0 ? (
-                  <button className="btn-secondary px-3" onClick={() => setQty(p.id, 1)}>+</button>
+                  <button className="btn-secondary px-3" onClick={() => adjustQty(p.id, 1)}>+</button>
                 ) : (
                   <div className="flex items-center gap-2">
-                    <button className="btn-secondary h-9 w-9 p-0" onClick={() => setQty(p.id, qty - 1)}>−</button>
-                    <span className="w-6 text-center font-semibold">{qty}</span>
-                    <button className="btn-primary h-9 w-9 p-0" onClick={() => setQty(p.id, qty + 1)}>+</button>
+                    <button className="btn-secondary h-9 w-9 p-0" onClick={() => adjustQty(p.id, -1)}>−</button>
+                    {/* R1-023: a rep ordering, say, 144 units previously had to tap
+                        + 144 times with no way to type the number directly - every
+                        tap is a chance to overshoot/undershoot by one and not
+                        notice, which is exactly the "quantity doesn't match what
+                        was captured" failure this ticket describes. inputMode
+                        brings up the numeric keypad on mobile. */}
+                    <input type="number" inputMode="numeric" min="1" max="1000000"
+                      className="w-14 rounded-lg border border-slate-200 py-1.5 text-center font-semibold"
+                      value={qty}
+                      onFocus={(e) => e.target.select()}
+                      onChange={(e) => {
+                        const n = parseInt(e.target.value, 10);
+                        setQty(p.id, Number.isFinite(n) ? Math.min(1000000, Math.max(0, n)) : 0);
+                      }} />
+                    <button className="btn-primary h-9 w-9 p-0" onClick={() => adjustQty(p.id, 1)}>+</button>
                   </div>
                 )}
               </div>
@@ -304,7 +385,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 quote_date: new Date().toISOString(),
                 order_date: new Date().toISOString(),
                 subtotal,
-                vat_amount: subtotal * VAT_RATE,
+                vat_amount: vat,
                 total,
                 notes,
                 customer_order_no: customerOrderNo || null,
@@ -317,7 +398,8 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 kg_price: kgPriceFor(p, unitPriceFor(p, cart[p.id])),
                 qty: cart[p.id],
                 uom: p.uom,
-                line_total: cart[p.id] * unitPriceFor(p, cart[p.id])
+                // R1-027: rounded per line, matching the server's exact formula.
+                line_total: round2(cart[p.id] * unitPriceFor(p, cart[p.id]))
               }))}
               customer={customer}
               type={isQuote ? 'quote' : 'order'}

@@ -197,22 +197,24 @@ export default function CustomerDetail() {
         </Card>
       )}
 
-      <Card title="Invoices — last 30 days"
-        actions={c.invoice_summary?.outstanding > 0 && (
-          <span className="text-xs font-semibold text-red-600">{fmtR(c.invoice_summary.outstanding)} outstanding</span>
-        )}>
-        <Table headers={['Number', 'Date', 'Order', 'Status', 'Total', 'Balance']}
+      {/* R1-015: the "outstanding" figure here was never a real SYSPRO balance -
+          vw_FS_Invoices has no balance/amount_paid columns, so sync.js's
+          `row.balance ?? (total - paid)` fallback always resolved to balance =
+          total (paid defaults to 0). Hidden until a real balance is sourced from
+          SYSPRO (e.g. ArInvoice.InvoiceBal1, or customers.balance which already
+          holds the account's true AR balance from vw_FS_Customers). */}
+      <Card title="Invoices — last 30 days">
+        {/* Status and Balance columns both hidden: derived from the same fake
+            total-minus-paid fallback (see the comment above) - Status always
+            said "outstanding", and Balance always equalled Total. */}
+        <Table headers={['Number', 'Date', 'Order', 'Total']}
           empty={(!c.recent_invoices || c.recent_invoices.length === 0) && 'No invoices in the last 30 days.'}>
           {(c.recent_invoices || []).map((iv) => (
             <tr key={iv.id} className="hover:bg-slate-50">
               <td className="td font-medium">{iv.number}</td>
               <td className="td text-slate-500">{fmtDate(iv.invoice_date)}</td>
               <td className="td text-slate-500">{iv.order_number || '—'}</td>
-              <td className="td">
-                <Badge color={iv.status === 'paid' ? '#16a34a' : iv.status === 'overdue' ? '#dc2626' : '#d97706'}>{iv.status}</Badge>
-              </td>
               <td className="td font-medium">{fmtR(iv.total)}</td>
-              <td className={`td font-medium ${iv.balance > 0 ? 'text-red-600' : 'text-slate-400'}`}>{fmtR(iv.balance)}</td>
             </tr>
           ))}
         </Table>
