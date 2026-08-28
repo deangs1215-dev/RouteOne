@@ -3,8 +3,8 @@
 // Run ON THE SERVER (the live database is local disk there; writing to it over
 // the Z: share would be SQLite over SMB, which is not safe).
 //
-//     node server/handover-rep.js --code 111 --name "Bernice Molokwe" --email bernice@sbakels.co.za --dry
-//     node server/handover-rep.js --code 111 --name "Bernice Molokwe" --email bernice@sbakels.co.za
+//     node server/handover-rep.js --code 111 --branch 01 --name "Bernice Molokwe" --email bernice@sbakels.co.za --dry
+//     node server/handover-rep.js --code 111 --branch 01 --name "Bernice Molokwe" --email bernice@sbakels.co.za
 //
 // --dry prints the plan and writes nothing. Run it first.
 //
@@ -29,7 +29,8 @@
 // ---------------------------------------------------------------------------
 // Guards
 // ---------------------------------------------------------------------------
-// - refuses if the code isn't currently held by exactly one active user
+// - refuses unless exactly one user holds that code AT THAT BRANCH (--branch is
+//   required; a rep code is not unique across branches)
 // - refuses if the email is already in use
 // - refuses if the branch has no matching warehouse
 // - single transaction: either the whole handover applies, or none of it
@@ -44,11 +45,24 @@ const arg = (flag) => {
 const DRY = process.argv.includes('--dry');
 
 const code = (arg('--code') || '').trim();
+const branch = (arg('--branch') || '').trim();
 const newName = (arg('--name') || '').trim();
 const newEmail = (arg('--email') || '').trim().toLowerCase();
 
-if (!code || !newName || !newEmail) {
-  console.error('\nUsage: node server/handover-rep.js --code 111 --name "Bernice Molokwe" --email bernice@sbakels.co.za [--dry]\n');
+if (!code || !branch || !newName || !newEmail) {
+  console.error('\nUsage: node server/handover-rep.js --code 111 --branch 01 --name "Bernice Molokwe" --email bernice@sbakels.co.za [--dry]\n');
+  console.error('--branch is required: a rep code is not unique across branches.\n');
+  process.exit(1);
+}
+
+// A rep code is NOT unique. Code 101 is Siyabonga Sigwili at branch 01 and
+// Joseph Shabangu at branch 12 - two different people. matchRep() resolves on
+// the (branch, code) pair, so the handover is scoped to that pair. An earlier
+// version guarded on the code alone and would have refused to touch any
+// multi-branch code, or worse, picked the wrong person's record.
+const warehouse = db.prepare('SELECT id, code, name FROM warehouses WHERE code = ?').get(branch);
+if (!warehouse) {
+  console.error(`\nNo warehouse with branch code ${branch}. Run the warehouse sync first.\n`);
   process.exit(1);
 }
 
@@ -57,24 +71,30 @@ const holders = db.prepare(`
          u.warehouse_id, w.code AS branch, w.name AS branch_name, u.role_id, u.sales_target
   FROM users u
   LEFT JOIN warehouses w ON w.id = u.warehouse_id
-  WHERE TRIM(u.rep_code) = ?
-`).all(code);
+  WHERE TRIM(u.rep_code) = ? AND u.warehouse_id = ?
+`).all(code, warehouse.id);
 
 if (holders.length !== 1) {
-  console.error(`\nExpected exactly one user holding rep code ${code}, found ${holders.length}.`);
+  console.error(`\nExpected exactly one user on rep code ${code} at branch ${branch}, found ${holders.length}.`);
   holders.forEach((h) => console.error(`  id ${h.id}  ${h.name}  active=${h.active}`));
-  console.error('Resolve that first - two users on one code makes matchRep ambiguous.\n');
+  if (!holders.length) {
+    const elsewhere = db.prepare(`
+      SELECT u.name, w.code AS branch FROM users u LEFT JOIN warehouses w ON w.id = u.warehouse_id
+      WHERE TRIM(u.rep_code) = ?
+    `).all(code);
+    if (elsewhere.length) {
+      console.error('  that code exists at: ' + elsewhere.map((e) => `${e.branch || '(no branch)'} = ${e.name}`).join(' | '));
+    }
+    console.error('  If the incoming rep is NEW at this branch rather than replacing someone,');
+    console.error('  add them in Settings -> Users instead - there is nobody to hand over from.');
+  }
+  console.error('');
   process.exit(1);
 }
 const outgoing = holders[0];
 
 if (db.prepare('SELECT id FROM users WHERE lower(email) = ?').get(newEmail)) {
   console.error(`\nEmail ${newEmail} is already in use. Pick another.\n`);
-  process.exit(1);
-}
-if (!outgoing.warehouse_id) {
-  console.error(`\n${outgoing.name} has no warehouse set, so the incoming rep would have no branch.`);
-  console.error('matchRep needs branch + code, so fix the branch first.\n');
   process.exit(1);
 }
 
