@@ -44,16 +44,16 @@ if (!jhb) {
   process.exit(1);
 }
 
-const CHARMAINE_EMAIL = 'Charmaine.LeVey@SBakels.co.za';
+const CHARMAINE_EMAIL = 'charmaine.levey@sbakels.co.za';
 
 const NEW_RECIPIENTS = [
-  { name: 'Leon Stanger',        email: 'Leon.Stanger@SBakels.co.za' },
-  { name: 'Phindile Mphahlele',  email: 'Phindile.Mphahlele@SBakels.co.za' },
-  { name: 'Nathi Tshabalala',    email: 'Nkosinathi.Tshabalala@SBakels.co.za' },
-  { name: 'Mapule Kgomokae',     email: 'Mapule.Kgomokae@SBakels.co.za' },
-  { name: 'Lee Bobert',          email: 'Lee.Bobert@SBakels.co.za' },
-  { name: 'Dawid Fourie',        email: 'Dawid.Fourie@SBakels.co.za' },
-  { name: 'Petrus Delport',      email: 'pc.delport@SBakels.co.za' },
+  { name: 'Leon Stanger',        email: 'leon.stanger@sbakels.co.za' },
+  { name: 'Phindile Mphahlele',  email: 'phindile.mphahlele@sbakels.co.za' },
+  { name: 'Nathi Tshabalala',    email: 'nkosinathi.tshabalala@sbakels.co.za' },
+  { name: 'Mapule Kgomokae',     email: 'mapule.kgomokae@sbakels.co.za' },
+  { name: 'Lee Bobert',          email: 'lee.bobert@sbakels.co.za' },
+  { name: 'Dawid Fourie',        email: 'dawid.fourie@sbakels.co.za' },
+  { name: 'Petrus Delport',      email: 'pc.delport@sbakels.co.za' },
   { name: 'Orders',              email: 'orders@sbakels.co.za' },
 ];
 

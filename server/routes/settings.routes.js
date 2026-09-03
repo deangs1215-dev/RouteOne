@@ -4,22 +4,36 @@ import { requireRole } from '../auth.js';
 
 const router = Router();
 
-// Any authenticated user (incl. reps): the configured order recipients, so the
-// mobile capture screen can let the rep tick who gets a copy (nothing sends
-// unless explicitly ticked).
+// Any authenticated user (incl. reps): the configured order recipients for
+// one branch, so the mobile capture screen can let the rep tick who gets a
+// copy (nothing sends unless explicitly ticked) - scoped to the customer's
+// own warehouse, plus any recipient set up as "every branch" (warehouse_id
+// IS NULL). With no warehouse_id given (customer has no branch assigned),
+// only the every-branch recipients apply.
 router.get('/settings/order-email-info', (req, res) => {
-  res.json({
-    recipients: db.prepare("SELECT id, name, email FROM email_recipients WHERE category = 'orders' ORDER BY name").all()
-  });
+  const warehouseId = req.query.warehouse_id ? Number(req.query.warehouse_id) : null;
+  const recipients = warehouseId
+    ? db.prepare("SELECT id, name, email FROM email_recipients WHERE category = 'orders' AND (warehouse_id = ? OR warehouse_id IS NULL) ORDER BY name").all(warehouseId)
+    : db.prepare("SELECT id, name, email FROM email_recipients WHERE category = 'orders' AND warehouse_id IS NULL ORDER BY name").all();
+  res.json({ recipients });
 });
 
 // Admin/manager only: GET configured email recipients, optionally filtered by
-// ?category=orders|technical (the Email Settings page fetches both lists at
-// once and filters client-side, so this defaults to returning everything).
+// ?category=orders|technical and/or ?warehouse_id= (the Email Settings page
+// fetches everything and groups by branch client-side, so both default to
+// returning the full list).
 router.get('/email-recipients', requireRole('admin', 'manager'), (req, res) => {
-  const rows = req.query.category
-    ? db.prepare('SELECT * FROM email_recipients WHERE category = ? ORDER BY name').all(req.query.category)
-    : db.prepare('SELECT * FROM email_recipients ORDER BY name').all();
+  const where = [];
+  const params = [];
+  if (req.query.category) { where.push('r.category = ?'); params.push(req.query.category); }
+  if (req.query.warehouse_id) { where.push('r.warehouse_id = ?'); params.push(Number(req.query.warehouse_id)); }
+  const rows = db.prepare(`
+    SELECT r.*, w.code AS warehouse_code, w.name AS warehouse_name
+    FROM email_recipients r
+    LEFT JOIN warehouses w ON w.id = r.warehouse_id
+    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY w.name IS NULL, w.name, r.name
+  `).all(...params);
   res.json(rows);
 });
 
@@ -27,17 +41,25 @@ const VALID_CATEGORIES = ['orders', 'technical'];
 
 // Admin/manager only: Create a new email recipient
 router.post('/email-recipients', requireRole('admin', 'manager'), (req, res) => {
-  const { name, email, description, category } = req.body || {};
+  const { name, email, description, category, warehouse_id } = req.body || {};
   if (!name || !email) {
     return res.status(400).json({ error: 'Name and email are required' });
   }
   if (category !== undefined && !VALID_CATEGORIES.includes(category)) {
     return res.status(400).json({ error: `category must be one of: ${VALID_CATEGORIES.join(', ')}` });
   }
+  if (warehouse_id != null && !db.prepare('SELECT 1 FROM warehouses WHERE id = ?').get(warehouse_id)) {
+    return res.status(400).json({ error: 'Unknown warehouse' });
+  }
   try {
+    // Emails are always stored lower-case - SBakels.co.za vs sbakels.co.za is
+    // the same mailbox to every mail server, but was two different rows here
+    // (email is UNIQUE, case-sensitively, so "Leon@X" and "leon@X" could both
+    // exist) and inconsistent casing on screen. Normalise once, at the write,
+    // rather than trusting every caller to type it consistently.
     const info = db.prepare(
-      'INSERT INTO email_recipients (name, email, description, category) VALUES (?, ?, ?, ?)'
-    ).run(name, email, description || null, category || 'orders');
+      'INSERT INTO email_recipients (name, email, description, category, warehouse_id) VALUES (?, ?, ?, ?, ?)'
+    ).run(name, String(email).trim().toLowerCase(), description || null, category || 'orders', warehouse_id || null);
     const row = db.prepare('SELECT * FROM email_recipients WHERE id = ?').get(info.lastInsertRowid);
     res.json(row);
   } catch (e) {
@@ -50,19 +72,23 @@ router.post('/email-recipients', requireRole('admin', 'manager'), (req, res) => 
 
 // Admin/manager only: Update an email recipient
 router.put('/email-recipients/:id', requireRole('admin', 'manager'), (req, res) => {
-  const { name, email, description, category } = req.body || {};
+  const { name, email, description, category, warehouse_id } = req.body || {};
   const existing = db.prepare('SELECT * FROM email_recipients WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Recipient not found' });
   if (category !== undefined && !VALID_CATEGORIES.includes(category)) {
     return res.status(400).json({ error: `category must be one of: ${VALID_CATEGORIES.join(', ')}` });
   }
+  if (warehouse_id != null && !db.prepare('SELECT 1 FROM warehouses WHERE id = ?').get(warehouse_id)) {
+    return res.status(400).json({ error: 'Unknown warehouse' });
+  }
   try {
-    db.prepare('UPDATE email_recipients SET name = ?, email = ?, description = ?, category = ? WHERE id = ?')
+    db.prepare('UPDATE email_recipients SET name = ?, email = ?, description = ?, category = ?, warehouse_id = ? WHERE id = ?')
       .run(
         name || existing.name,
-        email || existing.email,
+        email ? String(email).trim().toLowerCase() : existing.email,
         description !== undefined ? description : existing.description,
         category || existing.category,
+        warehouse_id !== undefined ? (warehouse_id || null) : existing.warehouse_id,
         req.params.id
       );
     const row = db.prepare('SELECT * FROM email_recipients WHERE id = ?').get(req.params.id);
