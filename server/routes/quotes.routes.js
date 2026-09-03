@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db, nextNumber, logActivity, effectivePrice, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
+import { db, nextNumber, logActivity, effectivePrice, effectivePriceSource, PRICE_SOURCES, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
 import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
 import { buildQuoteEmail, sendEmail, wrap, esc, companyDetails } from '../integration/email.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
@@ -140,8 +140,8 @@ router.post('/quotes', (req, res) => {
 
     let subtotal = 0;
     const insertItem = db.prepare(`
-      INSERT INTO quote_items (quote_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO quote_items (quote_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total, price_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const item of sortedItems) {
       // See the matching comment in orders.routes.js - same guard, clearer message.
@@ -155,13 +155,13 @@ router.post('/quotes', (req, res) => {
       const qty = Number(item.qty);
       if (!Number.isFinite(qty) || qty <= 0 || qty > 1000000) throw new Error('Invalid quote quantity');
       const requestedPrice = Number(item.unit_price);
-      const unitPrice = !scopeForUser(req.user).isRep && item.unit_price != null
-        ? requestedPrice
-        : effectivePrice(b.customer_id, product.id, qty);
+      const officeOverrode = !scopeForUser(req.user).isRep && item.unit_price != null;
+      const unitPrice = officeOverrode ? requestedPrice : effectivePrice(b.customer_id, product.id, qty);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid unit price');
       const lineTotal = round2(qty * unitPrice);
       subtotal += lineTotal;
-      insertItem.run(quoteId, product.id, product.name, qty, product.uom, unitPrice, 0, lineTotal);
+      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : effectivePriceSource(b.customer_id, product.id, qty);
+      insertItem.run(quoteId, product.id, product.name, qty, product.uom, unitPrice, 0, lineTotal, priceSource);
     }
     if (subtotal === 0) throw new Error('Quote has no valid lines');
     const vat = round2(subtotal * VAT_RATE);
@@ -195,12 +195,32 @@ router.post('/quotes', (req, res) => {
         const recipientIds = (Array.isArray(b.recipient_ids) ? b.recipient_ids : [])
           .filter((n) => Number.isInteger(n)).slice(0, 50);
         if (recipientIds.length) {
-          const recipients = db.prepare(
-            `SELECT email FROM email_recipients WHERE id IN (${recipientIds.map(() => '?').join(',')})`
-          ).all(...recipientIds);
+          // Branch-scoped to the customer's own warehouse (quotes have no
+          // warehouse_id of their own - see the matching comment in
+          // orders.routes.js for why this backstop exists at all).
+          const recipients = db.prepare(`
+            SELECT email FROM email_recipients
+            WHERE id IN (${recipientIds.map(() => '?').join(',')})
+              AND (warehouse_id = ? OR warehouse_id IS NULL)
+          `).all(...recipientIds, customer.warehouse_id);
           for (const r of recipients) {
             sendEmail({ ...buildQuoteEmail(quoteId), cc_addr: null, to_addr: r.email })
               .catch((e) => console.error('Recipient email failed:', e.message));
+          }
+        }
+        // The rep's own saved contacts - see the matching block in
+        // orders.routes.js for why the query itself, not just the UI, scopes
+        // this to the sender's own rows.
+        const personalIds = (Array.isArray(b.personal_recipient_ids) ? b.personal_recipient_ids : [])
+          .filter((n) => Number.isInteger(n)).slice(0, 50);
+        if (personalIds.length) {
+          const contacts = db.prepare(`
+            SELECT email FROM rep_email_contacts
+            WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
+          `).all(...personalIds, req.user.id);
+          for (const c of contacts) {
+            sendEmail({ ...buildQuoteEmail(quoteId), cc_addr: null, to_addr: c.email })
+              .catch((e) => console.error('Personal contact email failed:', e.message));
           }
         }
       }
@@ -251,11 +271,13 @@ router.post('/quotes/:id/convert', (req, res) => {
       `Converted from quote ${quote.number}`);
     const orderId = info.lastInsertRowid;
     const insertItem = db.prepare(`
-      INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total, price_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const i of items) {
-      insertItem.run(orderId, i.product_id, i.product_name, i.qty, i.uom, i.unit_price, i.discount_pct, i.line_total);
+      // Carries the quote line's own price_source across - the price itself
+      // isn't recomputed here, so neither is what tier produced it.
+      insertItem.run(orderId, i.product_id, i.product_name, i.qty, i.uom, i.unit_price, i.discount_pct, i.line_total, i.price_source);
     }
     adjustOrderStock(orderId, -1);
     db.prepare("UPDATE quotes SET status = 'accepted', order_id = ? WHERE id = ?").run(orderId, quote.id);
@@ -271,7 +293,7 @@ router.post('/quotes/:id/convert', (req, res) => {
 router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (req, res) => {
   const { recipients = [], send_to_rep, send_to_customer } = req.body || {};
   const quote = db.prepare(`
-    SELECT q.*, c.name AS customer_name, c.email AS customer_email,
+    SELECT q.*, c.name AS customer_name, c.email AS customer_email, c.warehouse_id AS customer_warehouse_id,
       u.name AS rep_name, u.email AS rep_email
     FROM quotes q JOIN customers c ON c.id = q.customer_id
     LEFT JOIN users u ON u.id = q.rep_id WHERE q.id = ?
@@ -281,9 +303,13 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
   const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
   const emailsToSend = [];
 
-  // Send to configured recipients (empty selection = none, not a SQL error)
+  // Send to configured recipients (empty selection = none, not a SQL error).
+  // Branch-scoped to the customer's own warehouse.
   const allRecipients = Array.isArray(recipients) && recipients.length
-    ? db.prepare('SELECT * FROM email_recipients WHERE id IN (' + recipients.map(() => '?').join(',') + ')').all(...recipients)
+    ? db.prepare(`
+        SELECT * FROM email_recipients
+        WHERE id IN (${recipients.map(() => '?').join(',')}) AND (warehouse_id = ? OR warehouse_id IS NULL)
+      `).all(...recipients, quote.customer_warehouse_id)
     : [];
 
   for (const recip of allRecipients) {

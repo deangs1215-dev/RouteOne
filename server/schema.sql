@@ -216,7 +216,8 @@ CREATE TABLE IF NOT EXISTS order_items (
   uom TEXT,
   unit_price REAL NOT NULL,
   discount_pct REAL DEFAULT 0,
-  line_total REAL NOT NULL
+  line_total REAL NOT NULL,
+  price_source TEXT                       -- R1-044: which tier produced unit_price - see PRICE_SOURCES in db.js
 );
 
 -- Phase 2: pricing rules beyond contract prices. Category or product scope,
@@ -263,7 +264,8 @@ CREATE TABLE IF NOT EXISTS quote_items (
   uom TEXT,
   unit_price REAL NOT NULL,
   discount_pct REAL DEFAULT 0,
-  line_total REAL NOT NULL
+  line_total REAL NOT NULL,
+  price_source TEXT                       -- R1-044: which tier produced unit_price - see PRICE_SOURCES in db.js
 );
 
 -- Custom field-capture forms. fields is a JSON array:
@@ -448,8 +450,24 @@ CREATE TABLE IF NOT EXISTS email_recipients (
   email TEXT NOT NULL UNIQUE,
   description TEXT,
   category TEXT NOT NULL DEFAULT 'orders', -- 'orders' | 'technical'
+  warehouse_id INTEGER REFERENCES warehouses(id), -- NULL = every branch
   created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- A rep's own personal "who else should get my orders" list - separate from
+-- email_recipients, which is admin/manager-managed and branch-wide. Any
+-- authenticated user manages their own rows here (self-service, no role
+-- gate); a rep can never see or send via another rep's saved contact - every
+-- read/write is scoped to user_id server-side, not just hidden in the UI.
+CREATE TABLE IF NOT EXISTS rep_email_contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE (user_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_rep_email_contacts_user ON rep_email_contacts(user_id);
 
 -- Outbound emails (orders and quotes to the customer, rep, and/or configured recipients).
 CREATE TABLE IF NOT EXISTS email_log (

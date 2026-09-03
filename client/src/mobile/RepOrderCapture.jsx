@@ -1,12 +1,12 @@
 // On-site order/quote capture: search products, tap to add, adjust quantities,
 // submit. Prices are the customer's effective prices (contract > qty break >
 // list). Works offline: prices come from the snapshot and the submit queues.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, fmtR } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
 import OrderSummary from '../components/OrderSummary';
-import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2 } from '../components/NewOrderModal';
+import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2, priceSourceForLine, PriceSourceBadge } from '../components/NewOrderModal';
 import { queueWrite } from '../offline';
 import { useAuth } from '../auth';
 import { MobileHeader } from './MobileApp';
@@ -39,19 +39,28 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const [customerOrderNo, setCustomerOrderNo] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [savingDraft, setSavingDraft] = useState(false);
-  const [draftSaved, setDraftSaved] = useState(false);
+  // R1-046: 'idle' (nothing to save yet) | 'saving' | 'saved' | 'error'.
+  const [draftStatus, setDraftStatus] = useState('idle');
+  const draftSaveTimer = useRef(null);
   const [showSummary, setShowSummary] = useState(false); // review screen before final submit
   const [signature, setSignature] = useState(null); // customer signature - required before an order can be submitted (not required for quotes)
 
   // Resuming a saved draft - load its cart/notes once, on top of whatever the
-  // for-customer product fetch below already sets up.
+  // for-customer product fetch below already sets up. Skipped for a draftId
+  // this screen just created itself (see saveDraft) - there's nothing to
+  // resume from since the state here IS what was just saved, and re-fetching
+  // it would only round-trip identical data back through setCart/etc.,
+  // which - because those calls produce new object/string references - would
+  // needlessly re-trigger the autosave effect below for a no-op change.
+  const justCreatedDraftId = useRef(false);
   useEffect(() => {
     if (!draftId) return;
+    if (justCreatedDraftId.current) { justCreatedDraftId.current = false; return; }
     api.get(`/drafts/${draftId}`).then((d) => {
       setCart(d.data?.items || {});
       setNotes(d.data?.notes || '');
       setCustomerOrderNo(d.data?.customer_order_no || '');
+      setDraftStatus('saved'); // resumed as-is - nothing unsaved yet
     }).catch(() => {});
   }, [draftId]);
 
@@ -63,18 +72,65 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const [orderEmailInfo, setOrderEmailInfo] = useState(null); // { recipients }
   const [sendToRep, setSendToRep] = useState(false);
   const [sendToCustomer, setSendToCustomer] = useState(false);
-  const [extraEmail, setExtraEmail] = useState('');
   const [recipientIds, setRecipientIds] = useState(new Set()); // unticked by default — rep picks who gets it
+  // The rep's own saved "add another email address" list - separate from
+  // orderEmailInfo.recipients (admin/manager-managed, branch-wide). Reused
+  // across every order/quote the rep captures, not just this one.
+  const [myContacts, setMyContacts] = useState(null);
+  const [personalIds, setPersonalIds] = useState(new Set());
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [newContactName, setNewContactName] = useState('');
+  const [newContactEmail, setNewContactEmail] = useState('');
+  const [addContactError, setAddContactError] = useState('');
+  const [addingContact, setAddingContact] = useState(false);
 
   const toggleRecipient = (rid) => setRecipientIds((prev) => {
     const next = new Set(prev);
     if (next.has(rid)) next.delete(rid); else next.add(rid);
     return next;
   });
+  const togglePersonal = (cid) => setPersonalIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(cid)) next.delete(cid); else next.add(cid);
+    return next;
+  });
 
+  // Branch-scoped to this customer's own warehouse - a Cape Town customer's
+  // order shouldn't offer Johannesburg's recipients as tick-boxes, and vice
+  // versa. Waits on the customer fetch below for its warehouse_id.
   useEffect(() => {
-    api.get('/settings/order-email-info').then(setOrderEmailInfo).catch(() => {});
+    if (!customer) return;
+    api.get(`/settings/order-email-info?warehouse_id=${customer.warehouse_id || ''}`).then(setOrderEmailInfo).catch(() => {});
+  }, [customer]);
+
+  // The rep's saved contacts don't depend on the customer, so this only needs
+  // to run once - not re-fetched every time `customer` changes above.
+  useEffect(() => {
+    api.get('/my-email-contacts').then(setMyContacts).catch(() => setMyContacts([]));
   }, []);
+
+  // Saves the new contact to the rep's profile (so it's there next time too)
+  // and immediately ticks it for THIS send - one action does both, matching
+  // how ticking any other recipient works.
+  const addContact = async () => {
+    const name = newContactName.trim();
+    const email = newContactEmail.trim();
+    if (!name || !email) { setAddContactError('Name and email are both required'); return; }
+    setAddingContact(true);
+    setAddContactError('');
+    try {
+      const contact = await api.post('/my-email-contacts', { name, email });
+      setMyContacts((cs) => [...(cs || []), contact].sort((a, b) => a.name.localeCompare(b.name)));
+      setPersonalIds((prev) => new Set(prev).add(contact.id));
+      setNewContactName('');
+      setNewContactEmail('');
+      setShowAddContact(false);
+    } catch (e) {
+      setAddContactError(e.message);
+    } finally {
+      setAddingContact(false);
+    }
+  };
 
   useEffect(() => {
     api.get(`/customers/${id}`).then(setCustomer).catch(console.error);
@@ -123,9 +179,6 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     return next;
   });
 
-  // Once the cart or notes change again after a save, "Draft saved" is stale.
-  useEffect(() => { setDraftSaved(false); }, [cart, notes, customerOrderNo]);
-
   const cartLines = (products || []).filter((p) => cart[p.id]);
   // R1-027/028: round EACH line first, then sum, then round VAT on that
   // rounded subtotal - the exact same order of operations orders.routes.js /
@@ -137,13 +190,13 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const vat = round2(subtotal * VAT_RATE);
   const total = round2(subtotal + vat);
 
-  // Saved server-side (not just this device) so the rep can pick it back up
-  // from any phone. Doesn't need a cart - a rep who only got as far as
-  // jotting a note before being pulled away can still save that.
+  // R1-046: saved server-side (not just this device) so the rep can pick it
+  // back up from any phone, and so an interrupted capture (connection drops,
+  // app closes, phone dies) never loses more than the last ~1s of typing.
+  // Doesn't need a cart - a rep who only got as far as jotting a note before
+  // being pulled away can still save that.
   const saveDraft = async () => {
-    setSavingDraft(true);
-    setError('');
-    setDraftSaved(false);
+    setDraftStatus('saving');
     const payload = {
       kind: isQuote ? 'quote' : 'order',
       customer_id: Number(id),
@@ -154,26 +207,60 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     try {
       if (draftId) await api.put(`/drafts/${draftId}`, payload);
       else {
+        // First line just went in - this is the draft's actual creation,
+        // which assigns it the server id everything after this PUTs to.
         const d = await api.post('/drafts', payload);
+        justCreatedDraftId.current = true;
         setDraftId(d.id);
       }
-      setDraftSaved(true);
+      setDraftStatus('saved');
     } catch (e) {
-      setError(e.message || 'Could not save draft - check your connection.');
-    } finally {
-      setSavingDraft(false);
+      if (e.isNetworkError && draftId) {
+        // The draft already has a real id, so the update is safe to queue
+        // through the same offline outbox R1-033 tracks and surfaces to the
+        // rep (Waiting to sync / Synchronising / Sync failed) - it'll reach
+        // the server automatically once connectivity returns.
+        queueWrite('PUT', `/drafts/${draftId}`, payload);
+        setDraftStatus('saved');
+      } else {
+        // No draft id yet: there's nothing to queue a PUT against, and a
+        // queued POST wouldn't hand back the id later PUTs need. The rep's
+        // changes are still safe in this screen's own state either way -
+        // just not yet on the server. Retried automatically on reconnect
+        // (see the online-listener effect below) or by tapping the status.
+        setDraftStatus('error');
+      }
     }
   };
+
+  // Debounced autosave: any change to the cart, notes, or the customer's own
+  // reference saves the latest draft ~1s after the rep stops typing/tapping.
+  // Nothing is saved until the first product line goes in - an empty draft
+  // from notes alone, before any line exists, isn't what "create the Draft
+  // record" in the ticket is describing.
+  useEffect(() => {
+    if (Object.keys(cart).length === 0 && !draftId) return;
+    clearTimeout(draftSaveTimer.current);
+    draftSaveTimer.current = setTimeout(saveDraft, 1000);
+    return () => clearTimeout(draftSaveTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cart, notes, customerOrderNo]);
+
+  // A failed save (offline, no draft id yet to queue against) retries on its
+  // own the moment the browser regains connectivity - the rep shouldn't have
+  // to remember to tap retry just because signal came back.
+  useEffect(() => {
+    if (draftStatus !== 'error') return;
+    const retry = () => saveDraft();
+    window.addEventListener('online', retry);
+    return () => window.removeEventListener('online', retry);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftStatus]);
 
   const confirmSubmit = async () => {
     // A quote isn't a binding sale, so no signature is required - only orders need one.
     if (!isQuote && !signature) {
       setError('Please get the customer\'s signature before submitting.');
-      return;
-    }
-    const trimmedExtra = extraEmail.trim();
-    if (trimmedExtra && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedExtra)) {
-      setError('That extra email address doesn\'t look right.');
       return;
     }
     setBusy(true);
@@ -187,10 +274,14 @@ export default function RepOrderCapture({ base = '/mobile' }) {
       signature: isQuote ? null : signature,
       send_to_rep: sendToRep,
       send_to_customer: sendToCustomer,
-      extra_email: trimmedExtra || null,
-      recipient_ids: [...recipientIds]
+      recipient_ids: [...recipientIds],
+      // Saved contacts ticked for this send - see addContact() and the "My
+      // contacts" checkbox group below. Resolved server-side against
+      // rep_email_contacts, scoped to this rep's own rows only.
+      personal_recipient_ids: [...personalIds]
     };
     const path = isQuote ? '/quotes' : '/orders';
+    clearTimeout(draftSaveTimer.current); // the draft is about to become a real order - don't let a stray autosave PUT recreate it after deletion
     try {
       const doc = await api.post(path, payload);
       if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
@@ -293,22 +384,18 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                     {p.code} · {fmtR(price)} / <span className="font-medium text-slate-500">{p.uom || 'each'}</span>
                     {belowList != null && <span className="ml-1 text-red-600 font-semibold">-{fmtR(belowList)}</span>}
                     {kgPrice != null && <span className="ml-1">({fmtR(kgPrice)}/kg)</span>}
-                    {/* R1-018: SYSPRO's own pricing tier, not the generic
-                        has_contract_price flag - that flag is also set for
-                        buying-group and price-code pricing, so labelling all
-                        three "contract" mislabels prices that are not an
-                        actual negotiated contract. Mirrors the office order
-                        builder's three-way badge (NewOrderModal.jsx). */}
-                    {p.syspro_pricing_tier === 'syspro_contract' && <span className="ml-1 text-emerald-600">contract</span>}
-                    {p.syspro_pricing_tier === 'syspro_buying_group' && <span className="ml-1 text-blue-600">buying group</span>}
-                    {p.syspro_pricing_tier === 'syspro_price_code' && <span className="ml-1 text-purple-600">price code</span>}
-                    {!p.syspro_pricing_tier && p.has_contract_price === 1 && <span className="ml-1 text-emerald-600">contract</span>}
+                    {/* R1-018/R1-044: which tier produced this price - not the
+                        generic has_contract_price flag, which is also set for
+                        buying-group and price-code pricing (would mislabel
+                        those as "contract"). Mirrors the office order
+                        builder's badge (NewOrderModal.jsx) so the same price
+                        source always reads the same way everywhere. */}
+                    <PriceSourceBadge className="ml-1" source={priceSourceForLine(p, price)} />
                     {p.syspro_pricing_tier && listPrice > 0 && (
                       <span className="ml-1">
                         · G {fmtR(listPrice)}{gDiscountPct != null && <span className="font-medium text-emerald-600"> -{gDiscountPct}%</span>}
                       </span>
                     )}
-                    {qty > 0 && price < p.price_breaks?.[0]?.price && <span className="ml-1 text-emerald-600">qty break</span>}
                     {p.stock_qty <= 0
                       ? <span className="ml-1 text-red-500 font-medium">out of stock</span>
                       : p.stock_qty < 20 && <span className="ml-1 text-amber-600">low stock ({p.stock_qty})</span>}
@@ -354,7 +441,6 @@ export default function RepOrderCapture({ base = '/mobile' }) {
               onChange={(e) => setCustomerOrderNo(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
               placeholder="Their PO or reference number" />
-            {customerOrderNo.trim() && <div className="mt-1 text-xs text-emerald-600">✓ Saved with this order</div>}
           </div>
         )}
 
@@ -363,14 +449,23 @@ export default function RepOrderCapture({ base = '/mobile' }) {
           <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
             placeholder="Optional" />
-          {notes.trim() && <div className="mt-1 text-xs text-emerald-600">✓ Saved with this {noun.toLowerCase()}</div>}
         </div>
 
-        {/* Save & come back later - e.g. connectivity drops or the rep gets
-            pulled away mid-capture. Doesn't need products in the cart. */}
-        <button className="btn-secondary w-full" onClick={saveDraft} disabled={savingDraft}>
-          {savingDraft ? 'Saving draft…' : draftSaved ? '✓ Draft saved' : `💾 Save as draft`}
-        </button>
+        {/* R1-046: small, unobtrusive autosave status - the rep never has to
+            remember to press a save button. A failed save (offline, no draft
+            id yet) is tappable to retry immediately, on top of the automatic
+            retry-on-reconnect (see the online-listener effect above). */}
+        {draftStatus !== 'idle' && (
+          <div className="text-center text-xs">
+            {draftStatus === 'saving' && <span className="text-slate-400">Saving…</span>}
+            {draftStatus === 'saved' && <span className="text-emerald-600">✓ Draft Saved</span>}
+            {draftStatus === 'error' && (
+              <button type="button" className="font-medium text-red-600 underline" onClick={saveDraft}>
+                ⚠ Unable to Save – Retry
+              </button>
+            )}
+          </div>
+        )}
       </div>}
 
       {/* Summary review screen */}
@@ -391,16 +486,20 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 customer_order_no: customerOrderNo || null,
                 customer_code: customer.code
               }}
-              items={cartLines.map((p) => ({
-                product_name: p.name,
-                product_code: p.code,
-                unit_price: unitPriceFor(p, cart[p.id]),
-                kg_price: kgPriceFor(p, unitPriceFor(p, cart[p.id])),
-                qty: cart[p.id],
-                uom: p.uom,
-                // R1-027: rounded per line, matching the server's exact formula.
-                line_total: round2(cart[p.id] * unitPriceFor(p, cart[p.id]))
-              }))}
+              items={cartLines.map((p) => {
+                const price = unitPriceFor(p, cart[p.id]);
+                return {
+                  product_name: p.name,
+                  product_code: p.code,
+                  unit_price: price,
+                  kg_price: kgPriceFor(p, price),
+                  qty: cart[p.id],
+                  uom: p.uom,
+                  // R1-027: rounded per line, matching the server's exact formula.
+                  line_total: round2(cart[p.id] * price),
+                  price_source: priceSourceForLine(p, price)
+                };
+              })}
               customer={customer}
               type={isQuote ? 'quote' : 'order'}
               showSignature={!isQuote}
@@ -439,10 +538,49 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 </div>
               )}
 
-              <div>
-                <label className="label">Add another email address</label>
-                <input className="input" type="email" placeholder="name@example.com" value={extraEmail}
-                  onChange={(e) => setExtraEmail(e.target.value)} />
+              {/* The rep's own saved contacts - persist across every order/quote
+                  they capture, not just this one. Separate from the admin
+                  "Also send to" list above. */}
+              {myContacts?.length > 0 && (
+                <div className="border-t border-slate-100 pt-3">
+                  <div className="mb-1.5 text-xs font-semibold uppercase text-slate-400">My contacts</div>
+                  <div className="space-y-1.5">
+                    {myContacts.map((c) => (
+                      <label key={c.id} className="flex items-center gap-2 text-sm">
+                        <input type="checkbox" checked={personalIds.has(c.id)} onChange={() => togglePersonal(c.id)} />
+                        <span>{c.name}</span>
+                        <span className="text-xs text-slate-400">{c.email}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="border-t border-slate-100 pt-3">
+                {!showAddContact ? (
+                  <button type="button" className="text-sm font-medium text-brand-600" onClick={() => setShowAddContact(true)}>
+                    + Add new email address
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <label className="label">Add a new email address</label>
+                    <input className="input" placeholder="Name" value={newContactName}
+                      onChange={(e) => setNewContactName(e.target.value)} />
+                    <input className="input" type="email" placeholder="name@example.com" value={newContactEmail}
+                      onChange={(e) => setNewContactEmail(e.target.value)} />
+                    <ErrorNote error={addContactError} />
+                    <div className="flex gap-2">
+                      <button type="button" className="btn-secondary flex-1"
+                        onClick={() => { setShowAddContact(false); setAddContactError(''); setNewContactName(''); setNewContactEmail(''); }}>
+                        Cancel
+                      </button>
+                      <button type="button" className="btn-primary flex-1" disabled={addingContact} onClick={addContact}>
+                        {addingContact ? 'Saving…' : 'Save & add'}
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-400">Saved to your profile — you'll be able to pick it again on future orders.</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>

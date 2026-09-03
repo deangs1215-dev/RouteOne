@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db, nextNumber, logActivity, effectivePrice, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
+import { db, nextNumber, logActivity, effectivePrice, effectivePriceSource, PRICE_SOURCES, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
 import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
 import { buildOrderEmail, buildOrderConfirmationEmail, sendEmail, wrap, esc, companyDetails } from '../integration/email.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
@@ -145,8 +145,8 @@ function createOrder(user, b, res) {
 
     let subtotal = 0;
     const insertItem = db.prepare(`
-      INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total, price_source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const item of b.items) {
       // Fetched without the active filter so a blocked line can say WHY it was
@@ -164,9 +164,8 @@ function createOrder(user, b, res) {
       if (!Number.isFinite(qty) || qty <= 0 || qty > 1000000) throw new Error('Invalid order quantity');
       // Qty-aware pricing: quantity breaks from price rules apply per line.
       const requestedPrice = Number(item.unit_price);
-      const unitPrice = !scopeForUser(user).isRep && item.unit_price != null
-        ? requestedPrice
-        : effectivePrice(b.customer_id, product.id, qty);
+      const officeOverrode = !scopeForUser(user).isRep && item.unit_price != null;
+      const unitPrice = officeOverrode ? requestedPrice : effectivePrice(b.customer_id, product.id, qty);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid unit price');
       const discount = scopeForUser(user).isRep
         ? 0
@@ -174,7 +173,11 @@ function createOrder(user, b, res) {
       if (!Number.isFinite(discount) || discount < 0 || discount > 100) throw new Error('Invalid discount');
       const lineTotal = round2(qty * unitPrice * (1 - discount / 100));
       subtotal += lineTotal;
-      insertItem.run(orderId, product.id, product.name, qty, product.uom, unitPrice, discount, lineTotal);
+      // R1-044: an explicit office-entered price is always a manual override,
+      // regardless of what tier it happens to match numerically - otherwise
+      // it's whichever tier effectivePrice() actually used for this line.
+      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : effectivePriceSource(b.customer_id, product.id, qty);
+      insertItem.run(orderId, product.id, product.name, qty, product.uom, unitPrice, discount, lineTotal, priceSource);
     }
     if (subtotal === 0) throw new Error('Order has no valid lines');
     const vat = round2(subtotal * VAT_RATE);
@@ -213,12 +216,33 @@ function createOrder(user, b, res) {
         const recipientIds = (Array.isArray(b.recipient_ids) ? b.recipient_ids : [])
           .filter((n) => Number.isInteger(n)).slice(0, 50);
         if (recipientIds.length) {
-          const recipients = db.prepare(
-            `SELECT email FROM email_recipients WHERE id IN (${recipientIds.map(() => '?').join(',')})`
-          ).all(...recipientIds);
+          // Branch-scoped: only a recipient set up for this order's own
+          // warehouse (or "every branch") is honoured, even if the client
+          // somehow sent an id outside that - the capture screen only ever
+          // offers the right list, this is the server-side backstop.
+          const recipients = db.prepare(`
+            SELECT email FROM email_recipients
+            WHERE id IN (${recipientIds.map(() => '?').join(',')})
+              AND (warehouse_id = ? OR warehouse_id IS NULL)
+          `).all(...recipientIds, order.warehouse_id);
           for (const r of recipients) {
             sendEmail({ ...buildOrderEmail(orderId), cc_addr: null, to_addr: r.email })
               .catch((e) => console.error('Recipient email failed:', e.message));
+          }
+        }
+        // The rep's own saved "add another email address" contacts. Scoped to
+        // user.id in the query itself, not just the UI - a rep can never send
+        // via a contact id that isn't theirs, even by hand-crafting a request.
+        const personalIds = (Array.isArray(b.personal_recipient_ids) ? b.personal_recipient_ids : [])
+          .filter((n) => Number.isInteger(n)).slice(0, 50);
+        if (personalIds.length) {
+          const contacts = db.prepare(`
+            SELECT email FROM rep_email_contacts
+            WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
+          `).all(...personalIds, user.id);
+          for (const c of contacts) {
+            sendEmail({ ...buildOrderEmail(orderId), cc_addr: null, to_addr: c.email })
+              .catch((e) => console.error('Personal contact email failed:', e.message));
           }
         }
       }
@@ -276,9 +300,13 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
   const emailsToSend = [];
 
-  // Send to configured recipients (empty selection = none, not a SQL error)
+  // Send to configured recipients (empty selection = none, not a SQL error).
+  // Branch-scoped the same way as the auto-send path in createOrder above.
   const allRecipients = Array.isArray(recipients) && recipients.length
-    ? db.prepare('SELECT * FROM email_recipients WHERE id IN (' + recipients.map(() => '?').join(',') + ')').all(...recipients)
+    ? db.prepare(`
+        SELECT * FROM email_recipients
+        WHERE id IN (${recipients.map(() => '?').join(',')}) AND (warehouse_id = ? OR warehouse_id IS NULL)
+      `).all(...recipients, order.warehouse_id)
     : [];
 
   for (const recip of allRecipients) {

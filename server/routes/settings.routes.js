@@ -18,6 +18,37 @@ router.get('/settings/order-email-info', (req, res) => {
   res.json({ recipients });
 });
 
+// A rep's own "add another email address" list for order/quote send - self
+// service (no requireRole), but every query is scoped to req.user.id so a rep
+// can only ever see or use their own saved contacts, never another rep's.
+// This is deliberately separate from email_recipients (admin/manager-managed,
+// branch-wide) - see the schema.sql comment on rep_email_contacts.
+router.get('/my-email-contacts', (req, res) => {
+  res.json(db.prepare('SELECT id, name, email FROM rep_email_contacts WHERE user_id = ? ORDER BY name').all(req.user.id));
+});
+
+router.post('/my-email-contacts', (req, res) => {
+  const name = String(req.body?.name ?? '').trim();
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'That email address doesn\'t look right' });
+  try {
+    const info = db.prepare('INSERT INTO rep_email_contacts (user_id, name, email) VALUES (?, ?, ?)').run(req.user.id, name, email);
+    res.json(db.prepare('SELECT id, name, email FROM rep_email_contacts WHERE id = ?').get(info.lastInsertRowid));
+  } catch (e) {
+    if (e.message.includes('UNIQUE')) return res.status(400).json({ error: 'You already have a contact with that email address' });
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.delete('/my-email-contacts/:id', (req, res) => {
+  // The user_id in the WHERE, not just the id, is what stops a rep deleting
+  // someone else's saved contact by guessing an id.
+  const info = db.prepare('DELETE FROM rep_email_contacts WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  if (info.changes === 0) return res.status(404).json({ error: 'Contact not found' });
+  res.json({ ok: true });
+});
+
 // Admin/manager only: GET configured email recipients, optionally filtered by
 // ?category=orders|technical and/or ?warehouse_id= (the Email Settings page
 // fetches everything and groups by branch client-side, so both default to
