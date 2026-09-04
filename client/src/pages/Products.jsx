@@ -69,7 +69,9 @@ export default function Products() {
                   <td className="td">
                     {p.discontinued
                       ? <Badge color="#dc2626">discontinued</Badge>
-                      : <Badge color={p.active ? '#16a34a' : '#64748b'}>{p.active ? 'active' : 'inactive'}</Badge>}
+                      : !p.list_price
+                        ? <Badge color="#dc2626">no price set</Badge>
+                        : <Badge color={p.active ? '#16a34a' : '#64748b'}>{p.active ? 'active' : 'inactive'}</Badge>}
                   </td>
                 </tr>
               ))}

@@ -176,9 +176,17 @@ router.get('/products/for-customer/:customerId', (req, res) => {
       // list_price (see productUnitPrice in db.js) - must scale by pack weight
       // to get the real per-unit selling price, same as list_price does.
       sysproEffectivePrice = perKgPrice != null ? perKgPrice * (p.conv_factor_alt_uom || p.pack_weight_kg || 1) : null;
-      if (contractPrice) sysproPricingTier = 'syspro_contract';
-      else if (buyingGroupPrice) sysproPricingTier = 'syspro_buying_group';
-      else if (syspro.price_code_price) sysproPricingTier = 'syspro_price_code';
+      // R1-044: null checks, not truthy checks - a legitimate price of exactly
+      // 0 (e.g. a free-goods price code) is falsy in JS, so `if (contractPrice)`
+      // would silently skip a real 0 contract/buying-group/price-code price and
+      // leave sysproPricingTier null even though hasSysproPrice is true. That
+      // mismatch is exactly what made the live product list mislabel a R0.00
+      // price-code line as "Customer Price" while the actually-submitted order
+      // (priced via db.js's effectivePriceDetail, which already used `!= null`)
+      // correctly recorded "Price Code" for the same line.
+      if (contractPrice != null) sysproPricingTier = 'syspro_contract';
+      else if (buyingGroupPrice != null) sysproPricingTier = 'syspro_buying_group';
+      else if (syspro.price_code_price != null) sysproPricingTier = 'syspro_price_code';
     }
     // No syspro override at all -> falls through to products.list_price below (via p.effective_price)
 
@@ -187,11 +195,16 @@ router.get('/products/for-customer/:customerId', (req, res) => {
     const hasSysproPrice = sysproEffectivePrice != null;
     const breaks = hasSysproPrice || p.has_contract_price ? [] : priceBreaks(p, rules);
     const base = breaks.length ? breaks[0].price : finalEffectivePrice;
+    const effectivePrice = hasSysproPrice || p.has_contract_price ? finalEffectivePrice : base;
 
     return {
       ...p,
       stock_qty: stockByProductId ? (stockByProductId[p.id] ?? 0) : p.stock_qty,
-      effective_price: hasSysproPrice || p.has_contract_price ? finalEffectivePrice : base,
+      effective_price: effectivePrice,
+      // R1-016: SYSPRO has no price at all for this product/customer (a real
+      // SYSPRO data gap, not a RouteOne bug) - block ordering the same way a
+      // discontinued product is blocked, so a rep can't submit a free order.
+      no_price: !(effectivePrice > 0) ? 1 : 0,
       has_contract_price: hasSysproPrice ? 1 : p.has_contract_price,
       price_breaks: breaks,
       syspro_pricing: syspro || null,

@@ -366,14 +366,16 @@ export default function RepOrderCapture({ base = '/mobile' }) {
             // (contract/buying-group/price-code) - not RouteOne qty-break
             // pricing, which belowList above already covers in Rand terms.
             const gDiscountPct = p.syspro_pricing_tier ? discountPctFor(listPrice, p.effective_price) : null;
+            const blocked = !!p.discontinued || !!p.no_price;
             return (
               <div key={p.id} className={`card flex items-center gap-3 p-3 ${
-                p.discontinued ? 'border-red-200 bg-red-50/50' : ''}`}>
+                blocked ? 'border-red-200 bg-red-50/50' : ''}`}>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">
-                    <span className={p.discontinued ? 'text-red-700 line-through' : ''}>{p.name}</span>
+                    <span className={blocked ? 'text-red-700 line-through' : ''}>{p.name}</span>
                     {p.discontinued && <span className="ml-1.5 rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700">discontinued</span>}
-                    {!p.discontinued && p.times_bought > 0 && <span className="ml-1.5 rounded bg-emerald-50 px-1 py-0.5 text-[10px] text-emerald-600">buys {p.times_bought}×</span>}
+                    {!p.discontinued && p.no_price && <span className="ml-1.5 rounded bg-red-100 px-1 py-0.5 text-[10px] font-medium text-red-700">no price set</span>}
+                    {!blocked && p.times_bought > 0 && <span className="ml-1.5 rounded bg-emerald-50 px-1 py-0.5 text-[10px] text-emerald-600">buys {p.times_bought}×</span>}
                   </div>
                   <div className="text-xs text-slate-400">
                     {/* R1-024: SYSPRO's own selling-unit UOM (products.uom, from
@@ -404,7 +406,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                     <div className="text-[10px] text-sky-600">💡 {nextBreak.min_qty}+ units → {fmtR(nextBreak.price)} each</div>
                   )}
                 </div>
-                {p.discontinued ? (
+                {blocked ? (
                   <span className="whitespace-nowrap text-[11px] font-medium text-red-600">unavailable</span>
                 ) : qty === 0 ? (
                   <button className="btn-secondary px-3" onClick={() => adjustQty(p.id, 1)}>+</button>

@@ -61,6 +61,52 @@ export function discountPctFor(gPrice, negotiatedPrice) {
   return Math.round(((gPrice - negotiatedPrice) / gPrice) * 100);
 }
 
+// R1-044: unambiguous "why is this price what it is" label. Keys mirror
+// PRICE_SOURCES/PRICE_SOURCE_LABELS in server/db.js exactly - a submitted
+// order/quote line's price_source is one of these; the live builder derives
+// the equivalent from the product's own syspro_pricing_tier/has_contract_price
+// fields (see priceSourceForLine below) before a price_source has ever been
+// stored anywhere.
+export const PRICE_SOURCE_LABELS = {
+  contract: 'Contract Price',
+  buying_group: 'Buying Group Price',
+  price_code: 'Price Code',
+  customer_price: 'Customer Price',
+  qty_break: 'Quantity Break',
+  g_price: 'G Price',
+  manual_override: 'Manual Override'
+};
+
+// Live-builder equivalent of the server's price_source, computed from the
+// same signals the product list already carries (syspro_pricing_tier /
+// has_contract_price / whether the line is riding a qty-break price) - used
+// before the line is actually submitted and gets a real, stored price_source.
+export function priceSourceForLine(product, unitPrice, { overridden = false } = {}) {
+  if (overridden) return 'manual_override';
+  if (product.syspro_pricing_tier === 'syspro_contract') return 'contract';
+  if (product.syspro_pricing_tier === 'syspro_buying_group') return 'buying_group';
+  if (product.syspro_pricing_tier === 'syspro_price_code') return 'price_code';
+  // has_contract_price with no SYSPRO tier is RouteOne's own customer_prices
+  // table (see products.routes.js) - a different mechanism from any SYSPRO
+  // tier, so it gets its own label rather than being lumped in as "contract".
+  if (!product.syspro_pricing_tier && product.has_contract_price === 1) return 'customer_price';
+  if (unitPrice < gPriceFor(product)) return 'qty_break';
+  return 'g_price';
+}
+
+const PRICE_SOURCE_COLORS = {
+  contract: 'text-emerald-600', buying_group: 'text-blue-600', price_code: 'text-purple-600',
+  customer_price: 'text-emerald-600', qty_break: 'text-emerald-600', g_price: 'text-slate-400', manual_override: 'text-amber-600'
+};
+
+// R1-044: the single badge used everywhere a price's source needs labelling
+// (product picker, cart line) - one place so the wording/colour can never
+// drift between the two.
+export function PriceSourceBadge({ source, className = '' }) {
+  if (!source || !PRICE_SOURCE_LABELS[source]) return null;
+  return <span className={`${PRICE_SOURCE_COLORS[source]} ${className}`}>{PRICE_SOURCE_LABELS[source]}</span>;
+}
+
 export default function NewOrderModal({ customerId, kind = 'order', onClose, onSaved }) {
   const { user } = useAuth();
   // R1-026: price/discount editing is only for office/manager/admin - matches
@@ -86,7 +132,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [showSummary, setShowSummary] = useState(false); // review screen before final submit
-  const [createdOrder, setCreatedOrder] = useState(null); // order just created, show send modal
+  const [createdOrder, setCreatedOrder] = useState(null); // order/quote just created - drives the confirmation screen
   const [showSendModal, setShowSendModal] = useState(false);
   // R1-026: which cart line (by product id) currently has its price/discount
   // editor open, if any. Only one at a time - keeps the UI simple and avoids
@@ -196,13 +242,47 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
         customer_order_no: kind === 'quote' ? undefined : customerOrderNo || null,
         delivery_instructions: kind === 'quote' ? undefined : delivery || null
       });
+      // Setting createdOrder alone is enough to switch to the confirmation
+      // screen (see the render branch above) - busy is left true rather than
+      // reset, since this component is about to stop rendering the review
+      // screen's Submit button entirely.
       setCreatedOrder(result);
-      setShowSendModal(true);
     } catch (err) {
       setError(err.message);
       setBusy(false);
     }
   };
+
+  // R1-029/030: shown the instant the order/quote actually exists server-side,
+  // regardless of what screen (builder or review) the rep was on when the
+  // request resolved - previously nothing rendered this state at all (see the
+  // git history on this file for the frozen-"Submitting..." bug that left the
+  // rep unable to tell the order had, in fact, already been created).
+  if (createdOrder) return (
+    <Modal key="confirmation" title={`${kind === 'quote' ? 'Quote' : 'Order'} submitted`}
+      onClose={() => { setCreatedOrder(null); onSaved(); }}>
+      <div className="py-6 text-center">
+        <div className="text-4xl">✅</div>
+        <div className="mt-3 text-2xl font-bold text-slate-800">{createdOrder.number}</div>
+        <div className="mt-1 text-sm text-slate-500">{fmtR(createdOrder.total)} incl. VAT</div>
+      </div>
+      <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
+        <button className="btn-secondary" onClick={() => { setCreatedOrder(null); onSaved(); }}>Done</button>
+        <button className="btn-primary" onClick={() => setShowSendModal(true)}>Send by email</button>
+      </div>
+      {showSendModal && (
+        <OrderSendModal
+          order={createdOrder}
+          kind={kind}
+          // orders carry their own warehouse_id; quotes don't (see schema.sql)
+          // so it comes from the customer instead.
+          warehouseId={kind === 'quote' ? selectedCustomer?.warehouse_id : createdOrder.warehouse_id}
+          onClose={() => setShowSendModal(false)}
+          onSent={() => { setShowSendModal(false); setCreatedOrder(null); onSaved(); }}
+        />
+      )}
+    </Modal>
+  );
 
   if (showSummary) return (
     // key forces a remount on entering the review screen - without it, React
@@ -257,7 +337,10 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
               qty,
               uom: l.product.uom,
               discount_pct: discount,
-              line_total: round2(qty * unitPrice * (1 - discount / 100))
+              line_total: round2(qty * unitPrice * (1 - discount / 100)),
+              price_source: priceSourceForLine(l.product, unitPrice, {
+                overridden: l.price_override != null && l.price_override !== ''
+              })
             };
           })}
           customer={selectedCustomer || { name: 'Customer', contact_name: '', address: '', city: '' }}
@@ -330,16 +413,19 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
             </div>
             <input className="input" placeholder="Search by name or code..." value={search} onChange={(e) => setSearch(e.target.value)} />
             <div className="mt-1 card p-0 max-h-64 overflow-y-auto">
-              {filtered.map((p) => (
-                <button key={p.id} disabled={!!p.discontinued}
-                  title={p.discontinued ? 'Discontinued in SYSPRO — cannot be ordered' : undefined}
+              {filtered.map((p) => {
+                const blocked = !!p.discontinued || !!p.no_price;
+                return (
+                <button key={p.id} disabled={blocked}
+                  title={p.discontinued ? 'Discontinued in SYSPRO — cannot be ordered' : p.no_price ? 'No price set in SYSPRO — cannot be ordered' : undefined}
                   className={`flex w-full items-center justify-between border-b border-slate-100 px-4 py-2.5 text-left text-sm ${
-                    p.discontinued ? 'cursor-not-allowed bg-red-50/50 opacity-60' : 'hover:bg-slate-50'}`}
-                  onClick={() => { if (!p.discontinued) addLine(p); }}>
+                    blocked ? 'cursor-not-allowed bg-red-50/50 opacity-60' : 'hover:bg-slate-50'}`}
+                  onClick={() => { if (!blocked) addLine(p); }}>
                   <span>
-                    <span className={`font-medium ${p.discontinued ? 'text-red-700 line-through' : ''}`}>{p.name}</span>
+                    <span className={`font-medium ${blocked ? 'text-red-700 line-through' : ''}`}>{p.name}</span>
                     {p.discontinued && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">discontinued</span>}
-                    {!p.discontinued && p.times_bought > 0 && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">bought {p.times_bought}x</span>}
+                    {!p.discontinued && p.no_price && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">no price set</span>}
+                    {!blocked && p.times_bought > 0 && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">bought {p.times_bought}x</span>}
                     {/* R1-024: SYSPRO's own selling-unit UOM, shown before the
                         rep picks the product, not only after it's been added. */}
                     <span className="ml-2 text-xs text-slate-400">{p.code} · {p.uom || 'each'} · stock {p.stock_qty}</span>
@@ -347,10 +433,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
                   <span className="text-right">
                     <span className="font-medium">
                       {fmtR(p.effective_price)}
-                      {p.syspro_pricing_tier === 'syspro_contract' && <span className="ml-1 text-xs text-emerald-600">contract</span>}
-                      {p.syspro_pricing_tier === 'syspro_buying_group' && <span className="ml-1 text-xs text-blue-600">buying group</span>}
-                      {p.syspro_pricing_tier === 'syspro_price_code' && <span className="ml-1 text-xs text-purple-600">price code</span>}
-                      {!p.syspro_pricing_tier && p.has_contract_price === 1 && <span className="ml-1 text-xs text-emerald-600">contract</span>}
+                      <PriceSourceBadge className="ml-1 text-xs" source={priceSourceForLine(p, p.effective_price)} />
                     </span>
                     {kgPriceFor(p, p.effective_price) != null && (
                       <div className="text-xs text-slate-400">{fmtR(kgPriceFor(p, p.effective_price))}/kg</div>
@@ -369,7 +452,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
                     })()}
                   </span>
                 </button>
-              ))}
+              );})}
               {filtered.length === 0 && (
                 <div className="px-4 py-3 text-sm text-slate-400">
                   {filterMode === 'bought' ? 'No purchase history — switch to "All products".' : 'No products match.'}
@@ -396,15 +479,12 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
                         <div className="truncate text-sm font-medium">{l.product.name}</div>
                         <div className="text-xs text-slate-400">
                           {fmtR(price)} / {l.product.uom}
-                          {l.price_override != null && l.price_override !== '' && (
-                            <span className="ml-1 font-medium text-amber-600">edited</span>
-                          )}
+                          {' '}
+                          <PriceSourceBadge className="font-medium" source={priceSourceForLine(l.product, price, {
+                            overridden: l.price_override != null && l.price_override !== ''
+                          })} />
                           {discount > 0 && <span className="ml-1 font-medium text-amber-600">-{discount}%</span>}
                           {kgPrice != null && <span className="ml-1">({fmtR(kgPrice)}/kg)</span>}
-                          {price < l.product.effective_price && <span className="ml-1 text-emerald-600">qty break</span>}
-                          {l.product.syspro_pricing_tier === 'syspro_contract' && <span className="ml-1 text-emerald-600">contract</span>}
-                          {l.product.syspro_pricing_tier === 'syspro_buying_group' && <span className="ml-1 text-blue-600">buying group</span>}
-                          {l.product.syspro_pricing_tier === 'syspro_price_code' && <span className="ml-1 text-purple-600">price code</span>}
                           {l.product.syspro_pricing_tier && (() => {
                             const g = gPriceFor(l.product);
                             const pct = discountPctFor(g, l.product.effective_price);
@@ -470,23 +550,6 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
             )}
           </div>
         </>
-      )}
-
-      {showSendModal && createdOrder && (
-        <OrderSendModal
-          order={createdOrder}
-          kind={kind}
-          onClose={() => {
-            setShowSendModal(false);
-            setCreatedOrder(null);
-            onSaved(); // Close the entire modal after sending
-          }}
-          onSent={() => {
-            setShowSendModal(false);
-            setCreatedOrder(null);
-            onSaved(); // Close the entire modal after sending
-          }}
-        />
       )}
     </Modal>
   );

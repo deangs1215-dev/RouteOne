@@ -158,6 +158,12 @@ router.post('/quotes', (req, res) => {
       const officeOverrode = !scopeForUser(req.user).isRep && item.unit_price != null;
       const unitPrice = officeOverrode ? requestedPrice : effectivePrice(b.customer_id, product.id, qty);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid unit price');
+      // R1-016: see the matching guard in orders.routes.js - SYSPRO has no
+      // price for this product, block it the same way a discontinued product
+      // is blocked.
+      if (!officeOverrode && unitPrice === 0) {
+        throw new Error(`${product.name} has no price set in SYSPRO and cannot be quoted`);
+      }
       const lineTotal = round2(qty * unitPrice);
       subtotal += lineTotal;
       const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : effectivePriceSource(b.customer_id, product.id, qty);
@@ -185,6 +191,15 @@ router.post('/quotes', (req, res) => {
           const draft = buildQuoteEmail(quoteId);
           if (b.send_to_rep !== true) draft.cc_addr = null;
           sendEmail(draft).catch((e) => console.error('Quote email failed:', e.message));
+        } else if (b.send_to_rep === true) {
+          // See the matching fix in orders.routes.js - "Send a copy to me" was
+          // only ever honoured as a CC on the customer email, so it silently
+          // did nothing whenever the customer wasn't also being emailed.
+          const repDraft = buildQuoteEmail(quoteId);
+          if (repDraft.cc_addr) {
+            sendEmail({ ...repDraft, cc_addr: null, to_addr: repDraft.cc_addr })
+              .catch((e) => console.error('Rep copy email failed:', e.message));
+          }
         }
         if (isEmail(b.extra_email)) {
           sendEmail({ ...buildQuoteEmail(quoteId), cc_addr: null, to_addr: b.extra_email.trim() })

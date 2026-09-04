@@ -167,6 +167,13 @@ function createOrder(user, b, res) {
       const officeOverrode = !scopeForUser(user).isRep && item.unit_price != null;
       const unitPrice = officeOverrode ? requestedPrice : effectivePrice(b.customer_id, product.id, qty);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid unit price');
+      // R1-016: SYSPRO has no price at all for this product (list_price and
+      // every pricing tier are 0/null) - block the line the same way a
+      // discontinued product is blocked, so a rep can't submit a free order.
+      // Office can still override with a manually-typed price.
+      if (!officeOverrode && unitPrice === 0) {
+        throw new Error(`${product.name} has no price set in SYSPRO and cannot be ordered`);
+      }
       const discount = scopeForUser(user).isRep
         ? 0
         : (item.discount_pct == null ? 0 : Number(item.discount_pct));
@@ -205,6 +212,17 @@ function createOrder(user, b, res) {
           const confirmDraft = buildOrderConfirmationEmail(orderId);
           if (b.send_to_rep !== true) confirmDraft.cc_addr = null;
           sendEmail(confirmDraft).catch((e) => console.error('Confirmation email failed:', e.message));
+        } else if (b.send_to_rep === true) {
+          // R1: "Send a copy to me" was only ever honoured as a CC on the
+          // customer email above - if the rep didn't also tick "Customer" (or
+          // the customer has no email, or customer confirmations are switched
+          // off), ticking this box silently did nothing. Send the rep their
+          // own copy directly in that case, not as a CC.
+          const repDraft = buildOrderConfirmationEmail(orderId);
+          if (repDraft.cc_addr) {
+            sendEmail({ ...repDraft, cc_addr: null, to_addr: repDraft.cc_addr })
+              .catch((e) => console.error('Rep copy email failed:', e.message));
+          }
         }
         // Extra ad-hoc recipient the rep typed in on the capture screen.
         if (isEmail(b.extra_email)) {
