@@ -42,12 +42,12 @@ export default function ChangePassword() {
         </div>
         <div>
           <label className="label">New password</label>
-          <input className="input" type="password" minLength={12} maxLength={128} autoComplete="new-password"
+          <input className="input" type="password" minLength={9} maxLength={128} autoComplete="new-password"
             value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />
         </div>
         <div>
           <label className="label">Confirm new password</label>
-          <input className="input" type="password" minLength={12} maxLength={128} autoComplete="new-password"
+          <input className="input" type="password" minLength={9} maxLength={128} autoComplete="new-password"
             value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required />
         </div>
         <button className="btn-primary w-full" disabled={busy}>

@@ -131,7 +131,7 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
         <Field label="Email"><input className="input" type="email" value={form.email} onChange={set('email')} required /></Field>
         <Field label="Phone"><input className="input" value={form.phone} onChange={set('phone')} /></Field>
         <Field label={u ? 'New password (leave blank to keep)' : 'Password'}>
-          <input className="input" type="password" minLength={12} maxLength={128}
+          <input className="input" type="password" minLength={9} maxLength={128}
             value={form.password} onChange={set('password')} required={!u} />
         </Field>
         <Field label="Role">

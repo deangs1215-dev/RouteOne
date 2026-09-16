@@ -295,4 +295,43 @@ router.get('/my-day', (req, res) => {
   res.json(buildDaySummary(repId, date));
 });
 
+// Edit a planned visit (change date, purpose, notes)
+router.put('/visits/:id', (req, res) => {
+  const visit = db.prepare('SELECT * FROM visits WHERE id = ?').get(req.params.id);
+  if (!visit) return res.status(404).json({ error: 'Visit not found' });
+
+  const scope = scopeForUser(req.user);
+  if (scope.isRep && visit.rep_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your visit' });
+  }
+  if (!userCanAccessCustomer(req.user, visit.customer_id)) {
+    return res.status(403).json({ error: 'Not your customer' });
+  }
+
+  const b = req.body || {};
+  const oldPlannedDate = visit.planned_date;
+  const newPlannedDate = b.planned_date || visit.planned_date;
+
+  // Update the visit
+  db.prepare(`
+    UPDATE visits SET
+      planned_date = ?,
+      purpose = ?,
+      notes = ?,
+      updated_at = datetime('now')
+    WHERE id = ?
+  `).run(newPlannedDate, b.purpose || visit.purpose, b.notes !== undefined ? b.notes : visit.notes, req.params.id);
+
+  // If date changed, log the reschedule
+  if (oldPlannedDate !== newPlannedDate && b.reschedule_reason !== undefined) {
+    db.prepare(`
+      INSERT INTO visit_reschedules (visit_id, from_date, to_date, reason, rescheduled_by)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(req.params.id, oldPlannedDate, newPlannedDate, b.reschedule_reason || null, req.user.id);
+  }
+
+  logActivity(req.user.id, 'edit', 'visit', req.params.id);
+  res.json(db.prepare('SELECT * FROM visits WHERE id = ?').get(req.params.id));
+});
+
 export default router;

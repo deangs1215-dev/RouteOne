@@ -12,8 +12,16 @@ if (!secret) {
 }
 export const JWT_SECRET = secret;
 
+// `v` is the user's token_version. Bumping that column (password reset, password
+// change, admin-set password) makes every token issued before the bump fail the
+// check in requireAuth - without it a stolen session stayed valid for its full
+// 12 hours after the victim reset their password, which defeats the reset.
 export function signToken(user) {
-  return jwt.sign({ id: user.id, role: user.role_name }, JWT_SECRET, { expiresIn: '12h' });
+  return jwt.sign(
+    { id: user.id, role: user.role_name, v: user.token_version ?? 0 },
+    JWT_SECRET,
+    { expiresIn: '12h' }
+  );
 }
 
 function cookieValue(req, name) {
@@ -67,6 +75,17 @@ export function requireAuth(req, res, next) {
       WHERE u.id = ? AND u.active = 1
     `).get(payload.id);
     if (!user) return res.status(401).json({ error: 'User not found or deactivated' });
+    // Tokens issued before the account's password last changed are dead. A token
+    // predating the column has no `v` and reads as 0, matching the default, so
+    // existing sessions survive the migration until they expire on their own.
+    if ((payload.v ?? 0) !== (user.token_version ?? 0)) {
+      return res.status(401).json({ error: 'Session ended - please sign in again' });
+    }
+    // Deny-by-default on role: scopeForUser can only scope a role it recognises,
+    // so an unrecognised one is refused here rather than reaching a handler.
+    if (!KNOWN_ROLES.includes(user.role_name)) {
+      return res.status(403).json({ error: 'Your account role is not recognised - contact an administrator' });
+    }
     user.role = user.role_name; // alias: several handlers check req.user.role
     req.user = user;
     req.authSource = bearer ? 'bearer' : 'cookie';
@@ -84,12 +103,32 @@ export function requireRole(...roles) {
   };
 }
 
+const OFFICE_ROLES = ['admin', 'manager', 'office'];
+// Every role RouteOne knows how to scope. requireAuth refuses anything else.
+export const KNOWN_ROLES = [...OFFICE_ROLES, 'rep', 'customer'];
+
 // Reps only see their own customers, visits and orders; office roles see everything.
 export function scopeForUser(user) {
+  const isOffice = OFFICE_ROLES.includes(user.role_name);
   return {
-    isOffice: ['admin', 'manager', 'office'].includes(user.role_name),
-    isRep: user.role_name === 'rep'
+    isOffice,
+    // Deliberately "not office", not "=== 'rep'". Every caller is shaped
+    // `scope.isRep ? <own records only> : <everything>`, so a role matching
+    // neither test - the customer-portal login, or any role added later - fell
+    // through to the office branch and was handed the whole company's data.
+    // Defining it this way makes an unrecognised role scope DOWN to its own
+    // records (for a non-rep, nothing at all) instead of up.
+    isRep: !isOffice
   };
+}
+
+// Cost price is internal commercial data: what the company paid, and the margin
+// derivable from it. Office roles only - a rep sees selling prices. Applied at
+// the response, since the product queries select whole rows.
+export function withoutCostFields(user, row) {
+  if (scopeForUser(user).isOffice) return row;
+  const { cost_price, ...rest } = row;
+  return rest;
 }
 
 export function userCanAccessCustomer(user, customerId) {
@@ -99,7 +138,7 @@ export function userCanAccessCustomer(user, customerId) {
 }
 
 export function passwordIsStrong(password) {
-  if (typeof password !== 'string' || password.length < 12 || password.length > 128) return false;
+  if (typeof password !== 'string' || password.length < 9 || password.length > 128) return false;
   const normalized = password.trim().toLowerCase();
   return ![
     '123', '123456', 'admin123', 'demo123', 'password', 'password1',

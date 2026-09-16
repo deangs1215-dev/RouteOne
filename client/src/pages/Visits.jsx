@@ -18,6 +18,7 @@ export default function Visits() {
   const [showImport, setShowImport] = useState(false);
   const [showCycle, setShowCycle] = useState(false);
   const [viewPhotosVisit, setViewPhotosVisit] = useState(null);
+  const [editingVisit, setEditingVisit] = useState(null);
 
   const load = () => {
     const params = new URLSearchParams();
@@ -72,7 +73,15 @@ export default function Visits() {
                 <td className="td"><VisitStatusBadge status={v.status} /></td>
                 <td className="td text-slate-500">{v.outcome ? v.outcome.replace('_', ' ') : '—'}</td>
                 <td className="td">{v.order_count > 0 ? `🧾 ${v.order_count}` : '—'}</td>
-                <td className="td">
+                <td className="td space-x-2 flex items-center">
+                  {v.status === 'planned' && (
+                    <button
+                      onClick={() => setEditingVisit(v)}
+                      className="text-xs text-brand-600 hover:text-brand-700 hover:underline"
+                    >
+                      Edit
+                    </button>
+                  )}
                   <ViewPhotosButton visitId={v.id} customerName={v.customer_name} onView={() => setViewPhotosVisit(v)} />
                 </td>
               </tr>
@@ -82,6 +91,7 @@ export default function Visits() {
       </Card>
 
       {showPlan && <PlanVisitModal reps={reps} isRep={isRep} onClose={() => setShowPlan(false)} onSaved={() => { setShowPlan(false); load(); }} />}
+      {editingVisit && <EditVisitModal visit={editingVisit} onClose={() => setEditingVisit(null)} onSaved={() => { setEditingVisit(null); load(); }} />}
       {showCycle && (
         <CallCycleModal
           repId={repId ? Number(repId) : undefined}
@@ -171,6 +181,66 @@ function PlanVisitModal({ reps, isRep, onClose, onSaved }) {
         <div className="flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
           <button className="btn-primary">Plan visit</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function EditVisitModal({ visit, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    planned_date: visit.planned_date,
+    purpose: visit.purpose,
+    notes: visit.notes || '',
+    reschedule_reason: ''
+  });
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value });
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      await api.put(`/visits/${visit.id}`, form);
+      onSaved();
+    } catch (e) {
+      setError(e.message);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <Modal title="Edit planned visit" onClose={onClose}>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <ErrorNote error={error} />
+        <Field label="Date">
+          <input className="input" type="date" value={form.planned_date} onChange={set('planned_date')} required />
+        </Field>
+        <Field label="Purpose">
+          <select className="input" value={form.purpose} onChange={set('purpose')}>
+            <option>sales call</option><option>delivery follow-up</option><option>complaint</option><option>new customer intro</option>
+          </select>
+        </Field>
+        <Field label="Notes">
+          <textarea className="input" value={form.notes} onChange={set('notes')} rows={3} />
+        </Field>
+        {form.planned_date !== visit.planned_date && (
+          <Field label="Reason for rescheduling">
+            <textarea
+              className="input"
+              placeholder="Why was this visit rescheduled?"
+              value={form.reschedule_reason}
+              onChange={set('reschedule_reason')}
+              rows={2}
+            />
+          </Field>
+        )}
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button>
         </div>
       </form>
     </Modal>

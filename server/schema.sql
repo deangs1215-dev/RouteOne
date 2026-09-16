@@ -170,8 +170,21 @@ CREATE TABLE IF NOT EXISTS visits (
   check_out_lng REAL,
   notes TEXT,
   outcome TEXT,                           -- order / no_order / follow_up / other
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT
 );
+
+-- Track when planned visits are rescheduled and why
+CREATE TABLE IF NOT EXISTS visit_reschedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  visit_id INTEGER NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
+  from_date TEXT NOT NULL,
+  to_date TEXT NOT NULL,
+  reason TEXT,
+  rescheduled_by INTEGER NOT NULL REFERENCES users(id),
+  rescheduled_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_visit_reschedules_visit ON visit_reschedules(visit_id);
 
 -- Last known rep positions (pinged by the mobile app), for the live map.
 CREATE TABLE IF NOT EXISTS rep_locations (
