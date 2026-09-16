@@ -25,12 +25,13 @@ export default function Invoices() {
 
       <Card>
         {!rows ? <Spinner /> : (
-          <Table headers={['Number', 'Customer', 'Date', { label: 'Subtotal', align: 'right' }, { label: 'VAT', align: 'right' }, { label: 'Total', align: 'right' }]}
+          <Table headers={['Number', 'Customer', 'Account', 'Date', { label: 'Subtotal', align: 'right' }, { label: 'VAT', align: 'right' }, { label: 'Total', align: 'right' }]}
             empty={rows.length === 0 && 'No invoices found.'} emptyIcon="📋">
             {rows.map((inv) => (
               <tr key={inv.id} className="hover:bg-slate-50">
                 <td className="td font-medium"><Link className="hover:text-brand-600" to={`/invoices/${inv.id}`}>{inv.number}</Link></td>
                 <td className="td">{inv.customer_name || inv.customer_code}</td>
+                <td className="td text-slate-500 font-medium">{inv.customer_code}</td>
                 <td className="td text-slate-500">{fmtDate(inv.invoice_date)}</td>
                 <td className="td text-right text-slate-500">{fmtR(inv.subtotal)}</td>
                 <td className="td text-right text-slate-500">{fmtR(inv.vat_amount)}</td>
