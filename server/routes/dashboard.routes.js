@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db, logActivity, getLocalDateISO } from '../db.js';
 import { passwordIsStrong, requireRole, scopeForUser } from '../auth.js';
+import { sendEmail } from '../integration/email.js';
 import bcrypt from 'bcryptjs';
 
 const router = Router();
@@ -126,7 +127,7 @@ router.post('/users', requireRole('admin', 'manager'), (req, res) => {
     return res.status(400).json({ error: 'Name, email, password and role are required' });
   }
   if (!passwordIsStrong(b.password)) {
-    return res.status(400).json({ error: 'Password must be at least 12 characters and not commonly used' });
+    return res.status(400).json({ error: 'Password must be at least 9 characters, contain a capital letter and a number' });
   }
   if (req.user.role_name === 'manager' && Number(b.role_id) === adminRoleId()) {
     return res.status(403).json({ error: 'Only an admin can create admin users' });
@@ -152,7 +153,7 @@ router.put('/users/:id', requireRole('admin', 'manager'), (req, res) => {
     return res.status(403).json({ error: 'Only an admin can manage admin users' });
   }
   if (b.password && !passwordIsStrong(b.password)) {
-    return res.status(400).json({ error: 'Password must be at least 12 characters and not commonly used' });
+    return res.status(400).json({ error: 'Password must be at least 9 characters, contain a capital letter and a number' });
   }
   db.prepare(`
     UPDATE users SET name = ?, email = ?, phone = ?, role_id = ?, customer_id = ?, rep_code = ?, warehouse_id = ?, sales_target = ?, active = ?,
@@ -167,7 +168,9 @@ router.put('/users/:id', requireRole('admin', 'manager'), (req, res) => {
     req.params.id
   );
   if (b.password) {
-    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
+    // An admin setting someone's password is usually a response to that account
+    // being compromised or handed over, so it ends that user's live sessions too.
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, token_version = token_version + 1 WHERE id = ?')
       .run(bcrypt.hashSync(b.password, 12), req.params.id);
   }
   res.json({ ok: true });
@@ -199,6 +202,54 @@ router.delete('/users/:id', requireRole('admin', 'manager'), (req, res) => {
   }
   logActivity(req.user.id, 'delete', 'user', Number(req.params.id), { name: existing.name });
   res.json({ ok: true });
+});
+
+// Send login details email to a user with temporary password
+router.post('/users/:id/send-login-details', requireRole('admin', 'manager'), async (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  if (req.user.role_name === 'manager' && user.role_id === adminRoleId()) {
+    return res.status(403).json({ error: 'Only an admin can send login details to admin users' });
+  }
+
+  // Generate temporary password (9+ chars, capital letter, number)
+  const tempPassword = 'Welcome' + Math.random().toString(36).substring(2, 8).charAt(0).toUpperCase() + Math.floor(Math.random() * 90) + 1;
+
+  try {
+    // Update user with temp password and must_change_password flag
+    db.prepare(`
+      UPDATE users SET
+        password_hash = ?,
+        must_change_password = 1,
+        token_version = token_version + 1
+      WHERE id = ?
+    `).run(bcrypt.hashSync(tempPassword, 12), req.params.id);
+
+    // Send welcome email
+    const emailHtml = `
+      <p>Hello ${user.name},</p>
+      <p>Your RouteOne account has been created. You can now log in with the following credentials:</p>
+      <p><strong>Email:</strong> ${user.email}</p>
+      <p><strong>Temporary Password:</strong> ${tempPassword}</p>
+      <p>On your first login, you will be required to change your password to something more secure.</p>
+      <p><strong>Password requirements:</strong></p>
+      <ul>
+        <li>Minimum 9 characters</li>
+        <li>At least one capital letter (A-Z)</li>
+        <li>At least one number (0-9)</li>
+      </ul>
+      <p>Best regards,<br>RouteOne Team</p>
+    `;
+
+    await sendEmail(user.email, `Welcome to RouteOne - Your Login Details`, emailHtml);
+
+    logActivity(req.user.id, 'send', 'user-login-details', user.id, { name: user.name, email: user.email });
+    res.json({ ok: true, message: `Login details sent to ${user.email}` });
+  } catch (e) {
+    console.error('Failed to send login details email:', e);
+    res.status(500).json({ error: 'Failed to send email' });
+  }
 });
 
 // --- Monthly budgets ---

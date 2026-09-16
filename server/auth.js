@@ -139,6 +139,9 @@ export function userCanAccessCustomer(user, customerId) {
 
 export function passwordIsStrong(password) {
   if (typeof password !== 'string' || password.length < 9 || password.length > 128) return false;
+  const hasCapital = /[A-Z]/.test(password);
+  const hasNumber = /\d/.test(password);
+  if (!hasCapital || !hasNumber) return false;
   const normalized = password.trim().toLowerCase();
   return ![
     '123', '123456', 'admin123', 'demo123', 'password', 'password1',

@@ -12,10 +12,26 @@ export default function Users() {
   const [warehouses, setWarehouses] = useState([]);
   const [editing, setEditing] = useState(null); // null | 'new' | user row
   const [budgetsOpen, setBudgetsOpen] = useState(null); // null | user row with role info
+  const [sendingLoginDetails, setSendingLoginDetails] = useState(null); // user id being sent details to
+  const [sendMessage, setSendMessage] = useState(''); // success/error message
 
   const isAdmin = user.role === 'admin';
 
   const load = () => api.get('/users').then(setRows).catch(console.error);
+
+  const sendLoginDetails = async (userId) => {
+    setSendingLoginDetails(userId);
+    setSendMessage('');
+    try {
+      const result = await api.post(`/users/${userId}/send-login-details`, {});
+      setSendMessage(result.message || 'Login details sent successfully!');
+      setTimeout(() => setSendMessage(''), 3000);
+    } catch (e) {
+      setSendMessage('Error: ' + (e.message || 'Failed to send login details'));
+    }
+    setSendingLoginDetails(null);
+  };
+
   useEffect(() => {
     load();
     api.get('/roles').then(setRoles).catch(() => {});
@@ -40,6 +56,12 @@ export default function Users() {
         {isAdmin && <button className="btn-primary" onClick={() => setEditing('new')}>+ New user</button>}
       </div>
 
+      {sendMessage && (
+        <div className={`rounded-lg px-3 py-2 text-sm ${sendMessage.startsWith('Error') ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-green-50 text-green-700 border border-green-200'}`}>
+          {sendMessage}
+        </div>
+      )}
+
       <Card>
         {!rows ? <Spinner /> : (
           <Table headers={['Name', 'Email', 'Role', 'Code', 'Branch', 'Target', 'Status', '']} empty={rows.length === 0 && 'No users.'}>
@@ -52,7 +74,13 @@ export default function Users() {
                 <td className="td text-slate-500">{u.warehouse_name || '—'}</td>
                 <td className="td text-slate-500">{u.sales_target ? fmtR(u.sales_target) : '—'}</td>
                 <td className="td"><Badge color={u.active ? '#16a34a' : '#64748b'}>{u.active ? 'active' : 'inactive'}</Badge></td>
-                <td className="td text-right">
+                <td className="td text-right space-x-2">
+                  <button className="text-xs text-brand-600 hover:underline" onClick={(e) => {
+                    e.stopPropagation();
+                    sendLoginDetails(u.id);
+                  }}>
+                    Send login
+                  </button>
                   {u.role === 'rep' && (
                     <button className="text-xs text-brand-600 hover:underline" onClick={(e) => { e.stopPropagation(); setBudgetsOpen(u); }}>
                       budgets
