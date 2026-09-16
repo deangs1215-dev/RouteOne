@@ -28,6 +28,8 @@ import backupRoutes from './routes/backups.routes.js';
 import monitoringRoutes from './routes/monitoring.routes.js';
 import salesPushesRoutes from './routes/sales-pushes.routes.js';
 import draftsRoutes from './routes/drafts.routes.js';
+import supportRoutes from './routes/support.routes.js';
+import branchClockInRoutes from './routes/branch-clock-in.routes.js';
 import { startScheduler } from './integration/scheduler.js';
 import { startRepDigestScheduler } from './integration/repDigest.js';
 import { startBackupScheduler } from './backup.js';
@@ -45,7 +47,7 @@ const configuredOrigins = (process.env.APP_ORIGIN || '')
   .filter(Boolean);
 const allowedOrigins = new Set(configuredOrigins.length
   ? configuredOrigins
-  : ['http://localhost:4200', 'http://127.0.0.1:4200', 'http://localhost:5190', 'http://127.0.0.1:5190']);
+  : ['http://localhost:4200', 'http://127.0.0.1:4200', 'http://localhost:5190', 'http://127.0.0.1:5190', 'http://localhost:3000', 'http://127.0.0.1:3000']);
 if (process.env.NODE_ENV === 'production' && !configuredOrigins.length) {
   throw new Error('APP_ORIGIN is required in production');
 }
@@ -150,6 +152,8 @@ app.use('/api', backupRoutes);
 app.use('/api', monitoringRoutes);
 app.use('/api', salesPushesRoutes);
 app.use('/api', draftsRoutes);
+app.use('/api', supportRoutes);
+app.use('/api', branchClockInRoutes);
 app.use('/api', settingsRoutes);
 
 // Serve the built client in production. Vite fingerprints asset filenames, so
@@ -167,7 +171,22 @@ if (fs.existsSync(dist)) {
 
 app.use((err, req, res, next) => {
   console.error(err);
+  // A sync holding a write lock past better-sqlite3's busy_timeout (db.js) throws
+  // this instead of waiting forever - tell the rep to retry rather than showing
+  // a bare "Internal server error" for what is a transient, self-resolving state.
+  if (err.code === 'SQLITE_BUSY') {
+    return res.status(503).json({ error: 'Sync in progress - please try again in a few minutes' });
+  }
   res.status(500).json({ error: 'Internal server error' });
+});
+
+// Last-resort backstop. Node's default for an unhandled rejection is to exit,
+// which would take every logged-in rep offline for a fault in a background job
+// that has nothing to do with serving requests. Individual jobs still handle
+// their own errors - this only stops one that slipped through from ending the
+// process. Logged loudly so it is fixed at source rather than left to absorb.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection (server kept running):', reason);
 });
 
 export function startServer(port = process.env.API_PORT || 4200) {

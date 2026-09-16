@@ -1,8 +1,11 @@
 // Mobile-first rep app: today's route, customer list, order capture.
 // Works offline: data comes from the sync snapshot, writes queue in the outbox.
-// Light/dark toggle lives in the header (top right) on every screen; "dark"
-// is the corporate navy + brass palette, applied to the header/nav chrome
-// plus the Today and Customers screens.
+//
+// Appearance is chosen from the theme picker in the header (top right) - see
+// mobile/theme.jsx for the themes and index.css for what each one defines.
+// Converted screens style themselves from semantic tokens (bg-surface,
+// text-ink, bg-accent) and therefore work with any theme; the ones still
+// carrying a hardcoded per-palette copy are noted at their route below.
 import { useEffect, useState } from 'react';
 import { Routes, Route, NavLink, Link, Navigate, useNavigate } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime, getPosition, todayISO } from '../api';
@@ -13,8 +16,9 @@ import DatePicker from '../components/DatePicker';
 import CustomerTasksSheet from '../components/CustomerTasksSheet';
 import AddProspectModal from '../components/AddProspectModal';
 import AppIcon from '../components/AppIcon';
-import { onOfflineChange, getOutbox, flushOutbox, refreshSnapshot } from '../offline';
+import { onOfflineChange, getOutbox, flushOutbox, refreshSnapshot, describeOutboxItem, retryOutboxItem, discardOutboxItem } from '../offline';
 import { MobileThemeProvider, useMobileTheme } from './theme';
+import ThemePicker from './ThemePicker';
 import RepCustomer from './RepCustomer';
 import RepOrderCapture from './RepOrderCapture';
 import OrderDetail from './OrderDetail';
@@ -23,6 +27,7 @@ import FormDetail from './FormDetail';
 import Tasks from './Tasks';
 import RepStockCheck from './RepStockCheck';
 import MyCycle from './MyCycle';
+import BranchClockIn from './BranchClockIn';
 
 // `new Date('YYYY-MM-DD')` parses as UTC midnight, so formatting it back for
 // display can show the wrong day in timezones behind UTC. Building the Date
@@ -32,8 +37,14 @@ function localDateFromISO(iso) {
   return new Date(y, m - 1, d);
 }
 
+// R1-032/033: online/offline state plus per-item sync status for anything
+// queued while offline. The headline bar is always visible whenever there's
+// anything to report (offline, still syncing, or a failure needing
+// attention); tapping it expands the actual queue so a rep can tell exactly
+// which transaction hasn't reached the server, not just a count.
 function OfflineBanner() {
-  const [state, setState] = useState({ online: navigator.onLine, pending: getOutbox().length });
+  const [state, setState] = useState({ online: navigator.onLine, items: [], waiting: 0, syncing: 0, failed: 0, synced: 0, pending: getOutbox().length });
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     const off = onOfflineChange(setState);
@@ -41,14 +52,73 @@ function OfflineBanner() {
     return off;
   }, []);
 
-  if (state.online && state.pending === 0) return null;
+  if (state.online && state.pending === 0 && state.synced === 0) return null;
+  const headline = !state.online
+    ? <>📡 Offline — working from local data{state.pending > 0 && <>, {state.pending} pending sync</>}</>
+    : state.failed > 0
+      ? <>⚠ {state.failed} item{state.failed === 1 ? '' : 's'} failed to sync</>
+      : state.waiting + state.syncing > 0
+        ? <>⇅ Syncing {state.waiting + state.syncing} queued item{state.waiting + state.syncing === 1 ? '' : 's'}…</>
+        : <>✓ All changes synced</>;
+  const badge = {
+    failed: 'bg-red-100 text-red-700', syncing: 'bg-sky-100 text-sky-700',
+    synced: 'bg-emerald-100 text-emerald-700', pending: 'bg-slate-100 text-slate-600'
+  };
+  const statusLabel = { failed: 'Sync failed', syncing: 'Synchronising', synced: 'Synced', pending: 'Waiting to sync' };
+
   return (
-    <div className={`sticky top-0 z-30 px-4 py-2 text-center text-xs font-medium ${state.online ? 'bg-sky-600 text-white' : 'bg-slate-800 text-white'}`}>
-      {!state.online
-        ? <>📡 Offline — working from local data{state.pending > 0 && <>, {state.pending} pending sync</>}</>
-        : <>⇅ Syncing {state.pending} queued item{state.pending === 1 ? '' : 's'}…
-            <button className="ml-2 underline" onClick={flushOutbox}>retry now</button></>}
+    <div className={`sticky top-0 z-30 text-white ${!state.online ? 'bg-slate-800' : state.failed > 0 ? 'bg-red-700' : 'bg-sky-600'}`}>
+      <button type="button" className="flex w-full items-center justify-center gap-2 px-4 py-2 text-center text-xs font-medium" onClick={() => setExpanded((v) => !v)}>
+        {headline}
+        <span className="underline">{expanded ? 'hide' : 'details'}</span>
+      </button>
+      {expanded && (
+        <div className="max-h-56 overflow-y-auto border-t border-white/20 bg-white text-slate-700">
+          <div className="flex items-center justify-between border-b border-slate-100 px-3 py-1.5">
+            <span className="text-[11px] text-slate-400">{state.items.length} item{state.items.length === 1 ? '' : 's'} in the sync queue</span>
+            <button type="button" className="text-xs font-semibold text-brand-600 underline" onClick={flushOutbox} disabled={!state.online}>Sync now</button>
+          </div>
+          {state.items.length === 0 && <div className="p-3 text-xs text-slate-400">Nothing queued.</div>}
+          {state.items.map((item) => {
+            const status = item.status || 'pending';
+            return (
+              <div key={item.id} className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2 text-xs">
+                <div className="min-w-0">
+                  <div className="truncate font-medium">{describeOutboxItem(item)}</div>
+                  <div className="text-slate-400">{fmtDateTime(item.queued_at)}</div>
+                  {status === 'failed' && item.error && <div className="mt-0.5 text-red-600">{item.error}</div>}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className={`whitespace-nowrap rounded-full px-2 py-0.5 font-semibold ${badge[status]}`}>{statusLabel[status]}</span>
+                  {status === 'failed' && (
+                    <>
+                      <button type="button" className="text-brand-600 underline" onClick={() => retryOutboxItem(item.id)}>Retry</button>
+                      <button type="button" className="text-slate-400 underline" onClick={() => discardOutboxItem(item.id)}>Discard</button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
+  );
+}
+
+// R1-032: a small always-visible indicator (not just a banner that appears on
+// trouble) so a rep can positively confirm "yes, I'm online" at a glance, not
+// only find out they're offline once something already failed.
+function ConnectionDot() {
+  const [state, setState] = useState({ online: navigator.onLine, failed: 0 });
+  useEffect(() => onOfflineChange(setState), []);
+  const color = !state.online ? 'bg-slate-400' : state.failed > 0 ? 'bg-red-500' : 'bg-emerald-500';
+  const label = !state.online ? 'Offline' : state.failed > 0 ? 'Sync issue' : 'Online';
+  return (
+    <span className="flex items-center gap-1 text-[11px] font-medium" title={label}>
+      <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />
+      <span className="hidden sm:inline">{label}</span>
+    </span>
   );
 }
 
@@ -61,14 +131,17 @@ export default function MobileApp() {
 }
 
 function MobileAppShell() {
-  const { theme } = useMobileTheme();
+  const { isDark } = useMobileTheme();
   return (
-    <div className={`mx-auto flex min-h-screen max-w-md flex-col ${theme === 'dark' ? 'bg-slate-50' : 'bg-slate-100'}`}>
+    <div className="mx-auto flex min-h-screen max-w-md flex-col bg-app text-ink">
       <OfflineBanner />
       <div className="flex-1 pb-20">
         <Routes>
-          <Route path="/" element={theme === 'dark' ? <TodayDark /> : <Today />} />
-          <Route path="/customers" element={theme === 'dark' ? <CustomersDark /> : <RepCustomers />} />
+          {/* One Today for every theme - it reads its colours from the tokens.
+              Screens below still have a per-palette copy and pick by mood
+              until they are converted too. */}
+          <Route path="/" element={<Today />} />
+          <Route path="/customers" element={isDark ? <CustomersDark /> : <RepCustomers />} />
           <Route path="/customers/:id/order" element={<RepOrderCapture />} />
           <Route path="/customers/:id" element={<RepCustomer />} />
           <Route path="/orders/:id" element={<OrderDetail />} />
@@ -87,23 +160,31 @@ function MobileAppShell() {
 }
 
 function BottomNav() {
-  const { theme } = useMobileTheme();
   const items = [
     { to: '/mobile', label: 'Today', icon: 'today', end: true },
     { to: '/mobile/customers', label: 'Customers', icon: 'customers' },
     { to: '/mobile/orders', label: 'Orders', icon: 'orders' },
     { to: '/mobile/stock', label: 'Stock', icon: 'products' },
     { to: '/mobile/tasks', label: 'Tasks', icon: 'tasks' }
+    // Support is deliberately not here - logging a ticket lives on the main
+    // menu (desktop /support), not in the rep's field nav.
   ];
-  const dark = theme === 'dark';
   return (
-    <nav className={`fixed bottom-0 left-1/2 z-30 w-full max-w-md -translate-x-1/2 border-t ${dark ? 'border-corp-800 bg-corp-950' : 'border-slate-200 bg-white'}`}>
+    <nav className="fixed bottom-0 left-1/2 z-30 w-full max-w-md -translate-x-1/2 border-t border-line bg-chrome pb-[env(safe-area-inset-bottom,0px)]">
       <div className="grid grid-cols-5">
         {items.map((i) => (
           <NavLink key={i.to} to={i.to} end={i.end}
             className={({ isActive }) =>
-              `flex flex-col items-center gap-1 py-2 text-xs font-medium ${isActive ? (dark ? 'text-brass-400' : 'text-brand-600') : (dark ? 'text-slate-400' : 'text-slate-400')}`}>
-            <AppIcon name={i.icon} size={30} />{i.label}
+              `relative flex flex-col items-center gap-1 py-2 text-xs font-medium transition ${isActive ? 'text-accent' : 'text-faint'}`}>
+            {({ isActive }) => (
+              <>
+                {/* The reference marks the active tab with a short accent bar
+                    rather than a filled pill - it reads at a glance without
+                    crowding six tabs. */}
+                <span className={`absolute top-0 h-0.5 w-8 rounded-full transition ${isActive ? 'bg-accent' : 'bg-transparent'}`} />
+                <AppIcon name={i.icon} size={30} />{i.label}
+              </>
+            )}
           </NavLink>
         ))}
       </div>
@@ -111,20 +192,8 @@ function BottomNav() {
   );
 }
 
-// Sun/moon toggle button, shown top-right in the header on every screen.
-function ThemeToggle() {
-  const { theme, toggleTheme } = useMobileTheme();
-  return (
-    <button onClick={toggleTheme} className="text-lg leading-none" title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
-      {theme === 'dark' ? '☀️' : '🌙'}
-    </button>
-  );
-}
-
 export function MobileHeader({ title, back }) {
   const { user, logout } = useAuth();
-  const { theme } = useMobileTheme();
-  const dark = theme === 'dark';
   const [newDocs, setNewDocs] = useState(false);
 
   useEffect(() => {
@@ -133,28 +202,35 @@ export function MobileHeader({ title, back }) {
   }, [user.role]);
 
   return (
-    <header className={`sticky top-0 z-20 flex items-center justify-between border-b px-4 py-3 ${dark ? 'border-corp-800 bg-corp-950 text-white' : 'border-slate-200 bg-white'}`}>
-      <div className="flex items-center gap-2">
+    <header className="sticky top-0 z-20 flex items-center justify-between border-b border-line bg-chrome px-4 py-3 text-chrome-ink">
+      <div className="flex min-w-0 items-center gap-2">
         {back && (
-          <Link to={back} className="flex items-center gap-1 px-2 py-1 rounded-lg bg-red-600 text-white text-sm font-semibold hover:bg-red-700 transition">
+          <Link to={back} className="flex items-center gap-1 rounded-control bg-white/10 px-2 py-1 text-sm font-semibold transition active:scale-95">
             <span className="text-lg leading-none">←</span>
-            <span className="hidden sm:inline">Return Back</span>
+            <span className="hidden sm:inline">Back</span>
           </Link>
         )}
-        <h1 className="font-bold">{title}</h1>
+        {/* text-base, not text-lg: the header also carries the theme picker,
+            Main Menu and Sign out, and at 375px a larger title was being
+            truncated to an ellipsis before any of them gave up space. */}
+        <h1 className="app-title truncate text-base">{title}</h1>
       </div>
-      <div className="flex items-center gap-3">
-        <ThemeToggle />
+      <div className="flex shrink-0 items-center gap-2">
+        <ConnectionDot />
+        <ThemePicker />
         {user.role !== 'customer' && (
-          <Link to="/" className={`relative text-xs font-medium ${dark ? 'text-brass-400' : 'text-brand-600'}`}>
-            🖥️ Main Menu
+          <Link
+            to="/"
+            className="relative flex shrink-0 items-center gap-1 rounded-pill bg-accent px-2.5 py-1.5 text-xs font-semibold text-accent-ink transition active:scale-95"
+          >
+            🖥️ <span>Main Menu</span>
             {newDocs && (
-              <span className={`absolute -right-2.5 -top-2 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold leading-none text-yellow-300 ring-2 ${dark ? 'ring-corp-950' : 'ring-white'}`}
+              <span className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-bad text-[10px] font-bold leading-none text-white ring-2 ring-chrome"
                 title="New documents available">!</span>
             )}
           </Link>
         )}
-        <button onClick={logout} className={`text-xs ${dark ? 'text-slate-400' : 'text-slate-400'}`}>Sign out</button>
+        <button onClick={logout} className="shrink-0 text-xs text-chrome-ink/60">Sign out</button>
       </div>
     </header>
   );
@@ -165,7 +241,7 @@ export function MobileHeader({ title, back }) {
 // (permission denied, no signal), so a rep could go a whole day with no
 // anchor point for route optimisation and never know why. This captures a
 // fresh, high-accuracy reading on tap and shows clear success/failure state.
-function ClockInCard({ dark = false }) {
+function ClockInCard() {
   const [status, setStatus] = useState(undefined); // undefined = loading
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -205,37 +281,19 @@ function ClockInCard({ dark = false }) {
     ? new Date(status.recorded_at.replace(' ', 'T') + 'Z').toLocaleTimeString('en-ZA', { hour: '2-digit', minute: '2-digit' })
     : null;
 
-  if (dark) {
-    return (
-      <div className={`rounded-md border p-3 ${clockedIn ? 'border-emerald-700 bg-emerald-950/40' : 'border-corp-700 bg-corp-950'}`}>
-        {clockedIn ? (
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold text-emerald-400">✓ Clocked in{time ? ` at ${time}` : ''}</span>
-            <button onClick={clockIn} disabled={busy} className="text-xs text-slate-400 underline">{busy ? 'Updating…' : 'Refresh'}</button>
-          </div>
-        ) : (
-          <button onClick={clockIn} disabled={busy} className="w-full rounded-md bg-brass-500 px-4 py-2.5 text-sm font-semibold text-corp-950 disabled:opacity-60">
-            {busy ? 'Getting your location…' : '📍 Clock in'}
-          </button>
-        )}
-        {error && <div className="mt-2 text-xs text-red-400">{error}</div>}
-      </div>
-    );
-  }
-
   return (
-    <div className={`card p-3 ${clockedIn ? 'border border-emerald-200 bg-emerald-50' : ''}`}>
+    <div className={`card p-3 ${clockedIn ? 'bg-ok/10' : ''}`}>
       {clockedIn ? (
         <div className="flex items-center justify-between">
-          <span className="text-sm font-semibold text-emerald-700">✓ Clocked in{time ? ` at ${time}` : ''}</span>
-          <button onClick={clockIn} disabled={busy} className="text-xs text-brand-600 underline">{busy ? 'Updating…' : 'Refresh'}</button>
+          <span className="text-sm font-semibold text-ok">✓ Clocked in{time ? ` at ${time}` : ''}</span>
+          <button onClick={clockIn} disabled={busy} className="text-xs text-muted underline">{busy ? 'Updating…' : 'Refresh'}</button>
         </div>
       ) : (
         <button onClick={clockIn} disabled={busy} className="btn-primary w-full disabled:opacity-60">
           {busy ? 'Getting your location…' : '📍 Clock in'}
         </button>
       )}
-      {error && <div className="mt-2 text-xs text-red-600">{error}</div>}
+      {error && <div className="mt-2 text-xs text-bad">{error}</div>}
     </div>
   );
 }
@@ -265,54 +323,66 @@ function Today() {
       <MobileHeader title={`Hi ${user.name.split(' ')[0]} 👋`} />
       <div className="space-y-4 p-4">
         <ClockInCard />
+        <div className="card p-3"><BranchClockIn /></div>
 
-        {/* Date selector */}
-        <button
-          onClick={() => setShowDatePicker(true)}
-          className="w-full card p-3 text-center font-semibold text-slate-700 hover:bg-slate-50 transition"
-        >
-          📅 {dateStr}
-        </button>
+        {/* Date + call cycle sit side by side as pill controls, the way the
+            reference groups its quick actions. */}
+        {/* Quick actions as pill chips - fully rounded in the themes whose
+            references use chips, squarer in the ones that don't (--r-pill). */}
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={() => setShowDatePicker(true)}
+            className="flex items-center justify-center gap-2 rounded-pill border border-line bg-surface p-3 text-sm font-semibold text-ink shadow-card transition active:scale-[0.98]"
+          >
+            📅 <span className="truncate">{dateStr}</span>
+          </button>
+          <Link to="/mobile/cycle" className="flex items-center justify-center gap-2 rounded-pill border border-line bg-surface p-3 text-sm font-semibold text-ink shadow-card transition active:scale-[0.98]">
+            🗓️ My call cycle
+          </Link>
+        </div>
 
-        <Link to="/mobile/cycle" className="block w-full card p-3 text-center font-semibold text-slate-700 hover:bg-slate-50 transition">
-          🗓️ My call cycle
-        </Link>
-
+        {/* Headline metric: small muted label, oversized figure, progress to
+            target - the stat-card treatment from the reference dashboard. */}
         <div className="card p-4">
-          <div className="flex justify-between text-sm">
-            <span className="text-slate-500">Sales this month</span>
-            <span className="font-semibold">{fmtR(stats.sales_mtd)}</span>
+          <div className="flex items-start justify-between">
+            <div>
+              <div className="app-eyebrow">Sales this month</div>
+              <div className="app-title mt-1 text-3xl text-ink">{fmtR(stats.sales_mtd)}</div>
+            </div>
+            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-accent-soft text-accent">⚡</span>
           </div>
           {stats.target > 0 && (
             <>
-              <div className="mt-2 h-2 rounded-full bg-slate-100">
-                <div className="h-2 rounded-full bg-brand-500" style={{ width: `${pct}%` }} />
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-raised">
+                <div className="h-full rounded-full bg-accent transition-all" style={{ width: `${pct}%` }} />
               </div>
-              <div className="mt-1 text-xs text-slate-400">{Math.round(pct)}% of {fmtR(stats.target)} target</div>
+              <div className="mt-1.5 text-xs text-faint">{Math.round(pct)}% of {fmtR(stats.target)} target</div>
             </>
           )}
-          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-            <div><div className="text-lg font-bold">{stats.visits_done}</div><div className="text-xs text-slate-400">visits done</div></div>
-            <div><div className="text-lg font-bold">{stats.orders_today}</div><div className="text-xs text-slate-400">orders today</div></div>
-            <div><div className="text-lg font-bold">{fmtR(stats.sales_today)}</div><div className="text-xs text-slate-400">sales today</div></div>
+          {/* Label above figure, split by thin vertical rules - the bid-row
+              treatment from the Sneaker reference. */}
+          <div className="mt-4 grid grid-cols-3 divide-x divide-line border-t border-line pt-3 text-center">
+            <div className="px-1"><div className="app-eyebrow">Visits</div><div className="app-title mt-0.5 text-lg text-ink">{stats.visits_done}</div></div>
+            <div className="px-1"><div className="app-eyebrow">Orders</div><div className="app-title mt-0.5 text-lg text-ink">{stats.orders_today}</div></div>
+            <div className="px-1"><div className="app-eyebrow">Sales</div><div className="app-title mt-0.5 text-lg text-ink">{fmtR(stats.sales_today)}</div></div>
           </div>
         </div>
 
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-slate-600">Today's visits</h2>
-            <span className="text-xs text-slate-400">{visits.length} planned</span>
+            <h2 className="app-title text-sm text-ink">Today's visits</h2>
+            <span className="text-xs text-faint">{visits.length} planned</span>
           </div>
           <div className="space-y-2">
             {visits.map((v, i) => (
               <div key={v.id} className="card p-3">
                 <div className="flex items-center gap-3">
-                  <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${v.status === 'completed' ? 'bg-emerald-100 text-emerald-700' : 'bg-brand-600 text-white'}`}>
+                  <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold ${v.status === 'completed' ? 'bg-ok/15 text-ok' : 'bg-accent text-accent-ink'}`}>
                     {v.status === 'completed' ? '✓' : v.route_order || i + 1}
                   </div>
                   <Link to={`/mobile/customers/${v.customer_id}`} className="min-w-0 flex-1">
-                    <div className="truncate font-medium">{v.customer_name}{v.customer_code && <span className="ml-1 font-normal text-slate-400">({v.customer_code})</span>}</div>
-                    <div className="text-xs text-slate-400">{v.city} · {v.purpose}</div>
+                    <div className="app-title truncate text-sm text-ink">{v.customer_name}{v.customer_code && <span className="ml-1 font-normal normal-case tracking-normal text-faint">({v.customer_code})</span>}</div>
+                    <div className="text-xs text-faint">{v.city} · {v.purpose}</div>
                   </Link>
                   <div className="flex items-center gap-2">
                     {v.order_count > 0 && <span className="text-xs">🧾</span>}
@@ -321,7 +391,7 @@ function Today() {
                         href={`https://www.google.com/maps/dir/?api=1&destination=${v.customer_lat},${v.customer_lng}`}>🧭</a>
                     )}
                     {(v.status === 'completed' || v.status === 'in_progress') && (
-                      <button className="text-xs font-medium text-brand-600 underline" onClick={() => setVisitSummaryId(v.id)}>Details</button>
+                      <button className="text-xs font-medium text-accent underline" onClick={() => setVisitSummaryId(v.id)}>Details</button>
                     )}
                     <VisitStatusBadge status={v.status} />
                   </div>
@@ -330,12 +400,12 @@ function Today() {
                 {/* Task indicator — tap to Done / reschedule / add without leaving Today */}
                 <button
                   onClick={() => setTaskSheet({ customer_id: v.customer_id, customer_name: v.customer_name })}
-                  className={`mt-2 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs ${
+                  className={`mt-2 flex w-full items-center justify-between rounded-control px-3 py-2 text-left text-xs ${
                     v.overdue_task_count > 0
-                      ? 'bg-red-50 text-red-700'
+                      ? 'bg-bad/15 text-bad'
                       : v.open_task_count > 0
-                      ? 'bg-amber-50 text-amber-700'
-                      : 'bg-slate-50 text-slate-400'
+                      ? 'bg-warn/15 text-warn'
+                      : 'bg-raised text-faint'
                   }`}
                 >
                   {v.open_task_count > 0 ? (
@@ -359,7 +429,7 @@ function Today() {
                 {/* Sales AI alert indicator — tap through to the customer for the detail */}
                 {v.ai_alert_count > 0 && (
                   <Link to={`/mobile/customers/${v.customer_id}`}
-                    className="mt-1.5 flex w-full items-center justify-between rounded-lg bg-red-50 px-3 py-2 text-left text-xs text-red-700">
+                    className="mt-1.5 flex w-full items-center justify-between rounded-control bg-bad/15 px-3 py-2 text-left text-xs text-bad">
                     <span className="min-w-0 flex-1 truncate">
                       <span className="font-semibold">🤖 {v.ai_alert_count} AI alert{v.ai_alert_count > 1 ? 's' : ''}</span>
                       {v.top_ai_alert && <span className="ml-1 opacity-80">— {v.top_ai_alert.action}</span>}
@@ -370,9 +440,9 @@ function Today() {
               </div>
             ))}
             {visits.length === 0 && (
-              <div className="card p-6 text-center text-sm text-slate-400">
+              <div className="card p-6 text-center text-sm text-faint">
                 No visits planned for today.<br />
-                <Link to="/mobile/customers" className="mt-1 inline-block text-brand-600 font-medium">Browse customers →</Link>
+                <Link to="/mobile/customers" className="mt-1 inline-block font-medium text-accent">Browse customers →</Link>
               </div>
             )}
           </div>
@@ -388,145 +458,6 @@ function Today() {
         />
       )}
 
-      {taskSheet && (
-        <CustomerTasksSheet
-          customerId={taskSheet.customer_id}
-          customerName={taskSheet.customer_name}
-          onClose={() => setTaskSheet(null)}
-          onChanged={loadDay}
-        />
-      )}
-
-      {visitSummaryId && (
-        <Modal title="Visit details" onClose={() => setVisitSummaryId(null)}>
-          <VisitSummary visitId={visitSummaryId} />
-        </Modal>
-      )}
-    </>
-  );
-}
-
-// Dark-theme Today screen — same /my-day data, corporate navy + brass look.
-function TodayDark() {
-  const { user } = useAuth();
-  const [data, setData] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(null);
-  const [showDatePicker, setShowDatePicker] = useState(false);
-  const [taskSheet, setTaskSheet] = useState(null);
-  const [visitSummaryId, setVisitSummaryId] = useState(null); // visit tapped for details (notes, outcome, etc.)
-
-  const displayDate = selectedDate || todayISO();
-  const loadDay = () => api.get(`/my-day?date=${displayDate}`).then(setData).catch(console.error);
-
-  useEffect(() => { loadDay(); }, [displayDate]);
-
-  if (!data) return <><MobileHeader title="My day" /><Spinner /></>;
-  const { visits, stats } = data;
-  const pct = stats.target ? Math.min(100, (stats.sales_mtd / stats.target) * 100) : 0;
-  const dateStr = localDateFromISO(displayDate).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-
-  return (
-    <>
-      <MobileHeader title={`Good day, ${user.name.split(' ')[0]}`} />
-      <div className="space-y-4 p-4">
-        <ClockInCard dark />
-
-        <button
-          onClick={() => setShowDatePicker(true)}
-          className="w-full rounded-md border border-corp-700 bg-white px-4 py-3 text-left shadow-sm transition hover:border-brass-500"
-        >
-          <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">Schedule for</div>
-          <div className="mt-0.5 font-bold text-corp-900">{dateStr}</div>
-        </button>
-
-        <Link to="/mobile/cycle" className="block w-full rounded-md border border-corp-700 bg-white px-4 py-3 text-left shadow-sm transition hover:border-brass-500">
-          <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">Upcoming</div>
-          <div className="mt-0.5 font-bold text-corp-900">🗓️ My call cycle</div>
-        </Link>
-
-        <div className="rounded-md border border-corp-800 bg-corp-950 p-4 text-white shadow-sm">
-          <div className="flex items-baseline justify-between">
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">Sales this month</span>
-            <span className="text-lg font-bold text-brass-400">{fmtR(stats.sales_mtd)}</span>
-          </div>
-          {stats.target > 0 && (
-            <>
-              <div className="mt-2.5 h-1.5 rounded-full bg-corp-700">
-                <div className="h-1.5 rounded-full bg-brass-500" style={{ width: `${pct}%` }} />
-              </div>
-              <div className="mt-1 text-[11px] text-slate-400">{Math.round(pct)}% of {fmtR(stats.target)} monthly target</div>
-            </>
-          )}
-          <div className="mt-4 grid grid-cols-3 gap-2 border-t border-corp-700 pt-3 text-center">
-            <div><div className="text-base font-bold">{stats.visits_done}</div><div className="text-[10px] uppercase tracking-wide text-slate-400">Visits done</div></div>
-            <div><div className="text-base font-bold">{stats.orders_today}</div><div className="text-[10px] uppercase tracking-wide text-slate-400">Orders today</div></div>
-            <div><div className="text-base font-bold">{fmtR(stats.sales_today)}</div><div className="text-[10px] uppercase tracking-wide text-slate-400">Sales today</div></div>
-          </div>
-        </div>
-
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Scheduled visits</h2>
-            <span className="text-[11px] font-medium text-slate-400">{visits.length} planned</span>
-          </div>
-          <div className="space-y-2">
-            {visits.map((v, i) => (
-              <div key={v.id} className="rounded-md border border-slate-200 bg-white p-3 shadow-sm">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-corp-700 text-xs font-bold text-corp-900">
-                    {v.route_order || i + 1}
-                  </div>
-                  <Link to={`/mobile/customers/${v.customer_id}`} className="min-w-0 flex-1">
-                    <div className="truncate font-semibold text-corp-900">{v.customer_name}{v.customer_code && <span className="ml-1 font-normal text-slate-400">({v.customer_code})</span>}</div>
-                    <div className="text-xs text-slate-400">{v.city} · {v.purpose}</div>
-                  </Link>
-                  {(v.status === 'completed' || v.status === 'in_progress') && (
-                    <button className="text-xs font-medium text-corp-900 underline" onClick={() => setVisitSummaryId(v.id)}>Details</button>
-                  )}
-                  <VisitStatusBadge status={v.status} />
-                </div>
-
-                <button
-                  onClick={() => setTaskSheet({ customer_id: v.customer_id, customer_name: v.customer_name })}
-                  className={`mt-2 flex w-full items-center justify-between rounded px-3 py-2 text-left text-xs ${
-                    v.overdue_task_count > 0
-                      ? 'bg-red-50 text-red-700'
-                      : v.open_task_count > 0
-                      ? 'bg-amber-50 text-amber-700'
-                      : 'bg-slate-50 text-slate-400'
-                  }`}
-                >
-                  {v.open_task_count > 0
-                    ? <span>{v.open_task_count} open task{v.open_task_count === 1 ? '' : 's'}{v.overdue_task_count > 0 ? ` · ${v.overdue_task_count} overdue` : ''}</span>
-                    : <span>Add follow-up task</span>}
-                  <span className="font-semibold">›</span>
-                </button>
-
-                {v.ai_alert_count > 0 && (
-                  <Link to={`/mobile/customers/${v.customer_id}`}
-                    className="mt-1.5 flex w-full items-center justify-between rounded border border-brass-500/40 bg-corp-950/5 px-3 py-2 text-left text-xs text-corp-900">
-                    <span className="min-w-0 flex-1 truncate font-medium">
-                      {v.ai_alert_count} intelligence alert{v.ai_alert_count > 1 ? 's' : ''}
-                      {v.top_ai_alert && <span className="ml-1 font-normal text-slate-500">— {v.top_ai_alert.action}</span>}
-                    </span>
-                    <span className="ml-2 shrink-0 font-semibold">›</span>
-                  </Link>
-                )}
-              </div>
-            ))}
-            {visits.length === 0 && (
-              <div className="rounded-md border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-400">
-                No visits scheduled for this date.<br />
-                <Link to="/mobile/customers" className="mt-1 inline-block font-semibold text-corp-900 underline">Browse customers →</Link>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {showDatePicker && (
-        <DatePicker value={displayDate} onChange={setSelectedDate} onClose={() => setShowDatePicker(false)} label="Select date" />
-      )}
       {taskSheet && (
         <CustomerTasksSheet
           customerId={taskSheet.customer_id}
@@ -713,6 +644,10 @@ function RepOrders() {
 
   const resumeDraft = (d) => {
     if (d.kind === 'form') navigate(`/mobile/customers/${d.customer_id}?formDraft=${d.id}`);
+    // A visit draft just tracks notes typed during an open visit - there's
+    // nothing separate to "resume", the customer page picks it back up itself
+    // (RepCustomer.jsx re-loads it once it sees the visit is still in_progress).
+    else if (d.kind === 'visit') navigate(`/mobile/customers/${d.customer_id}`);
     else navigate(`/mobile/customers/${d.customer_id}/order?kind=${d.kind}&draft=${d.id}`);
   };
 
@@ -722,7 +657,8 @@ function RepOrders() {
     setDrafts((ds) => ds.filter((d) => d.id !== id));
   };
 
-  const draftLabel = (d) => d.kind === 'form' ? (d.template_name || 'Form') : d.kind === 'quote' ? 'Quote' : 'Order';
+  const draftLabel = (d) => d.kind === 'form' ? (d.template_name || 'Form')
+    : d.kind === 'quote' ? 'Quote' : d.kind === 'visit' ? 'Visit notes' : 'Order';
 
   return (
     <>
@@ -736,17 +672,23 @@ function RepOrders() {
 
       {tab === 'orders' ? (
         <div className="p-4 space-y-2">
+          {/* R1-043: tappable through to full detail, same as every other
+              list in this app (customers, tasks, visits) - previously a
+              plain non-interactive card with no way to open the order. */}
           {!rows ? <Spinner /> : rows.map((o) => (
-            <div key={o.id} className="card p-3">
+            <Link key={o.id} to={`/mobile/orders/${o.id}`} className="card block p-3">
               <div className="flex items-center justify-between">
                 <span className="font-medium">{o.number}</span>
                 <OrderStatusBadge status={o.status} />
               </div>
               <div className="mt-0.5 flex items-center justify-between text-xs text-slate-400">
-                <span>{o.customer_name} · {fmtDateTime(o.order_date)}</span>
+                <span>
+                  {o.customer_name} · {fmtDateTime(o.order_date)}
+                  {o.customer_order_no && <> · their ref {o.customer_order_no}</>}
+                </span>
                 <span className="text-sm font-semibold text-slate-700">{fmtR(o.total)}</span>
               </div>
-            </div>
+            </Link>
           ))}
           {rows && rows.length === 0 && <div className="card"><EmptyState icon="🧾">No orders yet.</EmptyState></div>}
         </div>

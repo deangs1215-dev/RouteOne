@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS users (
   must_change_password INTEGER NOT NULL DEFAULT 1,
   reset_token_hash TEXT,
   reset_token_expires TEXT,
+  token_version INTEGER NOT NULL DEFAULT 0,  -- bumped on any password change; invalidates older JWTs (see auth.js)
   home_address TEXT,                      -- where the rep starts their day (home/office)
   home_lat REAL,
   home_lng REAL,
@@ -181,6 +182,16 @@ CREATE TABLE IF NOT EXISTS rep_locations (
   recorded_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_rep_locations_user ON rep_locations(user_id, recorded_at);
+
+CREATE TABLE IF NOT EXISTS branch_clock_ins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rep_id INTEGER NOT NULL REFERENCES users(id),
+  clock_in_at TEXT NOT NULL DEFAULT (datetime('now')),
+  clock_out_at TEXT,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_branch_clock_ins_rep ON branch_clock_ins(rep_id, clock_in_at DESC);
 
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -376,6 +387,13 @@ CREATE TABLE IF NOT EXISTS invoice_items (
   line_total REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
+-- "Previously bought" (products.routes.js for-customer) runs a correlated
+-- subquery per product filtered by product_id - without this index SQLite
+-- can't narrow invoice_items before evaluating the customer_id/
+-- delivery_customer_id OR check, so it scans the whole table once per
+-- product (272k+ rows x hundreds of products - multi-minute hang in
+-- production, confirmed 2026-09-07 timing a group-billed customer).
+CREATE INDEX IF NOT EXISTS idx_invoice_items_product ON invoice_items(product_id);
 -- NOTE: the index on delivery_customer_id is created in db.js's migration list,
 -- NOT here. schema.sql runs before those migrations and is not error-tolerant,
 -- so indexing a column that an existing database has not been migrated to yet
@@ -602,6 +620,31 @@ CREATE TABLE IF NOT EXISTS sales_pushes (
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Support tickets (Help Desk): any staff user logs an issue they're hitting.
+-- Admin/manager triage in the Support Tickets dashboard and move it through
+-- open -> in_progress -> resolved; the creator gets an email each time the
+-- status changes. customer_id/order_id are optional context, not required -
+-- most issues (login trouble, app bugs, general questions) aren't tied to
+-- either.
+CREATE TABLE IF NOT EXISTS support_tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  subject TEXT NOT NULL,
+  description TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'other',   -- system_issue / product_question / pricing / order_problem / customer_issue / other
+  priority TEXT NOT NULL DEFAULT 'normal',  -- low / normal / high / urgent
+  status TEXT NOT NULL DEFAULT 'open',      -- open / in_progress / resolved
+  customer_id INTEGER REFERENCES customers(id),
+  order_id INTEGER REFERENCES orders(id),
+  admin_notes TEXT,
+  resolved_by INTEGER REFERENCES users(id),
+  resolved_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_created_by ON support_tickets(created_by, status);
 
 CREATE INDEX IF NOT EXISTS idx_sales_pushes_active ON sales_pushes(active, created_at);
 
