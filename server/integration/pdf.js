@@ -101,19 +101,38 @@ export function buildDocumentPdf({ type, doc, items, company }) {
     pdf.text('TOTAL', cols.total, y + 7, { width: 67, align: 'right' });
     y += 22;
 
+    const drawTableHeader = () => {
+      pdf.rect(left, y, right - left, 22).fill(NAVY);
+      pdf.fillColor('#ffffff').fontSize(9.5).font('Helvetica-Bold');
+      pdf.text('PRODUCT', cols.product + 8, y + 7, { width: 250 });
+      pdf.text('QTY', cols.qty, y + 7, { width: 60, align: 'right' });
+      pdf.text('UNIT PRICE', cols.unit, y + 7, { width: 70, align: 'right' });
+      pdf.text('TOTAL', cols.total, y + 7, { width: 67, align: 'right' });
+      y += 22;
+    };
+
     pdf.font('Helvetica').fontSize(9.5).fillColor(NAVY);
+    const minSpaceForRow = 25;
+    const pageBottomMargin = 100;
+
     for (const it of items) {
       const name = `${it.product_name}`;
       const nameHeight = pdf.heightOfString(name, { width: 250 });
       const kgFactor = it.conv_factor_alt_uom || it.pack_weight_kg;
       const kgPrice = kgFactor > 0 ? it.unit_price / kgFactor : null;
-      // Order: just the product code. Quote: the full code, and the short
-      // code (its first 5 characters) on the line below.
       const codeLines = it.product_code
         ? (type === 'quote' ? [it.product_code, it.product_code.slice(0, 5)] : [it.product_code])
         : [];
       const codeHeight = codeLines.length * 10;
       const rowH = Math.max(20, nameHeight + codeHeight + 8, kgPrice != null ? 30 : 20);
+
+      // Check if we need a new page (keep at least minSpaceForRow + pageBottomMargin from bottom)
+      if (y + rowH > pdf.page.height - pageBottomMargin) {
+        y = 50;
+        pdf.addPage();
+        drawTableHeader();
+      }
+
       pdf.fillColor(NAVY).fontSize(9.5).text(name, cols.product + 8, y + 5, { width: 250 });
       let codeY = y + 5 + nameHeight + 2;
       pdf.fillColor(GREY).fontSize(7.5);
