@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS branch_clock_ins (
 );
 CREATE INDEX IF NOT EXISTS idx_branch_clock_ins_rep ON branch_clock_ins(rep_id, clock_in_at DESC);
 
+-- Tracks which branches/warehouses each manager is responsible for
+CREATE TABLE IF NOT EXISTS manager_warehouses (
+  manager_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+  PRIMARY KEY (manager_id, warehouse_id)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_warehouses_manager ON manager_warehouses(manager_id);
+
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   number TEXT UNIQUE NOT NULL,

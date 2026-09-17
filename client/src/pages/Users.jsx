@@ -112,14 +112,23 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
     customer_id: u?.customer_id || '',
     rep_code: u?.rep_code || '', warehouse_id: u?.warehouse_id || '',
     sales_target: u?.sales_target ?? 0, active: u?.active ?? 1,
-    home_address: u?.home_address || '', home_lat: u?.home_lat ?? '', home_lng: u?.home_lng ?? ''
+    home_address: u?.home_address || '', home_lat: u?.home_lat ?? '', home_lng: u?.home_lng ?? '',
+    manager_warehouses: u?.manager_warehouses || []
   });
   const [customers, setCustomers] = useState([]);
   const [error, setError] = useState('');
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
+  const toggleWarehouse = (warehouseId) => {
+    const updated = form.manager_warehouses.includes(warehouseId)
+      ? form.manager_warehouses.filter(id => id !== warehouseId)
+      : [...form.manager_warehouses, warehouseId];
+    setForm({ ...form, manager_warehouses: updated });
+  };
+
   const isCustomerRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'customer';
   const isRepRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'rep';
+  const isManagerRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'manager';
   useEffect(() => {
     if (isCustomerRole && customers.length === 0) api.get('/customers').then(setCustomers).catch(() => {});
   }, [isCustomerRole]);
@@ -187,6 +196,23 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
               <option value="">—</option>
               {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name} ({w.code})</option>)}
             </select>
+          </Field>
+        )}
+        {isManagerRole && (
+          <Field label="Manages branches">
+            <div className="space-y-2">
+              {warehouses.map((w) => (
+                <label key={w.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={form.manager_warehouses.includes(w.id)}
+                    onChange={() => toggleWarehouse(w.id)}
+                    className="rounded"
+                  />
+                  <span>{w.name} ({w.code})</span>
+                </label>
+              ))}
+            </div>
           </Field>
         )}
         <Field label="Monthly sales target (R)">

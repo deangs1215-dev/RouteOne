@@ -100,7 +100,7 @@ router.get('/dashboard', (req, res) => {
 // --- User admin (kept here to avoid a separate module for Phase 1) ---
 
 router.get('/users', requireRole('admin', 'manager'), (req, res) => {
-  res.json(db.prepare(`
+  const users = db.prepare(`
     SELECT u.id, u.name, u.email, u.phone, u.active, u.rep_code, u.sales_target, u.customer_id,
       u.warehouse_id, w.name AS warehouse_name,
       u.home_address, u.home_lat, u.home_lng,
@@ -109,7 +109,19 @@ router.get('/users', requireRole('admin', 'manager'), (req, res) => {
     LEFT JOIN customers c ON c.id = u.customer_id
     LEFT JOIN warehouses w ON w.id = u.warehouse_id
     ORDER BY u.name
-  `).all());
+  `).all();
+
+  // Load manager warehouses for each manager
+  const result = users.map(u => {
+    if (u.role === 'manager') {
+      u.manager_warehouses = db.prepare(`
+        SELECT warehouse_id FROM manager_warehouses WHERE manager_id = ?
+      `).all(u.id).map(mw => mw.warehouse_id);
+    }
+    return u;
+  });
+
+  res.json(result);
 });
 
 router.get('/roles', requireRole('admin', 'manager'), (req, res) => {
@@ -173,6 +185,23 @@ router.put('/users/:id', requireRole('admin', 'manager'), (req, res) => {
     db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, token_version = token_version + 1 WHERE id = ?')
       .run(bcrypt.hashSync(b.password, 12), req.params.id);
   }
+
+  // Handle manager warehouse assignments
+  const roleId = b.role_id ?? existing.role_id;
+  const roleInfo = db.prepare('SELECT name FROM roles WHERE id = ?').get(roleId);
+  if (roleInfo?.name === 'manager' && b.manager_warehouses) {
+    // Clear existing manager warehouse assignments
+    db.prepare('DELETE FROM manager_warehouses WHERE manager_id = ?').run(req.params.id);
+    // Add new ones
+    const stmt = db.prepare('INSERT INTO manager_warehouses (manager_id, warehouse_id) VALUES (?, ?)');
+    for (const warehouseId of b.manager_warehouses) {
+      stmt.run(req.params.id, warehouseId);
+    }
+  } else if (roleInfo?.name !== 'manager') {
+    // Clear manager warehouse assignments if no longer a manager
+    db.prepare('DELETE FROM manager_warehouses WHERE manager_id = ?').run(req.params.id);
+  }
+
   res.json({ ok: true });
 });
 
