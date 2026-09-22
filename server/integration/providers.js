@@ -109,33 +109,17 @@ const sysproProvider = {
     };
     const limit = limits[entity];
     if (!limit) throw new Error(`Unknown SYSPRO entity ${entity}`);
-    // Every view carries more columns than its upserter in sync.js actually reads
-    // - pulling all of them (SELECT *) across views that run into the hundreds of
-    // thousands or millions of rows wastes both the SYSPRO-side read and the TDS
-    // parsing on our end. Naming only the columns each upserter uses cuts the
-    // bytes moved and parsed without changing what gets synced. Kept in sync with
-    // each upsertX in sync.js - a column an upserter starts reading has to be
-    // added here too, or it will come through as undefined.
-    const columns = {
-      warehouses: ['code', 'name'],
-      customers: ['code', 'name', 'contact_name', 'phone', 'email', 'address', 'city',
-        'ship_to_name', 'ship_to_address', 'ship_to_city', 'ship_to_postcode',
-        'credit_limit', 'balance', 'payment_terms', 'warehouse_code', 'rep_code', 'on_hold'],
-      products: ['code', 'name', 'category', 'description', 'uom', 'pack_size',
-        'conv_factor_alt_uom', 'list_price', 'cost_price', 'discontinued'],
-      stock: ['code', 'warehouse_code', 'qty_available'],
-      invoices: ['number', 'customer_code', 'order_number', 'invoice_date', 'due_date',
-        'subtotal', 'vat_amount', 'total', 'amount_paid', 'balance', 'status'],
-      invoice_lines: ['invoice_number', 'product_code', 'delivery_customer_code', 'qty', 'unit_price', 'line_total'],
-      customer_pricing: ['customer_code', 'product_code', 'contract_price', 'buying_group_price',
-        'price_code_price', 'contract_start_date', 'contract_end_date',
-        'buying_group_start_date', 'buying_group_end_date'],
-      // Raw SYSPRO column names, unlike the others above - vw_FS_RepSalesByMonth
-      // doesn't alias them to RouteOne's naming (see matchRep's comment in sync.js).
-      rep_sales: ['CustomerBranch', 'Customer SalesPerson', 'TrnYear', 'TrnMonth', 'NSV'],
-      customer_sales: ['customer_code', 'trn_year', 'trn_month', 'nsv']
-    };
-    const selectList = columns[entity] ? columns[entity].map((c) => `[${c}]`).join(', ') : '*';
+    // Tried naming only the columns each upserter reads instead of SELECT * -
+    // reverted (2026-09-22). The documented view shape (docs/SYSPRO-DBA-VIEWS-
+    // HANDOVER.md) doesn't reliably match what's actually deployed on the
+    // SYSPRO box: customers.rep_code is documented but the live view doesn't
+    // have it, and naming a column that doesn't exist fails the WHOLE query
+    // ("Invalid column name") instead of just coming through as undefined the
+    // way SELECT * does. That broke customers/invoices sync in production.
+    // Without a reliable way to check the live view schema before every
+    // deploy, SELECT * is the safer default here even though it costs more
+    // bandwidth on the big views - a slow sync beats a broken one.
+    const selectList = '*';
     // Big views need far longer than the 60s default - customer_pricing alone
     // is millions of rows and has been measured at ~20 min on a good run, so
     // it gets 45 min of headroom for a busier SYSPRO box. Small reference
