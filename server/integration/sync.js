@@ -330,6 +330,15 @@ const CLEAR_BEFORE_SYNC = {
   }
 };
 
+// Entities worth sorting before upsert, keyed by their destination table's
+// primary key column pair - see the comment above where this is used in
+// runSync. Only customer_pricing is large enough for random-order upserts to
+// matter; every other entity is small enough (thousands of rows, not
+// millions) that a sort would just add overhead for no measurable gain.
+const SORT_KEYS = {
+  customer_pricing: ['customer_code', 'product_code']
+};
+
 // Order matters: customers reference warehouses; customer_pricing and invoices reference customers (and products).
 // invoice_lines must come after invoices (resolves invoice_number -> invoice_id).
 // Rep-to-warehouse assignment is managed manually in RouteOne (SalSalesperson branch data is
@@ -370,6 +379,20 @@ export async function runSync(entity) {
     const fetchStart = Date.now();
     const rows = await getProvider().fetch(entity);
     const fetchMs = Date.now() - fetchStart;
+    // customer_pricing arrives in SYSPRO view order, which has no relation to
+    // its (customer_code, product_code) primary key - upserting 4.47M rows in
+    // that order means each one likely lands on a different, uncached B-tree
+    // page. Sorting first turns that into a sequential scan through the
+    // index instead, so cache_size (see db.js) actually gets reused across
+    // consecutive rows rather than thrashing. Cheap relative to the write it
+    // is fixing: a JS sort of ~4.5M plain objects is seconds, not minutes.
+    if (SORT_KEYS[entity]) {
+      const [keyA, keyB] = SORT_KEYS[entity];
+      rows.sort((a, b) => {
+        const c = String(a[keyA]).localeCompare(String(b[keyA]));
+        return c !== 0 ? c : String(a[keyB]).localeCompare(String(b[keyB]));
+      });
+    }
     const writeStart = Date.now();
     let upserted = 0;
     let skipped = 0;

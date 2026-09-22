@@ -28,7 +28,15 @@ db.pragma('journal_mode = WAL');       // concurrent readers while one writer co
 db.pragma('foreign_keys = ON');
 db.pragma('synchronous = NORMAL');     // safe with WAL, much faster writes
 db.pragma('busy_timeout = 5000');      // wait (not error) if the DB is briefly write-locked
-db.pragma('cache_size = -20000');      // ~20MB page cache per connection
+// 256MB - was 20MB, which couldn't hold syspro_customer_pricing (4.47M rows)
+// plus its primary-key index. Rows arrive from SYSPRO in view order, not
+// primary-key order, so upserting them was a mostly-random-access pattern
+// against that table; with the working set far bigger than the cache, nearly
+// every upsert faulted out to disk. Measured on production: 4.47M rows took
+// 80 minutes to write (see [sync] log lines) against a sub-2-minute fetch -
+// that gap is this, not the write batching (already tuned - see BATCH_SIZE in
+// sync.js). Paired with sorting rows before upsert in runSync.
+db.pragma('cache_size = -262144');
 db.pragma('mmap_size = 268435456');    // 256MB memory-mapped I/O for faster reads
 db.pragma('wal_autocheckpoint = 1000');
 db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
@@ -80,10 +88,45 @@ for (const stmt of [
   'ALTER TABLE users ADD COLUMN documents_last_viewed_at TEXT',
   'ALTER TABLE users ADD COLUMN reset_token_hash TEXT',
   'ALTER TABLE users ADD COLUMN reset_token_expires TEXT',
+  // Bumped whenever a password changes, and carried in the JWT - see signToken
+  // in auth.js. Invalidates every session issued before the change, so a stolen
+  // token dies with the password reset rather than outliving it by 12 hours.
+  'ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0',
   'ALTER TABLE sync_runs ADD COLUMN rows_skipped INTEGER DEFAULT 0',
   // Existing rows predate the Orders/Technical split - they were all Orders
   // recipients (the only list that existed), so the default is correct for them.
-  "ALTER TABLE email_recipients ADD COLUMN category TEXT NOT NULL DEFAULT 'orders'"
+  "ALTER TABLE email_recipients ADD COLUMN category TEXT NOT NULL DEFAULT 'orders'",
+  // R1-044: which pricing tier produced a line's unit_price (see PRICE_SOURCES
+  // below) - stored at submit time so "why is this price what it is" can
+  // still be answered on an already-submitted order/quote, not just live in
+  // the builder. NULL on rows created before this column existed.
+  'ALTER TABLE order_items ADD COLUMN price_source TEXT',
+  'ALTER TABLE quote_items ADD COLUMN price_source TEXT',
+  // Branch-scoped order email recipients - NULL means "every branch" (kept
+  // for any existing recipient not yet assigned to one, and for a genuinely
+  // company-wide address like a general manager).
+  'ALTER TABLE email_recipients ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)',
+  // Ship-to address fields from SYSPRO ARCustomer
+  'ALTER TABLE customers ADD COLUMN ship_to_name TEXT',
+  'ALTER TABLE customers ADD COLUMN ship_to_address TEXT',
+  'ALTER TABLE customers ADD COLUMN ship_to_city TEXT',
+  'ALTER TABLE customers ADD COLUMN ship_to_postcode TEXT',
+  // Covering index for products.routes.js's "all pricing for this customer"
+  // lookup (WHERE customer_code = ?, the /products/for-customer/:id hot path
+  // reps hit on every order/quote capture). syspro_customer_pricing is a
+  // ~13M-row table; its PRIMARY KEY(customer_code, product_code) is a plain
+  // (non-WITHOUT ROWID) index, so a SELECT * against it does one extra
+  // random-access rowid lookup per matched row - scattered across a 1GB+
+  // table, that alone measured ~340ms cold-cache for one customer. Naming
+  // every selected column here lets SQLite satisfy the query straight from
+  // the index (COVERING INDEX in EXPLAIN QUERY PLAN, no rowid lookup at all)
+  // - measured ~1ms with this index in place. One-time build cost is the
+  // trade-off: expect it to take a while (tens of seconds locally; longer on
+  // a slower disk) the first time this runs against an existing 13M-row table.
+  `CREATE INDEX IF NOT EXISTS idx_pricing_customer_covering ON syspro_customer_pricing(
+    customer_code, product_code, contract_price, buying_group_price, price_code_price,
+    contract_start_date, contract_end_date, buying_group_start_date, buying_group_end_date
+  )`
 ]) {
   try { db.exec(stmt); } catch { /* column already exists */ }
 }
@@ -329,11 +372,43 @@ export function priceBreaks(product, rules = null) {
   return sorted;
 }
 
-// Effective unit price: customer contract price wins outright; otherwise the
-// best rule price for the quantity; otherwise list price * pack weight.
-export function effectivePrice(customerId, productId, qty = 1) {
+// R1-044: which tier actually produced a price, for the "why is this price
+// what it is" label shown to reps and printed onto order/quote lines. One
+// decision tree shared by effectivePrice() (price only, used everywhere
+// pricing is computed) and effectivePriceDetail() (price + source, used
+// where the source needs to be stored/displayed) - duplicating this logic
+// risks the two silently drifting apart on which price wins.
+//
+// PRICE_SOURCES values double as both the internal tag stored on order/quote
+// lines and (via PRICE_SOURCE_LABELS) the human label shown for it.
+export const PRICE_SOURCES = {
+  CONTRACT: 'contract',
+  BUYING_GROUP: 'buying_group',
+  PRICE_CODE: 'price_code',
+  CUSTOMER_PRICE: 'customer_price',
+  QTY_BREAK: 'qty_break',
+  G_PRICE: 'g_price',
+  MANUAL_OVERRIDE: 'manual_override'
+};
+
+export const PRICE_SOURCE_LABELS = {
+  [PRICE_SOURCES.CONTRACT]: 'Contract Price',
+  [PRICE_SOURCES.BUYING_GROUP]: 'Buying Group Price',
+  [PRICE_SOURCES.PRICE_CODE]: 'Price Code',
+  [PRICE_SOURCES.CUSTOMER_PRICE]: 'Customer Price',
+  [PRICE_SOURCES.QTY_BREAK]: 'Quantity Break',
+  [PRICE_SOURCES.G_PRICE]: 'G Price',
+  [PRICE_SOURCES.MANUAL_OVERRIDE]: 'Manual Override'
+};
+
+// Effective unit price and which tier produced it: SYSPRO contract price wins
+// outright, then SYSPRO buying-group, then SYSPRO price-code; otherwise a
+// RouteOne-side fixed customer price; otherwise the best qty-break rule price
+// for the quantity; otherwise list price * pack weight (G Price - SYSPRO's
+// normal selling price with no negotiated tier in play).
+function effectivePriceDetail(customerId, productId, qty = 1) {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
-  if (!product) return 0;
+  if (!product) return { price: 0, source: null };
   const customer = db.prepare('SELECT code FROM customers WHERE id = ?').get(customerId);
   if (customer) {
     const syspro = db.prepare(`
@@ -356,15 +431,32 @@ export function effectivePrice(customerId, productId, qty = 1) {
       // Rounded to cents for the same reason as productUnitPrice() above - this
       // is the actual contract/buying-group/price-code unit price a rep is
       // quoted and that gets multiplied by quantity on the order line.
-      if (perKgPrice != null) return round2(perKgPrice * (product.conv_factor_alt_uom || product.pack_weight_kg || 1));
+      if (perKgPrice != null) {
+        const source = contractPrice != null ? PRICE_SOURCES.CONTRACT
+          : groupPrice != null ? PRICE_SOURCES.BUYING_GROUP
+          : PRICE_SOURCES.PRICE_CODE;
+        return { price: round2(perKgPrice * (product.conv_factor_alt_uom || product.pack_weight_kg || 1)), source };
+      }
     }
   }
   const contract = db.prepare(
     'SELECT price FROM customer_prices WHERE customer_id = ? AND product_id = ?'
   ).get(customerId, productId);
-  if (contract) return contract.price;
+  if (contract) return { price: contract.price, source: PRICE_SOURCES.CUSTOMER_PRICE };
   const applicable = priceBreaks(product).filter((b) => qty >= b.min_qty);
-  return applicable.length ? applicable[applicable.length - 1].price : productUnitPrice(product);
+  if (applicable.length) {
+    const best = applicable[applicable.length - 1];
+    return { price: best.price, source: best.min_qty > 0 ? PRICE_SOURCES.QTY_BREAK : PRICE_SOURCES.G_PRICE };
+  }
+  return { price: productUnitPrice(product), source: PRICE_SOURCES.G_PRICE };
+}
+
+export function effectivePrice(customerId, productId, qty = 1) {
+  return effectivePriceDetail(customerId, productId, qty).price;
+}
+
+export function effectivePriceSource(customerId, productId, qty = 1) {
+  return effectivePriceDetail(customerId, productId, qty).source;
 }
 
 export function adjustOrderStock(orderId, direction) {
