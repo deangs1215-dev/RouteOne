@@ -14,15 +14,29 @@ const upsertWarehouse = (row) => {
 // Match a customer to a rep using warehouse code + rep code.
 // Rep codes aren't globally unique - the same code means different people
 // under different branches. SYSPRO uses Branch+Salesperson as the key.
+// Both sides are trimmed before comparing. SYSPRO's Branch and Salesperson are
+// fixed-width `char` columns, so they arrive space-padded ('24  '), while
+// import-reps.js trims rep_code/branch on the way in - so RouteOne holds '24'
+// and a bare `=` never matches. Every other SYSPRO view in docs/sql RTRIMs its
+// columns; vw_FS_RepSalesByMonth does not, which is why its sync was skipping
+// ~51% of rows (run 7233: 5922 read, 2891 upserted, 3031 skipped) and a skipped
+// row's NSV is dropped rather than credited to anyone - understating every
+// rep's monthly sales. Normalising here rather than only in the view means
+// RouteOne is not at the mercy of what a DBA-owned view happens to return.
+//
+// Trimming can only ever add matches, never remove one: two distinct codes
+// would have to differ by whitespace alone to collide.
 export const matchRep = (warehouseCode, repCode) => {
-  if (!warehouseCode || !repCode) return null;
-  // Look up the rep by matching warehouse code + rep code
+  const branch = String(warehouseCode ?? '').trim();
+  const code = String(repCode ?? '').trim();
+  if (!branch || !code) return null;
   const rep = db.prepare(`
     SELECT u.id FROM users u
     JOIN roles r ON r.id = u.role_id
     JOIN warehouses w ON w.id = u.warehouse_id
-    WHERE r.name = 'rep' AND u.active = 1 AND u.rep_code = ? AND w.code = ?
-  `).get(repCode, warehouseCode);
+    WHERE r.name = 'rep' AND u.active = 1
+      AND TRIM(u.rep_code) = ? AND TRIM(w.code) = ?
+  `).get(code, branch);
   return rep?.id ?? null;
 };
 
@@ -57,21 +71,25 @@ const upsertCustomer = (row) => {
     db.prepare(`
       UPDATE customers SET name = ?, contact_name = COALESCE(?, contact_name), phone = COALESCE(?, phone),
         email = COALESCE(?, email), address = COALESCE(?, address), city = COALESCE(?, city),
+        ship_to_name = COALESCE(?, ship_to_name), ship_to_address = COALESCE(?, ship_to_address),
+        ship_to_city = COALESCE(?, ship_to_city), ship_to_postcode = COALESCE(?, ship_to_postcode),
         credit_limit = ?, balance = ?, payment_terms = COALESCE(?, payment_terms),
         warehouse_id = COALESCE(?, warehouse_id),
         rep_id = COALESCE(?, rep_id),
         status = CASE WHEN status = 'closed' THEN 'closed' ELSE ? END
       WHERE id = ?
     `).run(row.name, row.contact_name, row.phone, row.email, row.address, row.city,
+      row.ship_to_name, row.ship_to_address, row.ship_to_city, row.ship_to_postcode,
       row.credit_limit ?? 0, row.balance ?? 0, row.payment_terms, warehouse?.id ?? null,
       repId, onHoldStatus, existing.id);
   } else {
     // A brand-new customer is auto-assigned to its matching rep on first sync.
     db.prepare(`
-      INSERT INTO customers (code, name, contact_name, phone, email, address, city, credit_limit, balance, payment_terms, warehouse_id, status, rep_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO customers (code, name, contact_name, phone, email, address, city, ship_to_name, ship_to_address, ship_to_city, ship_to_postcode, credit_limit, balance, payment_terms, warehouse_id, status, rep_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(row.code, row.name, row.contact_name || null, row.phone || null, row.email || null,
-      row.address || null, row.city || null, row.credit_limit ?? 0, row.balance ?? 0,
+      row.address || null, row.city || null, row.ship_to_name || null, row.ship_to_address || null,
+      row.ship_to_city || null, row.ship_to_postcode || null, row.credit_limit ?? 0, row.balance ?? 0,
       row.payment_terms || '30 days', warehouse?.id ?? null, onHoldStatus, repId);
   }
 };
@@ -189,7 +207,7 @@ const upsertCustomerPricing = (row) => {
       buying_group_end_date = excluded.buying_group_end_date,
       synced_at = datetime('now')
   `).run(
-    row.customer_code, row.product_code,
+    toSafeValue(row.customer_code), toSafeValue(row.product_code),
     toSafeValue(row.contract_price), toSafeValue(row.buying_group_price), toSafeValue(row.price_code_price),
     toSafeValue(row.contract_start_date), toSafeValue(row.contract_end_date),
     toSafeValue(row.buying_group_start_date), toSafeValue(row.buying_group_end_date)
@@ -266,10 +284,25 @@ const deliveryCustomerId = (code) => {
   return id;
 };
 
+// Prepared once and reused. This runs ~270k times per invoice_lines sync, inside
+// one atomic transaction that blocks the event loop (see CLEAR_BEFORE_SYNC) -
+// preparing per row re-parsed the SQL ~800k times and stretched that freeze to
+// 57-68s on production, during which the API served nobody.
+let invoiceLineStmts = null;
+const getInvoiceLineStmts = () => (invoiceLineStmts ??= {
+  invoiceByNumber: db.prepare('SELECT id FROM invoices WHERE number = ?'),
+  productByCode: db.prepare('SELECT id FROM products WHERE code = ?'),
+  insertItem: db.prepare(`
+    INSERT INTO invoice_items (invoice_id, product_id, product_code, delivery_customer_id, delivery_customer_code, qty, unit_price, line_total)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+});
+
 const upsertInvoiceLine = (row) => {
-  const invoice = db.prepare('SELECT id FROM invoices WHERE number = ?').get(row.invoice_number);
+  const stmts = getInvoiceLineStmts();
+  const invoice = stmts.invoiceByNumber.get(row.invoice_number);
   if (!invoice) return false;
-  const product = db.prepare('SELECT id FROM products WHERE code = ?').get(row.product_code);
+  const product = stmts.productByCode.get(row.product_code);
   // The store the goods went to. Under central billing this differs from the
   // invoice's own customer (PICK N PAY RETAILERS billed, OAKDENE delivered) and
   // it is what the rep is actually assigned to - see invoices.routes.js.
@@ -277,10 +310,7 @@ const upsertInvoiceLine = (row) => {
   // customer; scoping then falls back to the billed customer alone, i.e. the
   // behaviour before this change.
   const deliveryCode = row.delivery_customer_code ?? null;
-  db.prepare(`
-    INSERT INTO invoice_items (invoice_id, product_id, product_code, delivery_customer_id, delivery_customer_code, qty, unit_price, line_total)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(invoice.id, product?.id ?? null, row.product_code,
+  stmts.insertItem.run(invoice.id, product?.id ?? null, row.product_code,
     deliveryCustomerId(deliveryCode), deliveryCode,
     row.qty ?? 0, row.unit_price ?? 0, row.line_total ?? 0);
 };

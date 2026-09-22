@@ -64,7 +64,19 @@ function isEntitySyncDue(entity) {
     const timeKey = `${entity}_sync_daily_time`;
     const [h, m] = getSetting(timeKey, '02:00').split(':').map(Number);
     const now = new Date();
-    return now.getHours() === h && now.getMinutes() === m && minsSince >= 2;
+    // Fires once the scheduled time has passed today, not only in the exact
+    // minute it lands on - an exact-minute match silently skips the whole day
+    // if the process happens to not be running (restart, deploy, crash) at
+    // that one minute, with no error and no catch-up. Confirmed live:
+    // customer_sales (04:01 daily) went from 2026-08-31 to 2026-09-08 with
+    // zero syncs this way, while hourly/4hours entities on the same server
+    // kept running fine since they just check elapsed time. The 23h floor
+    // (not 24h) leaves a tick-granularity safety margin while still stopping
+    // it firing more than once on a day it already ran - a successful run
+    // resets minsSince to ~0 immediately.
+    const scheduledMinutesToday = h * 60 + m;
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    return nowMinutes >= scheduledMinutesToday && minsSince >= 23 * 60;
   }
   return false;
 }
@@ -113,8 +125,13 @@ function repSyncDueNow() {
   if (schedule === 'daily') {
     const [h, m] = getSetting('rep_sync_daily_time', '03:00').split(':').map(Number);
     const now = new Date();
-    // Fire once when the clock reaches the target minute (guard stops re-firing).
-    return now.getHours() === h && now.getMinutes() === m && minsSince >= 2;
+    // Same catch-up fix as isEntitySyncDue above - fire once the scheduled
+    // time has passed today (23h floor, not an exact-minute match), so a
+    // restart/deploy landing on that one minute doesn't silently skip the
+    // whole day.
+    const scheduledMinutesToday = h * 60 + m;
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    return nowMinutes >= scheduledMinutesToday && minsSince >= 23 * 60;
   }
   return false;
 }
@@ -122,8 +139,12 @@ function repSyncDueNow() {
 export function startScheduler() {
   setInterval(() => {
     try {
-      if (dueNow()) runAll('scheduled');
-      if (repSyncDueNow()) runRepSync('scheduled');
+      // Both are async: a synchronous try/catch never sees their rejections, so
+      // each needs its own .catch(). A SYSPRO connectivity blip inside
+      // runRepSync's fetch would otherwise surface as an unhandled rejection,
+      // which Node treats as fatal - taking the whole API down with it.
+      if (dueNow()) runAll('scheduled').catch((e) => console.error('[scheduler] sync failed:', e.message));
+      if (repSyncDueNow()) runRepSync('scheduled').catch((e) => console.error('[scheduler] rep sync failed:', e.message));
     } catch (e) {
       console.error('[scheduler] tick error:', e.message);
     }
