@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { db, nextNumber, logActivity, effectivePrice, effectivePriceSource, PRICE_SOURCES, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
-import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
+import { dbx, PRICE_SOURCES, VAT_RATE, round2 } from '../db.js';
+import { nextNumber, logActivity, effectivePrice, effectivePriceSource, adjustOrderStock, getSetting } from '../dbh.js';
+import { scopeForUser, requireRole, userCanAccessCustomerAsync } from '../auth.js';
 import { buildOrderEmail, buildOrderConfirmationEmail, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
 import { loadDoc } from '../integration/docData.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
@@ -12,7 +13,7 @@ const isEmail = (s) => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.tes
 
 const fmtR = (n) => 'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-router.get('/orders', (req, res) => {
+router.get('/orders', async (req, res) => {
   const { q, status, customer_id, rep_id } = req.query;
   const scope = scopeForUser(req.user);
   const where = [];
@@ -23,7 +24,7 @@ router.get('/orders', (req, res) => {
   if (q) { where.push('(o.number LIKE ? OR c.name LIKE ? OR o.customer_order_no LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
   if (status) { where.push('o.status = ?'); params.push(status); }
   if (customer_id) { where.push('o.customer_id = ?'); params.push(customer_id); }
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT o.*, c.name AS customer_name, u.name AS rep_name,
       w.code AS warehouse_code, w.name AS warehouse_name,
       (SELECT COUNT(*) FROM order_items i WHERE i.order_id = o.id) AS line_count
@@ -38,8 +39,8 @@ router.get('/orders', (req, res) => {
   res.json(rows);
 });
 
-router.get('/orders/:id', (req, res) => {
-  const order = db.prepare(`
+router.get('/orders/:id', async (req, res) => {
+  const order = await dbx.prepare(`
     SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.address, c.city,
       c.payment_terms, u.name AS rep_name,
       w.code AS warehouse_code, w.name AS warehouse_name
@@ -54,11 +55,11 @@ router.get('/orders/:id', (req, res) => {
     return res.status(403).json({ error: 'Not your order' });
   }
   // Flag lines where current stock is negative - i.e. this order over-committed.
-  order.items = db.prepare(`
+  order.items = (await dbx.prepare(`
     SELECT i.*, p.stock_qty AS current_stock
     FROM order_items i JOIN products p ON p.id = i.product_id
     WHERE i.order_id = ?
-  `).all(order.id).map((i) => ({ ...i, backorder: i.current_stock < 0 ? 1 : 0 }));
+  `).all(order.id)).map((i) => ({ ...i, backorder: i.current_stock < 0 ? 1 : 0 }));
   res.json(order);
 });
 
@@ -69,7 +70,7 @@ router.get('/orders/:id/pdf', async (req, res) => {
   if (scopeForUser(req.user).isRep && order.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your order' });
   }
-  const items = db.prepare(`
+  const items = await dbx.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ?
   `).all(order.id);
@@ -85,20 +86,20 @@ router.get('/orders/:id/pdf', async (req, res) => {
 
 // Create an order with lines. Prices default to the customer's effective price
 // unless explicitly overridden.
-function createOrder(user, b, res) {
+async function createOrder(user, b, res) {
   if (!b.customer_id) return res.status(400).json({ error: 'Customer is required' });
   if (!Array.isArray(b.items) || b.items.length === 0 || b.items.length > 200) {
     return res.status(400).json({ error: 'An order requires between 1 and 200 lines' });
   }
 
-  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(b.customer_id);
+  const customer = await dbx.prepare('SELECT * FROM customers WHERE id = ?').get(b.customer_id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (!userCanAccessCustomer(user, customer.id)) {
+  if (!await userCanAccessCustomerAsync(user, customer.id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
   if (customer.status === 'on_hold') return res.status(400).json({ error: 'Customer account is on hold - order blocked' });
   if (b.visit_id) {
-    const visit = db.prepare('SELECT rep_id, customer_id FROM visits WHERE id = ?').get(b.visit_id);
+    const visit = await dbx.prepare('SELECT rep_id, customer_id FROM visits WHERE id = ?').get(b.visit_id);
     if (!visit || visit.customer_id !== customer.id || (scopeForUser(user).isRep && visit.rep_id !== user.id)) {
       return res.status(400).json({ error: 'Visit does not belong to this customer and rep' });
     }
@@ -109,9 +110,9 @@ function createOrder(user, b, res) {
   // it is stored in its own column rather than inside notes.
   const customerOrderNo = String(b.customer_order_no ?? '').trim().slice(0, 100) || null;
 
-  const create = db.transaction(() => {
-    const number = nextNumber('ORD');
-    const info = db.prepare(`
+  const create = () => dbx.transaction(async (tx) => {
+    const number = await nextNumber('ORD', tx);
+    const info = await tx.prepare(`
       INSERT INTO orders (number, customer_id, rep_id, visit_id, warehouse_id, status, customer_order_no, notes, delivery_instructions, signature)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(number, b.customer_id, user.id, b.visit_id || null, customer.warehouse_id || null,
@@ -119,7 +120,7 @@ function createOrder(user, b, res) {
     const orderId = info.lastInsertRowid;
 
     let subtotal = 0;
-    const insertItem = db.prepare(`
+    const insertItem = tx.prepare(`
       INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total, price_source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -128,7 +129,7 @@ function createOrder(user, b, res) {
       // rejected - a discontinued product may already sit in a saved draft or an
       // offline cart from before it was flagged. The guard below is exactly as
       // strict as the old "AND active = 1"; only the message improved.
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
+      const product = await tx.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) throw new Error(`Product ${item.product_id} not found`);
       if (!product.active) {
         throw new Error(product.discontinued
@@ -140,7 +141,7 @@ function createOrder(user, b, res) {
       // Qty-aware pricing: quantity breaks from price rules apply per line.
       const requestedPrice = Number(item.unit_price);
       const officeOverrode = !scopeForUser(user).isRep && item.unit_price != null;
-      const unitPrice = officeOverrode ? requestedPrice : effectivePrice(b.customer_id, product.id, qty);
+      const unitPrice = officeOverrode ? requestedPrice : await effectivePrice(b.customer_id, product.id, qty, tx);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid unit price');
       // R1-016: SYSPRO has no price at all for this product (list_price and
       // every pricing tier are 0/null) - block the line the same way a
@@ -157,33 +158,33 @@ function createOrder(user, b, res) {
       subtotal += lineTotal;
       // R1-044: an explicit office-entered price is always a manual override,
       // regardless of what tier it happens to match numerically - otherwise
-      // it's whichever tier effectivePrice() actually used for this line.
-      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : effectivePriceSource(b.customer_id, product.id, qty);
-      insertItem.run(orderId, product.id, product.name, qty, product.uom, unitPrice, discount, lineTotal, priceSource);
+      // it's whichever tier await effectivePrice() actually used for this line.
+      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : await effectivePriceSource(b.customer_id, product.id, qty, tx);
+      await insertItem.run(orderId, product.id, product.name, qty, product.uom, unitPrice, discount, lineTotal, priceSource);
     }
     if (subtotal === 0) throw new Error('Order has no valid lines');
     const vat = round2(subtotal * VAT_RATE);
-    db.prepare('UPDATE orders SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
+    await tx.prepare('UPDATE orders SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
       .run(round2(subtotal), vat, round2(subtotal + vat), orderId);
-    if (b.status !== 'draft') adjustOrderStock(orderId, -1);
+    if (b.status !== 'draft') await adjustOrderStock(orderId, -1, tx);
     return orderId;
   });
 
   try {
-    const orderId = create();
-    logActivity(user.id, 'create', 'order', orderId, { customer: customer.name });
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-    order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
+    const orderId = await create();
+    await logActivity(user.id, 'create', 'order', orderId, { customer: customer.name });
+    const order = await dbx.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    order.items = await dbx.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
     // Submitted orders can be emailed to the customer, the rep, an ad-hoc
     // address, and/or configured recipients - whichever the rep ticked on the
     // capture screen. The whole email block is best-effort: the order is
     // already committed, so an email problem must never turn the response
     // into an error.
     try {
-      if (order.status === 'submitted' && getSetting('email_auto_send', '1') === '1') {
+      if (order.status === 'submitted' && await getSetting('email_auto_send', '1') === '1') {
         // Customer confirmation is opt-in - nothing sends unless the rep
         // explicitly ticks the box on the capture screen.
-        if (b.send_to_customer === true && getSetting('email_confirm_customer', '1') === '1') {
+        if (b.send_to_customer === true && await getSetting('email_confirm_customer', '1') === '1') {
           const confirmDraft = buildOrderConfirmationEmail(orderId);
           if (b.send_to_rep !== true) confirmDraft.cc_addr = null;
           sendEmail(confirmDraft).catch((e) => console.error('Confirmation email failed:', e.message));
@@ -213,7 +214,7 @@ function createOrder(user, b, res) {
           // warehouse (or "every branch") is honoured, even if the client
           // somehow sent an id outside that - the capture screen only ever
           // offers the right list, this is the server-side backstop.
-          const recipients = db.prepare(`
+          const recipients = await dbx.prepare(`
             SELECT email FROM email_recipients
             WHERE id IN (${recipientIds.map(() => '?').join(',')})
               AND (warehouse_id = ? OR warehouse_id IS NULL)
@@ -229,7 +230,7 @@ function createOrder(user, b, res) {
         const personalIds = (Array.isArray(b.personal_recipient_ids) ? b.personal_recipient_ids : [])
           .filter((n) => Number.isInteger(n)).slice(0, 50);
         if (personalIds.length) {
-          const contacts = db.prepare(`
+          const contacts = await dbx.prepare(`
             SELECT email FROM rep_email_contacts
             WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
           `).all(...personalIds, user.id);
@@ -248,35 +249,35 @@ function createOrder(user, b, res) {
   }
 }
 
-router.post('/orders', (req, res) => createOrder(req.user, req.body || {}, res));
+router.post('/orders', async (req, res) => { await createOrder(req.user, req.body || {}, res); });
 
 const STATUS_FLOW = ['draft', 'submitted', 'processing', 'invoiced', 'cancelled'];
 
-router.put('/orders/:id/status', requireRole('admin', 'manager', 'office'), (req, res) => {
+router.put('/orders/:id/status', requireRole('admin', 'manager', 'office'), async (req, res) => {
   const status = req.body?.status;
   if (!STATUS_FLOW.includes(status)) return res.status(400).json({ error: 'Invalid status' });
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  const order = await dbx.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
-  db.transaction(() => {
+  await dbx.transaction(async (tx) => {
     const heldBefore = !['draft', 'cancelled'].includes(order.status);
     const heldAfter = !['draft', 'cancelled'].includes(status);
-    if (heldBefore !== heldAfter) adjustOrderStock(order.id, heldAfter ? -1 : 1);
-    db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(status, order.id);
-  })();
-  logActivity(req.user.id, 'status_change', 'order', req.params.id, { from: order.status, to: status });
-  res.json(db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id));
+    if (heldBefore !== heldAfter) await adjustOrderStock(order.id, heldAfter ? -1 : 1, tx);
+    await tx.prepare('UPDATE orders SET status = ? WHERE id = ?').run(status, order.id);
+  });
+  await logActivity(req.user.id, 'status_change', 'order', req.params.id, { from: order.status, to: status });
+  res.json(await dbx.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id));
 });
 
 // Repeat a previous order at today's effective prices.
-router.post('/orders/:id/repeat', (req, res) => {
-  const source = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+router.post('/orders/:id/repeat', async (req, res) => {
+  const source = await dbx.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!source) return res.status(404).json({ error: 'Order not found' });
   if (scopeForUser(req.user).isRep && source.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your order' });
   }
-  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(source.id)
+  const items = (await dbx.prepare('SELECT * FROM order_items WHERE order_id = ?').all(source.id))
     .map((i) => ({ product_id: i.product_id, qty: i.qty }));
-  createOrder(req.user, { customer_id: source.customer_id, items, notes: `Repeat of ${source.number}` }, res);
+  await createOrder(req.user, { customer_id: source.customer_id, items, notes: `Repeat of ${source.number}` }, res);
 });
 
 // Send an order to selected recipients (admin/manager only).
@@ -285,7 +286,7 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
   const order = loadDoc('order', req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
-  const items = db.prepare(`
+  const items = await dbx.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ? ORDER BY i.id
   `).all(order.id);
@@ -294,7 +295,7 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
   // Send to configured recipients (empty selection = none, not a SQL error).
   // Branch-scoped the same way as the auto-send path in createOrder above.
   const allRecipients = Array.isArray(recipients) && recipients.length
-    ? db.prepare(`
+    ? await dbx.prepare(`
         SELECT * FROM email_recipients
         WHERE id IN (${recipients.map(() => '?').join(',')}) AND (warehouse_id = ? OR warehouse_id IS NULL)
       `).all(...recipients, order.warehouse_id)

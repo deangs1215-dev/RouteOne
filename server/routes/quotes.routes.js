@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { db, nextNumber, logActivity, effectivePrice, effectivePriceSource, PRICE_SOURCES, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
-import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
+import { dbx, PRICE_SOURCES, VAT_RATE, round2 } from '../db.js';
+import { nextNumber, logActivity, effectivePrice, effectivePriceSource, adjustOrderStock, getSetting } from '../dbh.js';
+import { scopeForUser, requireRole, userCanAccessCustomerAsync } from '../auth.js';
 import { buildQuoteEmail, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
 import { loadDoc } from '../integration/docData.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
@@ -11,7 +12,7 @@ const isEmail = (s) => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.tes
 
 const fmtR = (n) => 'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-router.get('/quotes', (req, res) => {
+router.get('/quotes', async (req, res) => {
   const { q, status, customer_id } = req.query;
   const scope = scopeForUser(req.user);
   const where = [];
@@ -20,7 +21,7 @@ router.get('/quotes', (req, res) => {
   if (q) { where.push('(qu.number LIKE ? OR c.name LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
   if (status) { where.push('qu.status = ?'); params.push(status); }
   if (customer_id) { where.push('qu.customer_id = ?'); params.push(customer_id); }
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT qu.*, c.name AS customer_name, u.name AS rep_name,
       (SELECT COUNT(*) FROM quote_items i WHERE i.quote_id = qu.id) AS line_count
     FROM quotes qu
@@ -33,8 +34,8 @@ router.get('/quotes', (req, res) => {
   res.json(rows);
 });
 
-router.get('/quotes/:id', (req, res) => {
-  const quote = db.prepare(`
+router.get('/quotes/:id', async (req, res) => {
+  const quote = await dbx.prepare(`
     SELECT qu.*, c.name AS customer_name, c.code AS customer_code, c.payment_terms,
       u.name AS rep_name, o.number AS order_number
     FROM quotes qu
@@ -47,7 +48,7 @@ router.get('/quotes/:id', (req, res) => {
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
   }
-  quote.items = db.prepare(`
+  quote.items = await dbx.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
   `).all(quote.id);
@@ -61,7 +62,7 @@ router.get('/quotes/:id/pdf', async (req, res) => {
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
   }
-  const items = db.prepare(`
+  const items = await dbx.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
   `).all(quote.id);
@@ -77,19 +78,19 @@ router.get('/quotes/:id/pdf', async (req, res) => {
 
 // Create a quote with lines - same pricing engine as orders, but no stock
 // movement and no credit block (a quote commits nothing).
-router.post('/quotes', (req, res) => {
+router.post('/quotes', async (req, res) => {
   const b = req.body || {};
   if (!b.customer_id) return res.status(400).json({ error: 'Customer is required' });
   if (!Array.isArray(b.items) || b.items.length === 0 || b.items.length > 200) {
     return res.status(400).json({ error: 'A quote requires between 1 and 200 lines' });
   }
-  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(b.customer_id);
+  const customer = await dbx.prepare('SELECT * FROM customers WHERE id = ?').get(b.customer_id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (!userCanAccessCustomer(req.user, customer.id)) {
+  if (!await userCanAccessCustomerAsync(req.user, customer.id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
   if (b.visit_id) {
-    const visit = db.prepare('SELECT rep_id, customer_id FROM visits WHERE id = ?').get(b.visit_id);
+    const visit = await dbx.prepare('SELECT rep_id, customer_id FROM visits WHERE id = ?').get(b.visit_id);
     if (!visit || visit.customer_id !== customer.id || (scopeForUser(req.user).isRep && visit.rep_id !== req.user.id)) {
       return res.status(400).json({ error: 'Visit does not belong to this customer and rep' });
     }
@@ -101,29 +102,32 @@ router.post('/quotes', (req, res) => {
   // code order and every later read that trusts id/insertion order (the detail
   // page, PDF, and confirmation email - none of which JOIN products just to
   // re-derive an order) is correct with no further change.
-  const sortedItems = [...(b.items || [])].sort((a, b2) => {
-    const codeA = db.prepare('SELECT code FROM products WHERE id = ?').get(a.product_id)?.code || '';
-    const codeB = db.prepare('SELECT code FROM products WHERE id = ?').get(b2.product_id)?.code || '';
-    return codeA.localeCompare(codeB, undefined, { numeric: true, sensitivity: 'base' });
-  });
+  const codeById = new Map();
+  for (const item of b.items || []) {
+    if (!codeById.has(item.product_id)) {
+      codeById.set(item.product_id, (await dbx.prepare('SELECT code FROM products WHERE id = ?').get(item.product_id))?.code || '');
+    }
+  }
+  const sortedItems = [...(b.items || [])].sort((a, b2) =>
+    codeById.get(a.product_id).localeCompare(codeById.get(b2.product_id), undefined, { numeric: true, sensitivity: 'base' }));
 
-  const create = db.transaction(() => {
-    const number = nextNumber('QUO');
+  const create = () => dbx.transaction(async (tx) => {
+    const number = await nextNumber('QUO', tx);
     const validUntil = b.valid_until || new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
-    const info = db.prepare(`
+    const info = await tx.prepare(`
       INSERT INTO quotes (number, customer_id, rep_id, visit_id, status, valid_until, notes)
       VALUES (?, ?, ?, ?, 'sent', ?, ?)
     `).run(number, b.customer_id, req.user.id, b.visit_id || null, validUntil, b.notes || null);
     const quoteId = info.lastInsertRowid;
 
     let subtotal = 0;
-    const insertItem = db.prepare(`
+    const insertItem = tx.prepare(`
       INSERT INTO quote_items (quote_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total, price_source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const item of sortedItems) {
       // See the matching comment in orders.routes.js - same guard, clearer message.
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
+      const product = await tx.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
       if (!product) throw new Error(`Product ${item.product_id} not found`);
       if (!product.active) {
         throw new Error(product.discontinued
@@ -134,7 +138,7 @@ router.post('/quotes', (req, res) => {
       if (!Number.isFinite(qty) || qty <= 0 || qty > 1000000) throw new Error('Invalid quote quantity');
       const requestedPrice = Number(item.unit_price);
       const officeOverrode = !scopeForUser(req.user).isRep && item.unit_price != null;
-      const unitPrice = officeOverrode ? requestedPrice : effectivePrice(b.customer_id, product.id, qty);
+      const unitPrice = officeOverrode ? requestedPrice : await effectivePrice(b.customer_id, product.id, qty, tx);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid unit price');
       // R1-016: see the matching guard in orders.routes.js - SYSPRO has no
       // price for this product, block it the same way a discontinued product
@@ -144,25 +148,25 @@ router.post('/quotes', (req, res) => {
       }
       const lineTotal = round2(qty * unitPrice);
       subtotal += lineTotal;
-      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : effectivePriceSource(b.customer_id, product.id, qty);
-      insertItem.run(quoteId, product.id, product.name, qty, product.uom, unitPrice, 0, lineTotal, priceSource);
+      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : await effectivePriceSource(b.customer_id, product.id, qty, tx);
+      await insertItem.run(quoteId, product.id, product.name, qty, product.uom, unitPrice, 0, lineTotal, priceSource);
     }
     if (subtotal === 0) throw new Error('Quote has no valid lines');
     const vat = round2(subtotal * VAT_RATE);
-    db.prepare('UPDATE quotes SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
+    await tx.prepare('UPDATE quotes SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
       .run(round2(subtotal), vat, round2(subtotal + vat), quoteId);
     return quoteId;
   });
 
   try {
-    const quoteId = create();
-    logActivity(req.user.id, 'create', 'quote', quoteId, { customer: customer.name });
-    const quote = db.prepare('SELECT * FROM quotes WHERE id = ?').get(quoteId);
-    quote.items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quoteId);
+    const quoteId = await create();
+    await logActivity(req.user.id, 'create', 'quote', quoteId, { customer: customer.name });
+    const quote = await dbx.prepare('SELECT * FROM quotes WHERE id = ?').get(quoteId);
+    quote.items = await dbx.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quoteId);
     // Email the customer their quote, same on/off switch as order auto-send.
     // Best-effort: the quote is committed, so email problems never fail the response.
     try {
-      if (getSetting('email_auto_send', '1') === '1') {
+      if (await getSetting('email_auto_send', '1') === '1') {
         // Opt-in - nothing sends to the customer unless the rep explicitly
         // ticks the box on the capture screen.
         if (customer.email && b.send_to_customer === true) {
@@ -191,7 +195,7 @@ router.post('/quotes', (req, res) => {
           // Branch-scoped to the customer's own warehouse (quotes have no
           // warehouse_id of their own - see the matching comment in
           // orders.routes.js for why this backstop exists at all).
-          const recipients = db.prepare(`
+          const recipients = await dbx.prepare(`
             SELECT email FROM email_recipients
             WHERE id IN (${recipientIds.map(() => '?').join(',')})
               AND (warehouse_id = ? OR warehouse_id IS NULL)
@@ -207,7 +211,7 @@ router.post('/quotes', (req, res) => {
         const personalIds = (Array.isArray(b.personal_recipient_ids) ? b.personal_recipient_ids : [])
           .filter((n) => Number.isInteger(n)).slice(0, 50);
         if (personalIds.length) {
-          const contacts = db.prepare(`
+          const contacts = await dbx.prepare(`
             SELECT email FROM rep_email_contacts
             WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
           `).all(...personalIds, req.user.id);
@@ -226,34 +230,34 @@ router.post('/quotes', (req, res) => {
   }
 });
 
-router.put('/quotes/:id/status', (req, res) => {
+router.put('/quotes/:id/status', async (req, res) => {
   const status = req.body?.status;
   if (!['draft', 'sent', 'accepted', 'rejected', 'expired'].includes(status)) {
     return res.status(400).json({ error: 'Invalid status' });
   }
-  const quote = db.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id);
+  const quote = await dbx.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
   }
   if (quote.order_id) return res.status(400).json({ error: 'Quote already converted to an order' });
-  db.prepare('UPDATE quotes SET status = ? WHERE id = ?').run(status, req.params.id);
-  logActivity(req.user.id, 'status_change', 'quote', req.params.id, { from: quote.status, to: status });
-  res.json(db.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id));
+  await dbx.prepare('UPDATE quotes SET status = ? WHERE id = ?').run(status, req.params.id);
+  await logActivity(req.user.id, 'status_change', 'quote', req.params.id, { from: quote.status, to: status });
+  res.json(await dbx.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id));
 });
 
 // Convert an accepted quote into an order at the QUOTED prices (that's the
 // point of a quote), moving stock like a normal order.
-router.post('/quotes/:id/convert', (req, res) => {
-  const quote = db.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id);
+router.post('/quotes/:id/convert', async (req, res) => {
+  const quote = await dbx.prepare('SELECT * FROM quotes WHERE id = ?').get(req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
   }
   if (quote.order_id) return res.status(400).json({ error: 'Quote already converted' });
-  const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(quote.customer_id);
+  const customer = await dbx.prepare('SELECT * FROM customers WHERE id = ?').get(quote.customer_id);
   if (customer.status === 'on_hold') return res.status(400).json({ error: 'Customer account is on hold - order blocked' });
-  const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
+  const items = await dbx.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
 
   // A quote can be converted long after it was written, so every line is
   // re-checked against the product's CURRENT state - the same guard order and
@@ -262,7 +266,7 @@ router.post('/quotes/:id/convert', (req, res) => {
   // discontinued. Price is deliberately NOT re-derived: honouring the quoted
   // price is the whole point of converting a quote.
   for (const i of items) {
-    const product = db.prepare('SELECT name, active, discontinued FROM products WHERE id = ?').get(i.product_id);
+    const product = await dbx.prepare('SELECT name, active, discontinued FROM products WHERE id = ?').get(i.product_id);
     if (!product) {
       return res.status(400).json({ error: `${i.product_name} no longer exists and cannot be ordered` });
     }
@@ -275,31 +279,31 @@ router.post('/quotes/:id/convert', (req, res) => {
     }
   }
 
-  const convert = db.transaction(() => {
-    const number = nextNumber('ORD');
-    const info = db.prepare(`
+  const convert = () => dbx.transaction(async (tx) => {
+    const number = await nextNumber('ORD', tx);
+    const info = await tx.prepare(`
       INSERT INTO orders (number, customer_id, rep_id, visit_id, warehouse_id, status, subtotal, vat_amount, total, notes)
       VALUES (?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?)
     `).run(number, quote.customer_id, req.user.id, quote.visit_id, customer.warehouse_id || null, quote.subtotal, quote.vat_amount, quote.total,
       `Converted from quote ${quote.number}`);
     const orderId = info.lastInsertRowid;
-    const insertItem = db.prepare(`
+    const insertItem = tx.prepare(`
       INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total, price_source)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const i of items) {
       // Carries the quote line's own price_source across - the price itself
       // isn't recomputed here, so neither is what tier produced it.
-      insertItem.run(orderId, i.product_id, i.product_name, i.qty, i.uom, i.unit_price, i.discount_pct, i.line_total, i.price_source);
+      await insertItem.run(orderId, i.product_id, i.product_name, i.qty, i.uom, i.unit_price, i.discount_pct, i.line_total, i.price_source);
     }
-    adjustOrderStock(orderId, -1);
-    db.prepare("UPDATE quotes SET status = 'accepted', order_id = ? WHERE id = ?").run(orderId, quote.id);
+    await adjustOrderStock(orderId, -1, tx);
+    await tx.prepare("UPDATE quotes SET status = 'accepted', order_id = ? WHERE id = ?").run(orderId, quote.id);
     return orderId;
   });
 
-  const orderId = convert();
-  logActivity(req.user.id, 'convert', 'quote', quote.id, { order_id: orderId });
-  res.json(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId));
+  const orderId = await convert();
+  await logActivity(req.user.id, 'convert', 'quote', quote.id, { order_id: orderId });
+  res.json(await dbx.prepare('SELECT * FROM orders WHERE id = ?').get(orderId));
 });
 
 // Send a quote to selected recipients (admin/manager only).
@@ -308,7 +312,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
   const quote = loadDoc('quote', req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
-  const items = db.prepare(`
+  const items = await dbx.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
   `).all(quote.id);
@@ -317,7 +321,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
   // Send to configured recipients (empty selection = none, not a SQL error).
   // Branch-scoped to the customer's own warehouse.
   const allRecipients = Array.isArray(recipients) && recipients.length
-    ? db.prepare(`
+    ? await dbx.prepare(`
         SELECT * FROM email_recipients
         WHERE id IN (${recipients.map(() => '?').join(',')}) AND (warehouse_id = ? OR warehouse_id IS NULL)
       `).all(...recipients, quote.customer_warehouse_id)
