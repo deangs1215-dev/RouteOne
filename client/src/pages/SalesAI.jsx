@@ -65,7 +65,7 @@ export default function SalesAI() {
         </Card>
 
         <Card title={`Customers${segFilter ? ` — ${segFilter}` : ' by risk'}`} className="lg:col-span-3">
-          <Table headers={['Customer', 'Segment', 'R·F·M', 'Last order', '180d sales', 'Trend', 'Risk']}>
+          <Table headers={['Customer', 'Segment', 'R·F·M', 'Last invoice', '180d sales', 'Trend', 'Risk']}>
             {shown.map((c) => (
               <tr key={c.id} className="hover:bg-slate-50">
                 <td className="td font-medium">
@@ -74,7 +74,7 @@ export default function SalesAI() {
                 </td>
                 <td className="td"><Badge color={SEGMENT_COLORS[c.segment]}>{c.segment}</Badge></td>
                 <td className="td text-slate-500">{c.r_score}·{c.f_score}·{c.m_score}</td>
-                <td className="td text-slate-500">{c.last_order_at ? `${c.recency_days}d ago` : 'never'}</td>
+                <td className="td text-slate-500">{c.last_invoice_at ? `${c.recency_days}d ago` : 'never'}</td>
                 <td className="td">{fmtR(c.monetary_180)}</td>
                 <td className={`td ${c.decline_pct > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
                   {c.decline_pct > 0 ? `▼ ${c.decline_pct}%` : '▲'}

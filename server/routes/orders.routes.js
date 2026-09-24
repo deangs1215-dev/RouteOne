@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { db, nextNumber, logActivity, effectivePrice, effectivePriceSource, PRICE_SOURCES, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
 import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
-import { buildOrderEmail, buildOrderConfirmationEmail, sendEmail, wrap, esc, companyDetails } from '../integration/email.js';
+import { buildOrderEmail, buildOrderConfirmationEmail, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
+import { loadDoc } from '../integration/docData.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
 
 const router = Router();
@@ -10,29 +11,6 @@ const router = Router();
 const isEmail = (s) => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 
 const fmtR = (n) => 'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-function docTable(items, doc) {
-  const rows = items.map((i) => `
-    <tr>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">${esc(i.product_name)}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${i.qty} ${i.uom || ''}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right">${fmtR(i.unit_price)}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right">${fmtR(i.line_total)}</td>
-    </tr>`).join('');
-  return `
-    <table style="border-collapse:collapse;width:100%;font-size:14px">
-      <tr style="background:#f1f5f9">
-        <th style="padding:6px 10px;text-align:left">Product</th>
-        <th style="padding:6px 10px;text-align:center">Qty</th>
-        <th style="padding:6px 10px;text-align:right">Unit price</th>
-        <th style="padding:6px 10px;text-align:right">Total</th>
-      </tr>
-      ${rows}
-      <tr><td colspan="3" style="padding:6px 10px;text-align:right;color:#64748b">Subtotal</td><td style="padding:6px 10px;text-align:right">${fmtR(doc.subtotal)}</td></tr>
-      <tr><td colspan="3" style="padding:6px 10px;text-align:right;color:#64748b">VAT (${VAT_RATE * 100}%)</td><td style="padding:6px 10px;text-align:right">${fmtR(doc.vat_amount)}</td></tr>
-      <tr><td colspan="3" style="padding:6px 10px;text-align:right;font-weight:bold">Total</td><td style="padding:6px 10px;text-align:right;font-weight:bold">${fmtR(doc.total)}</td></tr>
-    </table>`;
-}
 
 router.get('/orders', (req, res) => {
   const { q, status, customer_id, rep_id } = req.query;
@@ -86,10 +64,7 @@ router.get('/orders/:id', (req, res) => {
 
 // Downloadable order confirmation PDF - same layout as the email attachment.
 router.get('/orders/:id/pdf', async (req, res) => {
-  const order = db.prepare(`
-    SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.contact_name, c.address, c.city
-    FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = ?
-  `).get(req.params.id);
+  const order = loadDoc('order', req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (scopeForUser(req.user).isRep && order.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your order' });
@@ -307,15 +282,13 @@ router.post('/orders/:id/repeat', (req, res) => {
 // Send an order to selected recipients (admin/manager only).
 router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (req, res) => {
   const { recipients = [], send_to_rep, send_to_customer } = req.body || {};
-  const order = db.prepare(`
-    SELECT o.*, c.name AS customer_name, c.email AS customer_email,
-      u.name AS rep_name, u.email AS rep_email
-    FROM orders o JOIN customers c ON c.id = o.customer_id
-    LEFT JOIN users u ON u.id = o.rep_id WHERE o.id = ?
-  `).get(req.params.id);
+  const order = loadDoc('order', req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
-  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+  const items = db.prepare(`
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
+    LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ? ORDER BY i.id
+  `).all(order.id);
   const emailsToSend = [];
 
   // Send to configured recipients (empty selection = none, not a SQL error).
@@ -332,10 +305,11 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
       <p>Please find the sales order below for your records.</p>
       <table style="font-size:14px;margin-bottom:14px">
         <tr><td style="color:#64748b;padding:2px 12px 2px 0">Order no</td><td><b>${order.number}</b></td></tr>
-        <tr><td style="color:#64748b;padding:2px 12px 2px 0">Customer</td><td>${esc(order.customer_name)}</td></tr>
         <tr><td style="color:#64748b;padding:2px 12px 2px 0">Amount</td><td><b>${fmtR(order.total)}</b></td></tr>
         <tr><td style="color:#64748b;padding:2px 12px 2px 0">Date</td><td>${order.order_date}</td></tr>
       </table>
+      ${notesHtml(order)}
+      ${customerBlockHtml(order)}
       ${docTable(items, order)}`;
 
     emailsToSend.push({

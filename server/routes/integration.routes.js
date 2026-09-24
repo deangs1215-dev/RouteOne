@@ -6,6 +6,7 @@ import { getProvider, testSyspro } from '../integration/providers.js';
 import { runSync, SYNC_ENTITIES, matchRep } from '../integration/sync.js';
 import { buildOrderConfirmationEmail, buildQuoteEmail, sendEmail, attemptSend, sendTestEmail } from '../integration/email.js';
 import { sendAllRepDigests } from '../integration/repDigest.js';
+import { sendSyncDigest } from '../integration/syncDigest.js';
 import { encryptSecret } from '../crypto.js';
 
 const router = Router();
@@ -31,6 +32,7 @@ const SETTING_KEYS = [
   'customer_sales_sync_schedule', 'customer_sales_sync_daily_time',
   'rep_sync_schedule', 'rep_sync_daily_time',
   'rep_digest_enabled', 'rep_digest_time',
+  'sync_digest_enabled', 'sync_digest_time', 'sync_digest_emails',
   // Company letterhead (email header/footer + PDF documents)
   'company_name', 'company_reg', 'company_vat', 'company_address',
   'company_phone', 'company_email', 'company_website', 'company_logo'
@@ -48,6 +50,8 @@ router.get('/integration/settings', requireRole('admin'), (req, res) => {
   out.last_rep_sync_result = getSetting('last_rep_sync_result', '');
   out.last_rep_digest_at = getSetting('last_rep_digest_at', '');
   out.last_rep_digest_result = getSetting('last_rep_digest_result', '');
+  out.last_sync_digest_at = getSetting('last_sync_digest_at', '');
+  out.last_sync_digest_result = getSetting('last_sync_digest_result', '');
   res.json(out);
 });
 
@@ -146,6 +150,15 @@ router.post('/integration/rep-digest/run-now', requireRole('admin', 'manager'), 
   try {
     const results = await sendAllRepDigests('manual');
     res.json({ results });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+router.post('/integration/sync-digest/run-now', requireRole('admin', 'manager'), async (req, res) => {
+  try {
+    const result = await sendSyncDigest('manual');
+    res.json(result);
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

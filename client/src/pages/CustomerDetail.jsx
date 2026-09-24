@@ -69,6 +69,16 @@ export default function CustomerDetail() {
             <InfoRow label="Warehouse" value={c.warehouse_name ? `${c.warehouse_name} (${c.warehouse_code})` : null} />
             <InfoRow label="Credit limit" value={fmtR(c.credit_limit)} />
             <InfoRow label="Payment terms" value={c.payment_terms} />
+            {(c.ship_to_name || c.ship_to_address || c.ship_to_city || c.ship_to_postcode) && (
+              <>
+                <div className="border-t my-2" />
+                <div className="font-semibold text-slate-600">Ship-to address:</div>
+                <InfoRow label="Ship-to name" value={c.ship_to_name} />
+                <InfoRow label="Ship-to address" value={c.ship_to_address} />
+                <InfoRow label="Ship-to city" value={c.ship_to_city} />
+                <InfoRow label="Ship-to postcode" value={c.ship_to_postcode} />
+              </>
+            )}
           </dl>
         </Card>
 
@@ -108,7 +118,7 @@ export default function CustomerDetail() {
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <span>Segment: <Badge color="#8b5cf6">{intel.segment}</Badge></span>
             <span>Churn risk: <b className={intel.risk_score >= 70 ? 'text-red-600' : intel.risk_score >= 40 ? 'text-amber-600' : 'text-emerald-600'}>{intel.risk_score}/100</b></span>
-            <span className="text-slate-500">Last order {intel.last_order_at ? `${intel.recency_days}d ago` : 'never'} · buys ~every {intel.cycle_days}d · R·F·M {intel.r_score}·{intel.f_score}·{intel.m_score}</span>
+            <span className="text-slate-500">Last invoice {intel.last_invoice_at ? `${intel.recency_days}d ago` : 'never'} · buys ~every {intel.cycle_days}d · R·F·M {intel.r_score}·{intel.f_score}·{intel.m_score}</span>
             {intel.decline_pct > 0 && <span className="text-red-600">▼ spend down {intel.decline_pct}% vs prior quarter</span>}
           </div>
           {(intel.suggested_products.length > 0 || intel.lapsed_products.length > 0) && (
@@ -211,7 +221,7 @@ export default function CustomerDetail() {
           empty={(!c.recent_invoices || c.recent_invoices.length === 0) && 'No invoices in the last 30 days.'}>
           {(c.recent_invoices || []).map((iv) => (
             <tr key={iv.id} className="hover:bg-slate-50">
-              <td className="td font-medium">{iv.number}</td>
+              <td className="td font-medium"><Link className="hover:text-brand-600" to={`/invoices/${iv.id}`}>{iv.number}</Link></td>
               <td className="td text-slate-500">{fmtDate(iv.invoice_date)}</td>
               <td className="td text-slate-500">{iv.order_number || '—'}</td>
               <td className="td font-medium">{fmtR(iv.total)}</td>

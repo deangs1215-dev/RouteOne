@@ -17,14 +17,21 @@ export function customerIntel(repId = null) {
   const customers = db.prepare(`
     SELECT c.id, c.name, c.city, c.classification, c.visit_frequency, c.status,
       c.rep_id, u.name AS rep_name,
-      -- Last purchase: most recent of an app-captured order OR a synced SYSPRO
-      -- invoice, since many customers are invoiced directly in SYSPRO without
-      -- ever having an order captured through the app.
+      -- R1-057: recency is the most recent actual SYSPRO invoice, not a
+      -- RouteOne order - an order can be captured well before it's ever
+      -- invoiced (or not invoiced at all if it's cancelled/adjusted in
+      -- SYSPRO), so order date overstated how recently the customer had
+      -- genuinely bought something. Matches billed-to OR delivered-to, same
+      -- as invoices.routes.js / customers.routes.js - a store invoiced
+      -- centrally under a parent/group account never appears as
+      -- invoices.customer_id, only as an invoice_items.delivery_customer_id
+      -- on the group's invoice, and would otherwise show as "never invoiced".
       (SELECT MAX(d) FROM (
-        SELECT MAX(order_date) AS d FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled'
+        SELECT MAX(i.invoice_date) AS d FROM invoices i WHERE i.customer_id = c.id
         UNION ALL
-        SELECT MAX(invoice_date) AS d FROM invoices i WHERE i.customer_id = c.id
-      )) AS last_order_at,
+        SELECT MAX(i2.invoice_date) AS d FROM invoice_items ii2 JOIN invoices i2 ON i2.id = ii2.invoice_id
+          WHERE ii2.delivery_customer_id = c.id
+      )) AS last_invoice_at,
       (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled'
         AND o.order_date >= date('now', '-180 days')) AS freq_180,
       (SELECT COALESCE(SUM(total), 0) FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled'
@@ -52,10 +59,10 @@ export function customerIntel(repId = null) {
   const today = Date.now();
   return customers.map((c) => {
     const cycleDays = FREQUENCY_DAYS[c.visit_frequency] || 30;
-    const recencyDays = c.last_order_at
-      ? Math.floor((today - new Date(c.last_order_at.replace(' ', 'T')).getTime()) / 86400000)
+    const recencyDays = c.last_invoice_at
+      ? Math.floor((today - new Date(c.last_invoice_at.replace(' ', 'T')).getTime()) / 86400000)
       : 999;
-    const ratio = recencyDays / cycleDays; // 1 = exactly one buying cycle since last order
+    const ratio = recencyDays / cycleDays; // 1 = exactly one buying cycle since last invoice
 
     const r = ratio <= 1 ? 5 : ratio <= 1.5 ? 4 : ratio <= 2.5 ? 3 : ratio <= 4 ? 2 : 1;
     const f = c.freq_180 === 0 ? 1 : c.freq_180 <= 2 ? 2 : c.freq_180 <= 5 ? 3 : c.freq_180 <= 10 ? 4 : 5;
@@ -72,9 +79,9 @@ export function customerIntel(repId = null) {
 
     // Churn risk 0-100: overdue buying cycle + declining spend + missed visits.
     const decline = c.sales_prev90 > 0 ? clamp((c.sales_prev90 - c.sales_last90) / c.sales_prev90, 0, 1) : 0;
-    const risk = c.last_order_at
+    const risk = c.last_invoice_at
       ? Math.round(clamp(45 * clamp(ratio / 4, 0, 1) + 35 * decline + 20 * (c.missed_visits_90 > 0 ? 1 : 0), 0, 100))
-      : 85; // never ordered
+      : 85; // never invoiced
 
     return {
       ...c,
@@ -98,11 +105,11 @@ export function buildActions(intel, { repId = null, customerId = null } = {}) {
       actions.push({ customer_id: c.id, customer_name: c.name, rep_name: c.rep_name, priority: 90, type: 'account', action: 'Account on hold — resolve with finance before next visit' });
     }
     if (c.risk_score >= 70) {
-      actions.push({ customer_id: c.id, customer_name: c.name, rep_name: c.rep_name, priority: c.risk_score, type: 'churn', action: `High churn risk (${c.risk_score}) — ${c.last_order_at ? `no order in ${c.recency_days} days` : 'never ordered'}; call or visit this week` });
+      actions.push({ customer_id: c.id, customer_name: c.name, rep_name: c.rep_name, priority: c.risk_score, type: 'churn', action: `High churn risk (${c.risk_score}) — ${c.last_invoice_at ? `no invoice in ${c.recency_days} days` : 'never invoiced'}; call or visit this week` });
     } else if (c.decline_pct >= 30 && c.monetary_180 > 0) {
       actions.push({ customer_id: c.id, customer_name: c.name, rep_name: c.rep_name, priority: 50 + c.decline_pct / 2, type: 'declining', action: `Spend down ${c.decline_pct}% vs previous quarter — check competitor activity and pricing` });
     } else if (c.recency_days > c.cycle_days * 1.5 && c.recency_days < 900) {
-      actions.push({ customer_id: c.id, customer_name: c.name, rep_name: c.rep_name, priority: 40, type: 'overdue', action: `Order overdue — last ordered ${c.recency_days} days ago (buys ~every ${c.cycle_days} days)` });
+      actions.push({ customer_id: c.id, customer_name: c.name, rep_name: c.rep_name, priority: 40, type: 'overdue', action: `Order overdue — last invoiced ${c.recency_days} days ago (buys ~every ${c.cycle_days} days)` });
     }
   }
 
@@ -261,6 +268,15 @@ router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), (req,
     margin: margin.margin,
     margin_pct: orderStats.period_revenue ? Math.round((margin.margin / orderStats.period_revenue) * 100) : 0
   };
+
+  // Margin is derived from cost_price, which is office-only data (see
+  // withoutCostFields in auth.js) - a rep gets the same analytics without the
+  // figures that would let them back out what the company pays.
+  if (!scope.isOffice) {
+    delete totals.margin;
+    delete totals.margin_pct;
+    for (const p of topProducts) delete p.margin;
+  }
 
   res.json({ days, totals, monthly, topProducts, quoteFunnel });
 });

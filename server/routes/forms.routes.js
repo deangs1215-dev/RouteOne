@@ -124,17 +124,17 @@ router.post('/form-submissions', (req, res) => {
     if (value !== undefined) data[field.key] = value;
   }
 
+  if (!req.user.email) {
+    return res.status(400).json({ error: 'Your account does not have an email address configured. Please contact an administrator.' });
+  }
+
   const info = db.prepare(`
     INSERT INTO form_submissions (template_id, visit_id, customer_id, user_id, data)
     VALUES (?, ?, ?, ?, ?)
   `).run(b.template_id, b.visit_id || null, b.customer_id || null, req.user.id, JSON.stringify(data));
   logActivity(req.user.id, 'submit', 'form', info.lastInsertRowid, { template: template.name });
-  // Notify the configured recipient by email — best-effort, never blocks the
-  // submission response. Falls back to the shared technical_email for
-  // technical-category forms that haven't been given their own address.
-  if (template.notify_email || template.category === 'technical') {
-    sendEmail(buildFormEmail(info.lastInsertRowid)).catch((e) => console.error('Form notification email failed:', e.message));
-  }
+  // Send form notification to the rep who submitted it. Best-effort, never blocks the submission response.
+  sendEmail(buildFormEmail(info.lastInsertRowid, req.user.email)).catch((e) => console.error('Form notification email failed:', e.message));
   res.json({ id: info.lastInsertRowid });
 });
 

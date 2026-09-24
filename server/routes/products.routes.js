@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { db, logActivity, priceBreaks, activeRules, getTodayISO } from '../db.js';
-import { requireRole, userCanAccessCustomer } from '../auth.js';
+import { requireRole, userCanAccessCustomer, withoutCostFields } from '../auth.js';
 
 const router = Router();
 
@@ -50,7 +50,7 @@ router.get('/products', (req, res) => {
       (stockByProduct[s.product_id] ??= []).push({ warehouse_code: s.warehouse_code, warehouse_name: s.warehouse_name, qty_available: s.qty_available });
     }
   }
-  res.json(rows.map((p) => ({
+  res.json(rows.map((p) => withoutCostFields(req.user, {
     ...p,
     stock_qty: req.user.role === 'rep' && req.user.warehouse_id ? (stockQtyByProduct[p.id] ?? 0) : p.stock_qty,
     stock_by_warehouse: stockByProduct[p.id] || []
@@ -94,28 +94,7 @@ router.get('/products/for-customer/:customerId', (req, res) => {
   const rows = db.prepare(`
     SELECT p.*, c.name AS category_name,
       COALESCE(cp.price, p.list_price) AS effective_price,
-      CASE WHEN cp.price IS NOT NULL THEN 1 ELSE 0 END AS has_contract_price,
-      -- "Bought" combines RouteOne-captured orders (full history) with SYSPRO
-      -- invoices (invoice_items only ever holds a rolling 30-day window - see
-      -- providers.js - so this is recent-purchases-only, not full history).
-      -- Without the invoice side, a customer who buys via SYSPRO/phone and
-      -- rarely has a RouteOne order captured would show no purchase history
-      -- at all and the "Buys" filter would silently fall back to "All".
-      ((SELECT COUNT(DISTINCT oi.order_id) FROM order_items oi
-         JOIN orders o ON o.id = oi.order_id
-         WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled') +
-       (SELECT COUNT(DISTINCT ii.invoice_id) FROM invoice_items ii
-         JOIN invoices i ON i.id = ii.invoice_id
-         WHERE i.customer_id = ? AND ii.product_id = p.id)) AS times_bought,
-      (SELECT MAX(d) FROM (
-         SELECT MAX(o.order_date) AS d FROM order_items oi
-           JOIN orders o ON o.id = oi.order_id
-           WHERE o.customer_id = ? AND oi.product_id = p.id AND o.status != 'cancelled'
-         UNION ALL
-         SELECT MAX(i.invoice_date) AS d FROM invoice_items ii
-           JOIN invoices i ON i.id = ii.invoice_id
-           WHERE i.customer_id = ? AND ii.product_id = p.id
-       )) AS last_bought_at
+      CASE WHEN cp.price IS NOT NULL THEN 1 ELSE 0 END AS has_contract_price
     FROM products p
     LEFT JOIN product_categories c ON c.id = p.category_id
     LEFT JOIN customer_prices cp ON cp.product_id = p.id AND cp.customer_id = ?
@@ -127,7 +106,71 @@ router.get('/products/for-customer/:customerId', (req, res) => {
     -- active = 1), so including it here cannot make it orderable.
     WHERE p.active = 1 OR p.discontinued = 1
     ORDER BY p.name
-  `).all(cid, cid, cid, cid, cid);
+  `).all(cid);
+
+  // "Bought" combines RouteOne-captured orders (full history) with SYSPRO
+  // invoices (invoice_items only ever holds a rolling 30-day window - see
+  // providers.js - so this is recent-purchases-only, not full history).
+  // Without the invoice side, a customer who buys via SYSPRO/phone and
+  // rarely has a RouteOne order captured would show no purchase history at
+  // all and the "Buys" filter would silently fall back to "All".
+  //
+  // The invoice side also matches delivery_customer_id, same as
+  // invoices.routes.js - a store invoiced centrally under a parent/group
+  // account (e.g. BRACKENHURST under its head office) never appears as
+  // invoices.customer_id, only as the delivery destination on the group's
+  // invoice. Without this, a group-billed store shows no "previously
+  // bought" history at all.
+  //
+  // Computed as ONE query per request (scoped to this customer's own
+  // orders/invoices - typically a few dozen to a few hundred rows), not a
+  // correlated subquery per product. The earlier per-product version had to
+  // re-evaluate against the full order_items/invoice_items tables once per
+  // product in the catalogue (958 products live) on every single request -
+  // fine against one customer in isolation, but better-sqlite3 runs
+  // synchronously on Node's one thread, so that cost stacks directly across
+  // concurrent reps instead of running in parallel. This keeps the per-request
+  // work bounded by the customer's own history, not the catalogue size.
+  //
+  // The invoice side is TWO separate UNION branches (billed-to, delivered-to)
+  // rather than one `i.customer_id = ? OR ii.delivery_customer_id = ?` - an OR
+  // spanning both sides of the invoices/invoice_items join can't be satisfied
+  // by either column's index (confirmed via EXPLAIN QUERY PLAN against the
+  // live 271k-row table: it fell back to a full index scan of every
+  // invoice_items row, ~750ms, regardless of how few rows actually matched).
+  // Splitting into a UNION lets each branch use its own index
+  // (idx_invoices_customer / idx_invoice_items_delivery_customer)
+  // independently - same result set, verified byte-for-byte against the
+  // OR version, but ~0-1ms instead.
+  const purchaseRows = db.prepare(`
+    SELECT product_id,
+      SUM(CASE WHEN src = 'order' THEN 1 ELSE 0 END) AS order_count,
+      SUM(CASE WHEN src = 'invoice' THEN 1 ELSE 0 END) AS invoice_count,
+      MAX(d) AS last_bought_at
+    FROM (
+      SELECT DISTINCT oi.product_id AS product_id, 'order' AS src, oi.order_id AS sid, o.order_date AS d
+        FROM order_items oi JOIN orders o ON o.id = oi.order_id
+        WHERE o.customer_id = ? AND o.status != 'cancelled'
+      UNION
+      SELECT DISTINCT ii.product_id AS product_id, 'invoice' AS src, ii.invoice_id AS sid, i.invoice_date AS d
+        FROM invoices i JOIN invoice_items ii ON ii.invoice_id = i.id
+        WHERE i.customer_id = ?
+      UNION
+      SELECT DISTINCT ii2.product_id AS product_id, 'invoice' AS src, ii2.invoice_id AS sid, i2.invoice_date AS d
+        FROM invoice_items ii2 JOIN invoices i2 ON i2.id = ii2.invoice_id
+        WHERE ii2.delivery_customer_id = ?
+    ) combined
+    GROUP BY product_id
+  `).all(cid, cid, cid);
+  const purchaseByProductId = {};
+  for (const r of purchaseRows) {
+    purchaseByProductId[r.product_id] = { times_bought: r.order_count + r.invoice_count, last_bought_at: r.last_bought_at };
+  }
+  for (const p of rows) {
+    const stats = purchaseByProductId[p.id];
+    p.times_bought = stats ? stats.times_bought : 0;
+    p.last_bought_at = stats ? stats.last_bought_at : null;
+  }
 
   // Reps only see stock at their own branch/warehouse - not the company-wide
   // total - since that's what's actually on hand to fulfil the order from.
@@ -197,7 +240,7 @@ router.get('/products/for-customer/:customerId', (req, res) => {
     const base = breaks.length ? breaks[0].price : finalEffectivePrice;
     const effectivePrice = hasSysproPrice || p.has_contract_price ? finalEffectivePrice : base;
 
-    return {
+    return withoutCostFields(req.user, {
       ...p,
       stock_qty: stockByProductId ? (stockByProductId[p.id] ?? 0) : p.stock_qty,
       effective_price: effectivePrice,
@@ -209,8 +252,56 @@ router.get('/products/for-customer/:customerId', (req, res) => {
       price_breaks: breaks,
       syspro_pricing: syspro || null,
       syspro_pricing_tier: sysproPricingTier
-    };
+    });
   }));
+});
+
+// R1-053: per-product purchase history for one customer, shown as an
+// expandable drop-down on the Order/Quote capture screens (mobile
+// RepOrderCapture.jsx, desktop NewOrderModal.jsx). Lazy-loaded - only fetched
+// when a rep actually expands a product, not for the whole visible list.
+//
+// Deliberately SYSPRO invoices only (invoice_items), not RouteOne order
+// history - the ticket asks specifically for "actual Syspro invoiced sales",
+// unlike the combined order+invoice times_bought count above which exists for
+// a different purpose (never showing "no history" just because a customer
+// buys by phone/SYSPRO directly).
+//
+// invoice_items only ever holds a rolling 30-day window (see providers.js) -
+// there is no more history than this to show at the per-product line-item
+// level; the client labels this "last 30 days" rather than implying it's the
+// full buying history.
+router.get('/products/:productId/purchase-history', (req, res) => {
+  const productId = req.params.productId;
+  const customerId = req.query.customer_id;
+  if (!customerId) return res.status(400).json({ error: 'customer_id is required' });
+  if (!userCanAccessCustomer(req.user, customerId)) {
+    return res.status(403).json({ error: 'Not your customer' });
+  }
+
+  // UNION of two branches, not `i.customer_id = ? OR ii.delivery_customer_id
+  // = ?` - an OR spanning the invoices/invoice_items join can't use either
+  // column's index (see products.routes.js's times_bought above / the R1-052
+  // session notes for the measured ~750ms-vs-~1ms difference on the live
+  // 271k-row table). Each branch here narrows on an indexed column first.
+  const purchases = db.prepare(`
+    SELECT ii.qty, ii.unit_price, ii.line_total, i.invoice_date AS date, i.number AS invoice_number
+      FROM invoices i JOIN invoice_items ii ON ii.invoice_id = i.id
+      WHERE i.customer_id = ? AND ii.product_id = ?
+    UNION
+    SELECT ii2.qty, ii2.unit_price, ii2.line_total, i2.invoice_date AS date, i2.number AS invoice_number
+      FROM invoice_items ii2 JOIN invoices i2 ON i2.id = ii2.invoice_id
+      WHERE ii2.delivery_customer_id = ? AND ii2.product_id = ?
+    ORDER BY date DESC
+  `).all(customerId, productId, customerId, productId);
+
+  res.json({
+    window_days: 30,
+    last_invoice_date: purchases[0]?.date ?? null,
+    total_qty: purchases.reduce((sum, p) => sum + p.qty, 0),
+    purchase_count: purchases.length,
+    purchases
+  });
 });
 
 // --- Price rules (Phase 2 pricing beyond contract prices) ---
@@ -316,6 +407,17 @@ router.get('/customer-pricing', (req, res) => {
   const { customer_code, product_code } = req.query;
   if (!customer_code || !product_code) {
     return res.status(400).json({ error: 'customer_code and product_code are required' });
+  }
+
+  // This endpoint takes a customer CODE rather than an id, which is how it
+  // ended up as the one pricing route with no ownership check - a rep could
+  // read any account's negotiated contract and buying-group pricing just by
+  // knowing its SYSPRO code. Resolve the code to an id and apply the same rule
+  // every other customer-scoped route uses.
+  const customer = db.prepare('SELECT id FROM customers WHERE code = ?').get(customer_code);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  if (!userCanAccessCustomer(req.user, customer.id)) {
+    return res.status(403).json({ error: 'Not your customer' });
   }
 
   const product = db.prepare('SELECT list_price, pack_weight_kg, conv_factor_alt_uom FROM products WHERE code = ?').get(product_code);

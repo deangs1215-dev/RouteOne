@@ -6,6 +6,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, fmtR } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
 import OrderSummary from '../components/OrderSummary';
+import ProductPurchaseHistory from '../components/ProductPurchaseHistory';
 import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2, priceSourceForLine, PriceSourceBadge } from '../components/NewOrderModal';
 import { queueWrite } from '../offline';
 import { useAuth } from '../auth';
@@ -33,6 +34,10 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   // identical whether reached this way or via search, so editing it here needs
   // no separate "cart" UI or delete-and-re-add.
   const [onlyInCart, setOnlyInCart] = useState(false);
+  // R1-053: which product's purchase-history panel is open, if any - only one
+  // at a time, keeps the scrolling list from getting cluttered with several
+  // expanded panels at once.
+  const [expandedHistoryId, setExpandedHistoryId] = useState(null);
   const [cart, setCart] = useState({}); // productId -> qty
   const [notes, setNotes] = useState('');
   // Customer's own PO / reference - its own field, never merged into notes.
@@ -42,7 +47,12 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   // R1-046: 'idle' (nothing to save yet) | 'saving' | 'saved' | 'error'.
   const [draftStatus, setDraftStatus] = useState('idle');
   const draftSaveTimer = useRef(null);
-  const [showSummary, setShowSummary] = useState(false); // review screen before final submit
+  // R1-052: 'cart' (product lines) -> 'notes' (Order/Quote Notes & Special
+  // Instructions, its own step) -> 'review' (final summary, notes shown
+  // read-only). Was a single showSummary boolean before this ticket - notes
+  // lived as a small field at the bottom of the cart screen instead of a
+  // dedicated stop between capture and review.
+  const [step, setStep] = useState('cart');
   const [signature, setSignature] = useState(null); // customer signature - required before an order can be submitted (not required for quotes)
 
   // Resuming a saved draft - load its cart/notes once, on top of whatever the
@@ -64,10 +74,10 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     }).catch(() => {});
   }, [draftId]);
 
-  // The product list can be scrolled far down before "Review" is tapped -
-  // without this the review screen renders starting from that same scroll
-  // position instead of its own top.
-  useEffect(() => { if (showSummary) window.scrollTo(0, 0); }, [showSummary]);
+  // The product list can be scrolled far down before "Continue"/"Review" is
+  // tapped - without this the notes/review screen renders starting from that
+  // same scroll position instead of its own top.
+  useEffect(() => { if (step !== 'cart') window.scrollTo(0, 0); }, [step]);
   const [done, setDone] = useState(null); // { number?, queued? }
   const [orderEmailInfo, setOrderEmailInfo] = useState(null); // { recipients }
   const [sendToRep, setSendToRep] = useState(false);
@@ -322,8 +332,8 @@ export default function RepOrderCapture({ base = '/mobile' }) {
 
   return (
     <>
-      {!showSummary && <MobileHeader title={`${noun} — ${customer.name}`} back={`${base}/customers/${id}`} />}
-      {!showSummary && <div className="space-y-3 p-4 pb-36">
+      {step === 'cart' && <MobileHeader title={`${noun} — ${customer.name}`} back={`${base}/customers/${id}`} />}
+      {step === 'cart' && <div className="space-y-3 p-4 pb-36">
         <ErrorNote error={error} />
         <div className="relative">
           <input className="input pr-9" placeholder="Search products…" value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -368,8 +378,8 @@ export default function RepOrderCapture({ base = '/mobile' }) {
             const gDiscountPct = p.syspro_pricing_tier ? discountPctFor(listPrice, p.effective_price) : null;
             const blocked = !!p.discontinued || !!p.no_price;
             return (
-              <div key={p.id} className={`card flex items-center gap-3 p-3 ${
-                blocked ? 'border-red-200 bg-red-50/50' : ''}`}>
+              <div key={p.id} className={`card p-3 ${blocked ? 'border-red-200 bg-red-50/50' : ''}`}>
+              <div className="flex items-center gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">
                     <span className={blocked ? 'text-red-700 line-through' : ''}>{p.name}</span>
@@ -431,6 +441,18 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                   </div>
                 )}
               </div>
+              {/* R1-053: lazy-loaded - ProductPurchaseHistory only fetches once expanded */}
+              <button type="button"
+                className="mt-1.5 text-[11px] font-medium text-brand-600"
+                onClick={() => setExpandedHistoryId((cur) => (cur === p.id ? null : p.id))}>
+                {expandedHistoryId === p.id ? '▲ Hide purchase history' : '▼ Purchase history'}
+              </button>
+              {expandedHistoryId === p.id && (
+                <div className="mt-2">
+                  <ProductPurchaseHistory productId={p.id} customerId={Number(id)} />
+                </div>
+              )}
+              </div>
             );
           })}
           {filtered.length === 0 && <div className="card p-6 text-center text-sm text-slate-400">No products match.</div>}
@@ -445,13 +467,6 @@ export default function RepOrderCapture({ base = '/mobile' }) {
               placeholder="Their PO or reference number" />
           </div>
         )}
-
-        <div>
-          <label className="label">{noun} notes</label>
-          <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-            placeholder="Optional" />
-        </div>
 
         {/* R1-046: small, unobtrusive autosave status - the rep never has to
             remember to press a save button. A failed save (offline, no draft
@@ -470,8 +485,37 @@ export default function RepOrderCapture({ base = '/mobile' }) {
         )}
       </div>}
 
+      {/* R1-052: Notes & Special Instructions step - between the cart and the
+          final review, not a field on the cart screen. */}
+      {step === 'notes' && (
+        <>
+          <MobileHeader title={`${noun} notes`} back={null} />
+          <div className="p-4 pb-40 space-y-4">
+            <div>
+              <label className="label">{noun} Notes &amp; Special Instructions</label>
+              <textarea
+                className="input"
+                rows={8}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder={'e.g. free stock required, COA required, sample/promotional stock, special delivery instructions, customer-specific instructions, telesales instructions…'}
+              />
+              <p className="mt-1 text-xs text-slate-400">Optional — leave blank if there's nothing special to note.</p>
+            </div>
+          </div>
+          <div className="fixed bottom-14 left-1/2 z-30 w-full max-w-md -translate-x-1/2 space-y-2 border-t border-slate-200 bg-white p-3">
+            <button className="btn-primary w-full py-3" onClick={() => setStep('review')}>
+              {isQuote ? 'Review quote' : 'Review order'}
+            </button>
+            <button className="btn-secondary w-full py-2" onClick={() => setStep('cart')}>
+              Back to cart
+            </button>
+          </div>
+        </>
+      )}
+
       {/* Summary review screen */}
-      {showSummary && (
+      {step === 'review' && (
         <>
           <MobileHeader title={`Review ${isQuote ? 'quote' : 'order'}`} back={null} />
           <div className="p-4 pb-64 space-y-4">
@@ -595,22 +639,22 @@ export default function RepOrderCapture({ base = '/mobile' }) {
             <button className="btn-primary w-full py-3" onClick={confirmSubmit} disabled={busy || (!isQuote && !signature)}>
               {busy ? 'Submitting…' : `Confirm & ${isQuote ? 'create quote' : 'submit order'}`}
             </button>
-            <button className="btn-secondary w-full py-2" onClick={() => setShowSummary(false)} disabled={busy}>
-              Back to cart
+            <button className="btn-secondary w-full py-2" onClick={() => setStep('notes')} disabled={busy}>
+              Back
             </button>
           </div>
         </>
       )}
 
       {/* Sticky cart summary */}
-      {!showSummary && cartLines.length > 0 && (
+      {step === 'cart' && cartLines.length > 0 && (
         <div className="fixed bottom-14 left-1/2 z-30 w-full max-w-md -translate-x-1/2 border-t border-slate-200 bg-white p-3">
           <div className="mb-2 flex justify-between text-sm">
             <span className="text-slate-500">{cartLines.length} products · subtotal {fmtR(subtotal)}</span>
             <span className="font-bold">{fmtR(total)} incl. VAT</span>
           </div>
-          <button className="btn-primary w-full py-3" onClick={() => setShowSummary(true)} disabled={busy}>
-            {busy ? 'Loading…' : isQuote ? 'Review quote' : 'Review order'}
+          <button className="btn-primary w-full py-3" onClick={() => setStep('notes')} disabled={busy}>
+            {busy ? 'Loading…' : 'Continue'}
           </button>
         </div>
       )}

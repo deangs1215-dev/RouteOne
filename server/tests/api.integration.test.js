@@ -269,6 +269,50 @@ test('rep cannot mutate or convert another rep quote', async () => {
   assert.equal(convert.response.status, 403);
 });
 
+test('converting a quote honours quoted prices but re-checks product availability', async () => {
+  const repCookie = await login(fixture.reps[0].email);
+  const newQuote = async () => {
+    const created = await request('/api/quotes', {
+      method: 'POST',
+      cookie: repCookie,
+      origin: allowedOrigin,
+      body: {
+        customer_id: fixture.customers[0].id,
+        items: [{ product_id: fixture.product.id, qty: 2 }]
+      }
+    });
+    assert.equal(created.response.status, 200, JSON.stringify(created.body));
+    return created.body;
+  };
+
+  // Happy path: a live product converts, at the quoted total.
+  const live = await newQuote();
+  const converted = await request(`/api/quotes/${live.id}/convert`, {
+    method: 'POST', cookie: repCookie, origin: allowedOrigin
+  });
+  assert.equal(converted.response.status, 200, JSON.stringify(converted.body));
+  assert.equal(converted.body.total, live.total);
+
+  // A quote written before the product was discontinued must not convert -
+  // otherwise conversion is a way around the discontinued guard that order
+  // and quote capture both enforce.
+  const stale = await newQuote();
+  const db = new Database(databasePath);
+  db.prepare('UPDATE products SET active = 0, discontinued = 1 WHERE id = ?').run(fixture.product.id);
+  db.close();
+  try {
+    const blocked = await request(`/api/quotes/${stale.id}/convert`, {
+      method: 'POST', cookie: repCookie, origin: allowedOrigin
+    });
+    assert.equal(blocked.response.status, 400, JSON.stringify(blocked.body));
+    assert.match(blocked.body.error, /discontinued/i);
+  } finally {
+    const restore = new Database(databasePath);
+    restore.prepare('UPDATE products SET active = 1, discontinued = 0 WHERE id = ?').run(fixture.product.id);
+    restore.close();
+  }
+});
+
 test('draft, submit, and cancel transitions preserve stock integrity', async () => {
   const repCookie = await login(fixture.reps[0].email);
   const adminCookie = await login(fixture.admin.email);
@@ -333,6 +377,105 @@ test('password-change gate and logout lifecycle work end to end', async () => {
   });
   assert.equal(loggedOut.response.status, 200);
   assert.match(loggedOut.response.headers.get('set-cookie') || '', /routeone_session=;/);
+});
+
+test('changing a password ends every other session for that account', async () => {
+  // A user of its own: this test rotates a password, and the load test below
+  // logs its 40 reps in with the shared one.
+  const email = 'rotation.probe@routeone.test';
+  const setup = new Database(databasePath);
+  const repRoleId = setup.prepare("SELECT id FROM roles WHERE name = 'rep'").get().id;
+  setup.prepare(`
+    INSERT INTO users (name, email, password_hash, role_id, active, must_change_password)
+    VALUES (?, ?, ?, ?, 1, 0)
+  `).run('Rotation Probe', email, bcrypt.hashSync(testPassword, 10), repRoleId);
+  setup.close();
+
+  const staleCookie = await login(email);
+  const activeCookie = await login(email);
+  assert.equal((await request('/api/dashboard', { cookie: staleCookie })).response.status, 200);
+
+  const changed = await request('/api/auth/change-password', {
+    method: 'POST',
+    cookie: activeCookie,
+    origin: allowedOrigin,
+    body: { current_password: testPassword, new_password: 'Rotated-RouteOne-Password-2026' }
+  });
+  assert.equal(changed.response.status, 200, JSON.stringify(changed.body));
+
+  // The session that performed the change is re-issued and keeps working...
+  const reissued = changed.response.headers.get('set-cookie').split(';')[0];
+  assert.equal((await request('/api/dashboard', { cookie: reissued })).response.status, 200);
+  // ...while every token minted before the change is dead, including the one
+  // that made the request. A stolen session must not outlive the password.
+  assert.equal((await request('/api/dashboard', { cookie: staleCookie })).response.status, 401);
+  assert.equal((await request('/api/dashboard', { cookie: activeCookie })).response.status, 401);
+
+  const cleanup = new Database(databasePath);
+  cleanup.prepare('DELETE FROM users WHERE email = ?').run(email);
+  cleanup.close();
+});
+
+test('rep cannot price another rep customer and never receives cost price', async () => {
+  const repCookie = await login(fixture.reps[0].email);
+  const adminCookie = await login(fixture.admin.email);
+  const db = new Database(databasePath);
+  const mine = db.prepare('SELECT code FROM customers WHERE id = ?').get(fixture.customers[0].id);
+  const theirs = db.prepare('SELECT code FROM customers WHERE id = ?').get(fixture.customers[1].id);
+  const product = db.prepare('SELECT code FROM products WHERE id = ?').get(fixture.product.id);
+  db.close();
+
+  const pricingUrl = (code) =>
+    `/api/customer-pricing?customer_code=${encodeURIComponent(code)}&product_code=${encodeURIComponent(product.code)}`;
+  assert.equal((await request(pricingUrl(mine.code), { cookie: repCookie })).response.status, 200);
+  // Contract / buying-group pricing for an account this rep does not own.
+  assert.equal((await request(pricingUrl(theirs.code), { cookie: repCookie })).response.status, 403);
+
+  const repProducts = await request('/api/products', { cookie: repCookie });
+  assert.equal(repProducts.response.status, 200);
+  assert.ok(repProducts.body.length > 0);
+  assert.ok(repProducts.body.every((p) => !('cost_price' in p)), 'rep product list leaked cost_price');
+
+  const snapshot = await request('/api/sync/snapshot', { cookie: repCookie });
+  assert.equal(snapshot.response.status, 200, JSON.stringify(snapshot.body));
+  assert.ok(snapshot.body.products.every((p) => !('cost_price' in p)), 'offline snapshot leaked cost_price');
+
+  const repAnalytics = await request('/api/analytics', { cookie: repCookie });
+  assert.ok(!('margin' in repAnalytics.body.totals), 'rep analytics leaked margin');
+
+  // Office roles still need all of it - this must scope down, not remove.
+  const adminProducts = await request('/api/products', { cookie: adminCookie });
+  assert.ok(adminProducts.body.some((p) => 'cost_price' in p), 'office lost cost_price');
+  const adminAnalytics = await request('/api/analytics', { cookie: adminCookie });
+  assert.ok('margin' in adminAnalytics.body.totals, 'office lost margin');
+});
+
+test('an unrecognised role is denied, not defaulted to office access', async () => {
+  const email = 'auditor@routeone.test';
+  const db = new Database(databasePath);
+  const roleId = db.prepare("INSERT INTO roles (name) VALUES ('auditor')").run().lastInsertRowid;
+  db.prepare(`
+    INSERT INTO users (name, email, password_hash, role_id, active, must_change_password)
+    VALUES (?, ?, ?, ?, 1, 0)
+  `).run('Auditor', email, bcrypt.hashSync(testPassword, 10), roleId);
+  db.close();
+
+  try {
+    // Credentials are valid, so the login itself succeeds - the role is only
+    // rejected once a scoped endpoint is reached. Before this guard, a role
+    // that was neither office nor rep fell into the office branch of every
+    // `scope.isRep ? ... : ...` and was handed the whole company's data.
+    const cookie = await login(email);
+    const blocked = await request('/api/dashboard', { cookie });
+    assert.equal(blocked.response.status, 403, JSON.stringify(blocked.body));
+    const customers = await request('/api/customers', { cookie });
+    assert.equal(customers.response.status, 403);
+  } finally {
+    const cleanup = new Database(databasePath);
+    cleanup.prepare('DELETE FROM users WHERE email = ?').run(email);
+    cleanup.prepare("DELETE FROM roles WHERE name = 'auditor'").run();
+    cleanup.close();
+  }
 });
 
 test('document uploads validate file signatures and remain authenticated', async () => {

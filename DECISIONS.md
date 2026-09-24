@@ -2,6 +2,47 @@
 
 Record of significant technical decisions, rationale, and trade-offs.
 
+## 2026-09-24: Migrate from SQLite to SQL Server (primary database)
+
+**Decision:** Move RouteOne's primary database from SQLite to SQL Server. Both RouteOne and SYSPRO will be on the same SQL Server instance.
+
+**Rationale:**
+- **Performance bottleneck identified:** Customer_pricing sync writes 4.5M rows to SQLite in 70-80 minutes, even with optimizations (256MB cache, row sorting, batch processing). SQLite write throughput hits hard limits with bulk operations.
+- **Lock contention:** SQLite's single-writer constraint causes app freezes during sync (confirmed in production: app unresponsive while sync locked the database).
+- **Scale mismatch:** SQLite is designed for moderate workloads; RouteOne's 4.5M+ row syncs and concurrent app reads exceed SQLite's practical sweet spot.
+- **SQL Server is already there:** SYSPRO runs on SQL Server; using the same server eliminates sync bottleneck entirely. RouteOne can query SYSPRO views directly instead of batch-syncing to a separate database.
+- **Operational simplicity:** One database to manage, backup, and monitor instead of two.
+
+**Trade-offs:**
+- Requires Windows Server or Linux with SQL Server (no longer Windows-agnostic with a file-based DB)
+- Migration involves schema translation, data migration, connection string changes
+- Adds SQL Server licensing cost (if not already covered by SYSPRO)
+
+**Implementation plan:**
+- See MIGRATION_PLAN.md for step-by-step approach
+- Dev environment first, then test, then production
+- Rollback plan: revert to SQLite if SQL Server configuration fails (documented in migration plan)
+
+**Expected improvements:**
+- Sync write phase: 70-80 min → ~5-10 min (SQL Server bulk insert speed)
+- Total sync time: 75-85 min → ~10-15 min
+- App responsiveness: no more freezing during sync
+- Concurrent query performance: SQL Server handles concurrent reads much better than SQLite
+
+**Status:** Approved 2026-09-24. Phase 1 (database schema & configuration) completed 2026-09-24.
+
+**Progress:**
+- ✅ Phase 1.1: SQL Server schema created (`docs/sql/routeone-schema-mssql.sql`)
+- ✅ Phase 1.2: `.env` configured for SQL Server + SMTP
+- ⏳ Phase 1.3: Pending - Application code rewrite (server/db.js and all routes)
+- ⏳ Phase 2: Testing (development environment validation)
+- ⏳ Phase 3: Production migration
+- ⏳ Phase 4: Cleanup and documentation
+
+**Next session:** Start Phase 1.3 (rewrite `server/db.js` to use `mssql` package instead of `better-sqlite3`). See MIGRATION_PLAN.md for detailed scope.
+
+---
+
 ## 2026-07-31: SECRET_KEY unconditionally required (no insecure fallback)
 
 **Decision:** `server/crypto.js` now requires `SECRET_KEY` in `.env` unconditionally and throws at startup if missing. Previously only threw when `NODE_ENV=production`; test/dev modes fell back to a hardcoded insecure key.

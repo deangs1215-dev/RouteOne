@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { db } from '../db.js';
 
 const router = Router();
-const KINDS = ['order', 'quote', 'form'];
+const KINDS = ['order', 'quote', 'form', 'visit'];
 
 router.get('/drafts', (req, res) => {
   const rows = db.prepare(`

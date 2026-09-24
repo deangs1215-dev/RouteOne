@@ -7,6 +7,173 @@ body { @apply bg-slate-100 text-slate-800 antialiased; }
 
 .card { @apply bg-white rounded-xl border border-slate-200 shadow-sm; }
 
+/* ---------------------------------------------------------------------------
+   Mobile app themes.
+
+   Only the mobile rep app sets data-theme (see mobile/theme.jsx), so every
+   rule below is inert on the desktop app even though both share this file.
+   Colours are "R G B" channel triplets, not hex, so Tailwind's opacity
+   modifiers work against them - see the `token()` helper in tailwind.config.js.
+
+   To add a theme: add a block here and an entry to THEMES in mobile/theme.jsx.
+   No screen markup changes, because screens only ever name a role.
+--------------------------------------------------------------------------- */
+
+html[data-theme='light'] {
+  --c-app: 241 245 249;
+  --c-surface: 255 255 255;
+  --c-raised: 248 250 252;
+  --c-line: 226 232 240;
+  --c-ink: 30 41 59;
+  --c-muted: 100 116 139;
+  --c-faint: 148 163 184;
+  --c-accent: 26 126 168;
+  --c-accent-ink: 255 255 255;
+  --c-accent-soft: 236 246 251;
+  --c-chrome: 21 42 68;
+  --c-chrome-ink: 255 255 255;
+  --c-ok: 22 163 74;
+  --c-warn: 217 119 6;
+  --c-bad: 220 38 38;
+  --r-card: 0.75rem;
+  --r-control: 0.5rem;
+  --r-pill: 0.5rem;
+  --card-shadow: 0 1px 2px 0 rgb(15 23 42 / 0.06);
+  --heading-case: none;
+  --heading-tracking: normal;
+  --heading-weight: 600;
+}
+
+/* The long-standing corporate palette: deep navy with a muted brass accent. */
+html[data-theme='navy'] {
+  --c-app: 10 18 32;
+  --c-surface: 15 27 48;
+  --c-raised: 22 37 61;
+  --c-line: 30 50 82;
+  --c-ink: 241 245 249;
+  --c-muted: 148 163 184;
+  --c-faint: 100 116 139;
+  --c-accent: 201 164 99;
+  --c-accent-ink: 10 18 32;
+  --c-accent-soft: 30 50 82;
+  --c-chrome: 15 27 48;
+  --c-chrome-ink: 241 245 249;
+  --c-ok: 52 211 153;
+  --c-warn: 251 191 36;
+  --c-bad: 248 113 113;
+  --r-card: 0.75rem;
+  --r-control: 0.5rem;
+  --r-pill: 0.5rem;
+  --card-shadow: none;
+  --heading-case: none;
+  --heading-tracking: normal;
+  --heading-weight: 600;
+}
+
+/* Smart Home / IoT dashboard: near-black neutral ground, generously rounded
+   cards, and a single vivid orange carrying every active state. Colours
+   sampled from the reference artwork rather than estimated - the ground
+   clusters at #181820, cards at #282828, and the accent between #d05010 and
+   #e06018, so the accent below sits at the centre of that range. */
+html[data-theme='smart-home'] {
+  --c-app: 24 25 32;
+  --c-surface: 38 40 46;
+  --c-raised: 48 50 56;
+  --c-line: 58 61 68;
+  --c-ink: 255 255 255;
+  --c-muted: 155 161 168;
+  --c-faint: 107 113 120;
+  --c-accent: 226 102 28;
+  --c-accent-ink: 255 255 255;
+  --c-accent-soft: 58 43 32;
+  --c-chrome: 28 32 35;
+  --c-chrome-ink: 255 255 255;
+  --c-ok: 74 222 128;
+  --c-warn: 251 191 36;
+  --c-bad: 248 113 113;
+  --r-card: 1.25rem;
+  --r-control: 0.875rem;
+  --r-pill: 9999px;
+  --card-shadow: none;   /* depth comes from the surface step, not a shadow */
+  --heading-case: none;
+  --heading-tracking: -0.01em;
+  --heading-weight: 700;
+}
+
+/* Sneaker marketplace: bright near-white ground, white cards lifted on a real
+   shadow, pure-black headings set HEAVY and UPPERCASE, and a hot orange-red
+   carrying the active states. Sampled from the reference - the ground reads
+   #f8f8f8, headings are true black, chip greys step #f0f0f0 -> #e0e0e0, and
+   the accent clusters between #f85820 and #f86828, so the value below sits at
+   the centre of that range.
+
+   This is the theme that made typography and elevation into tokens: it is not
+   a recolour of the dark themes, it is a different weight and a different
+   sense of depth. */
+html[data-theme='sneaker'] {
+  --c-app: 244 244 245;
+  --c-surface: 255 255 255;
+  --c-raised: 240 240 240;
+  --c-line: 228 228 228;
+  --c-ink: 10 10 10;
+  --c-muted: 107 107 107;
+  --c-faint: 154 154 154;
+  --c-accent: 250 96 36;
+  --c-accent-ink: 255 255 255;
+  --c-accent-soft: 255 237 228;
+  --c-chrome: 255 255 255;
+  --c-chrome-ink: 10 10 10;
+  --c-ok: 22 163 74;
+  --c-warn: 217 119 6;
+  --c-bad: 220 38 38;
+  --r-card: 1.5rem;
+  --r-control: 0.875rem;
+  --r-pill: 9999px;
+  --card-shadow: 0 4px 16px -2px rgb(0 0 0 / 0.10), 0 2px 4px -2px rgb(0 0 0 / 0.06);
+  --heading-case: uppercase;
+  --heading-tracking: -0.01em;
+  --heading-weight: 800;
+}
+
+/* The themed surface has to reach the document, or an overscroll bounce and
+   any full-screen overlay still show the desktop app's light slate ground. */
+html[data-theme] body {
+  background-color: rgb(var(--c-app));
+  color: rgb(var(--c-ink));
+}
+
+/* Shared primitives from components/ui.jsx (cards, inputs, modals) are used by
+   both apps, so they are re-pointed at the tokens here rather than edited in
+   place - inside the mobile app they follow the theme, on desktop they are
+   untouched. */
+html[data-theme] .card {
+  @apply bg-surface border-line rounded-card;
+  box-shadow: var(--card-shadow);
+}
+
+/* Screen and section headings. Colour alone could not express the Sneaker
+   reference - its identity is heavy uppercase type - so weight, case and
+   tracking are themed here too, and every heading opts in with .app-title
+   rather than hardcoding a font treatment. */
+html[data-theme] .app-title {
+  text-transform: var(--heading-case);
+  letter-spacing: var(--heading-tracking);
+  font-weight: var(--heading-weight);
+}
+/* Small label above a figure - uppercase and tracked out in every theme,
+   which is the one type detail all the references share. */
+html[data-theme] .app-eyebrow {
+  @apply text-[11px] font-semibold uppercase tracking-wide text-muted;
+}
+html[data-theme] .input {
+  @apply bg-raised border-line text-ink rounded-control placeholder:text-faint;
+  @apply focus:ring-accent focus:border-accent;
+}
+html[data-theme] .btn-primary { @apply bg-accent text-accent-ink rounded-control hover:brightness-110; }
+html[data-theme] .btn-secondary { @apply bg-raised border-line text-ink rounded-control hover:brightness-110; }
+html[data-theme] .label { @apply text-muted; }
+html[data-theme] .th { @apply text-muted; }
+
 /* Modal panel height. On mobile browsers 100vh measures the viewport WITHOUT
    the address bar, so a panel sized to it extends below what is actually
    visible - the end of its scroll area, and any Submit button there, cannot be

@@ -3,7 +3,7 @@
 // today's visits and active form templates.
 import { Router } from 'express';
 import { db, priceBreaks, activeRules } from '../db.js';
-import { scopeForUser } from '../auth.js';
+import { scopeForUser, withoutCostFields } from '../auth.js';
 
 const router = Router();
 
@@ -24,7 +24,10 @@ router.get('/sync/snapshot', (req, res) => {
     SELECT p.*, cat.name AS category_name
     FROM products p LEFT JOIN product_categories cat ON cat.id = p.category_id
     WHERE p.active = 1 ORDER BY p.name
-  `).all().map((p) => ({ ...p, price_breaks: priceBreaks(p, rules) }));
+  `)
+    // priceBreaks needs the whole row, so cost is stripped after it is computed -
+    // this snapshot is cached on the device, where it would otherwise sit readable.
+    .all().map((p) => withoutCostFields(req.user, { ...p, price_breaks: priceBreaks(p, rules) }));
 
   const contractPrices = db.prepare(`
     SELECT cp.customer_id, cp.product_id, cp.price FROM customer_prices cp

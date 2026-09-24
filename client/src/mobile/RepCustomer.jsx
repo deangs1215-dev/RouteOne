@@ -142,6 +142,8 @@ export default function RepCustomer({ base = '/mobile' }) {
   const [timelineVisit, setTimelineVisit] = useState(null); // visit id shown in the summary modal
   const [timelineTask, setTimelineTask] = useState(null); // task item shown in the detail modal
   const [timelineInvoice, setTimelineInvoice] = useState(null); // invoice item shown in the detail modal
+  const visitDraftId = useRef(null); // draft backing the in-progress visit's notes, once created
+  const visitDraftSaveTimer = useRef(null);
 
   const loadTasks = () => api.get(`/customers/${id}/tasks`).then(setTasks).catch(() => {});
   const loadTimeline = () => api.get(`/customers/${id}/timeline`).then(setTimeline).catch(() => {});
@@ -168,6 +170,23 @@ export default function RepCustomer({ base = '/mobile' }) {
     // Load existing photos for today's visit (whether checked-in or just planned).
     if (av?.id) api.get(`/visits/${av.id}/photos`).then(setPhotos).catch(() => setPhotos([]));
     else setPhotos([]);
+    // Resume a visit-notes draft if this visit is already in progress (e.g. the
+    // rep got interrupted and reopened the app) - otherwise start clean.
+    if (av?.status === 'in_progress') {
+      try {
+        const drafts = await api.get('/drafts');
+        const draft = drafts.find((d) => d.kind === 'visit' && d.visit_id === av.id);
+        if (draft) {
+          visitDraftId.current = draft.id;
+          setNotes(draft.data.notes || '');
+          setOutcome(draft.data.outcome || 'order');
+        } else {
+          visitDraftId.current = null;
+        }
+      } catch { /* best-effort - notes typed this session still work without a draft */ }
+    } else {
+      visitDraftId.current = null;
+    }
     try { setOfflineVisit(JSON.parse(localStorage.getItem(offlineVisitKey(id)))); } catch { setOfflineVisit(null); }
   };
   useEffect(() => {
@@ -178,6 +197,26 @@ export default function RepCustomer({ base = '/mobile' }) {
     api.get('/visits/open').then(setOpenVisit).catch(() => {});
     loadTasks();
   }, [id]);
+
+  // Autosave visit notes/outcome as a draft while checked in, so an interrupted
+  // visit (app closed, phone dies, tab lost) doesn't lose what was typed - only
+  // check-out itself submits the real visit record. Debounced, online-only:
+  // there's no offline queue for this, since it's a convenience save, not the
+  // check-out write the offline outbox already protects.
+  useEffect(() => {
+    if (activeVisit?.status !== 'in_progress') return;
+    clearTimeout(visitDraftSaveTimer.current);
+    visitDraftSaveTimer.current = setTimeout(() => {
+      const data = { notes, outcome };
+      const label = `${c?.name || 'Visit'} - in progress`;
+      const save = visitDraftId.current
+        ? api.put(`/drafts/${visitDraftId.current}`, { label, data })
+        : api.post('/drafts', { kind: 'visit', customer_id: c?.id, visit_id: activeVisit.id, label, data })
+            .then((r) => { visitDraftId.current = r.id; });
+      save.catch(() => {}); // best-effort - a failed autosave shouldn't interrupt the rep
+    }, 1000);
+    return () => clearTimeout(visitDraftSaveTimer.current);
+  }, [notes, outcome, activeVisit?.id, activeVisit?.status]);
 
   // Arrived here from the Drafts screen to resume an in-progress form -
   // reopen the fill modal pre-loaded with the saved answers.
@@ -245,6 +284,16 @@ export default function RepCustomer({ base = '/mobile' }) {
     setBusy(false);
   };
 
+  // The visit is over one way or another - drop its notes draft. Best-effort:
+  // a leftover draft is harmless (it'd just show as a stale "in progress" entry
+  // in Drafts), so a failed delete here isn't worth surfacing to the rep.
+  const discardVisitDraft = () => {
+    clearTimeout(visitDraftSaveTimer.current);
+    const draftId = visitDraftId.current;
+    visitDraftId.current = null;
+    if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
+  };
+
   const checkOut = async () => {
     setBusy(true);
     setError('');
@@ -262,12 +311,14 @@ export default function RepCustomer({ base = '/mobile' }) {
       localStorage.removeItem(offlineVisitKey(id));
       setOfflineVisit(null);
       setNotes('');
+      discardVisitDraft();
       setBusy(false);
       return;
     }
     try {
       await api.post(`/visits/${activeVisit.id}/check-out`, { ...pos, notes: notes || null, outcome });
       setNotes('');
+      discardVisitDraft();
       await load();
     } catch (e) {
       if (e.isNetworkError) {
@@ -275,6 +326,7 @@ export default function RepCustomer({ base = '/mobile' }) {
         queueWrite('POST', `/visits/${activeVisit.id}/check-out`, { ...pos, notes: notes || null, outcome });
         setActiveVisit(null);
         setNotes('');
+        discardVisitDraft();
       } else setError(e.message);
     }
     setBusy(false);
@@ -425,11 +477,11 @@ export default function RepCustomer({ base = '/mobile' }) {
           </button>
           {menuOpen && (
             <div className="card mt-2 max-h-96 divide-y divide-slate-100 overflow-y-auto p-0">
-              <Link to={`${base}/customers/${c.id}/order${visitParam}`} className="block px-4 py-3 text-sm hover:bg-slate-50">🧾 New order</Link>
-              <Link to={`${base}/customers/${c.id}/order${visitParam ? visitParam + '&' : '?'}kind=quote`} className="block px-4 py-3 text-sm hover:bg-slate-50">📄 New quote</Link>
+              <Link to={`${base}/customers/${c.id}/order${visitParam}`} className="block px-4 py-3 text-sm hover:bg-slate-50 hover:text-slate-900">🧾 New order</Link>
+              <Link to={`${base}/customers/${c.id}/order${visitParam ? visitParam + '&' : '?'}kind=quote`} className="block px-4 py-3 text-sm hover:bg-slate-50 hover:text-slate-900">📄 New quote</Link>
               {templates.length > 0 && <div className="px-4 pt-2 pb-1 text-[10px] font-semibold uppercase text-slate-400">Forms</div>}
               {templates.map((t) => (
-                <button key={t.id} className="flex w-full items-center justify-between px-4 py-3 text-left text-sm hover:bg-slate-50"
+                <button key={t.id} className="flex w-full items-center justify-between px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                   onClick={() => { setFillingForm(t); setMenuOpen(false); }}>
                   <span>{t.name}</span>
                   <span className="text-xs">{formsDone.includes(t.id) ? '✅' : '›'}</span>
@@ -458,17 +510,17 @@ export default function RepCustomer({ base = '/mobile' }) {
               </button>
               {checkInMenuOpen && !busy && (
                 <div className="card mt-2 divide-y divide-slate-100 p-0">
-                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50"
+                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                     onClick={() => { setCheckInMenuOpen(false); checkIn('onsite'); }}>
                     <div className="font-medium">📍 Onsite</div>
                     <div className="text-xs text-slate-400">Using {c.name}'s address on record</div>
                   </button>
-                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50"
+                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                     onClick={() => { setCheckInMenuOpen(false); setCheckInAddressPrompt('onsite_manual'); }}>
                     <div className="font-medium">📍 Onsite (manual address)</div>
                     <div className="text-xs text-slate-400">SYSPRO's address is wrong — enter the correct one</div>
                   </button>
-                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50"
+                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                     onClick={() => { setCheckInMenuOpen(false); setCheckInAddressPrompt('offsite'); }}>
                     <div className="font-medium">☕ Offsite</div>
                     <div className="text-xs text-slate-400">Meeting them elsewhere — coffee shop, etc.</div>
@@ -579,7 +631,7 @@ export default function RepCustomer({ base = '/mobile' }) {
             {/* Risk banner for the 40-69 band; at 70+ the AI alerts card below carries it. */}
             {intel && intel.risk_score >= 40 && !intel.actions?.some((a) => a.type === 'churn') && (
               <div className={`mb-2 rounded-lg px-3 py-2 text-xs ${intel.risk_score >= 70 ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
-                Churn risk {intel.risk_score}/100 — last order {intel.last_order_at ? `${intel.recency_days} days ago` : 'never'}
+                Churn risk {intel.risk_score}/100 — last invoice {intel.last_invoice_at ? `${intel.recency_days} days ago` : 'never'}
                 {intel.decline_pct > 0 && `, spend down ${intel.decline_pct}%`}
               </div>
             )}
@@ -644,12 +696,26 @@ export default function RepCustomer({ base = '/mobile' }) {
                 </div>
               ))}
               {photos.length < 10 && (
-                <label className={`flex h-20 w-20 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 hover:border-brand-500 ${busy ? 'opacity-50' : ''}`}>
-                  <span className="text-2xl">📷</span>
-                  <span className="text-[10px] font-medium">{busy ? 'Saving…' : 'Take photo'}</span>
-                  <input type="file" accept="image/*" capture="environment" className="hidden" disabled={busy}
-                    onChange={(e) => e.target.files[0] && addPhoto(e.target.files[0])} />
-                </label>
+                <>
+                  <label className={`flex h-20 w-20 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 hover:border-brand-500 ${busy ? 'opacity-50' : ''}`}>
+                    <span className="text-2xl">📷</span>
+                    <span className="text-[10px] font-medium">{busy ? 'Saving…' : 'Take photo'}</span>
+                    {/* capture="environment" forces the camera directly, rather
+                        than the OS picker's photo-library/camera choice. */}
+                    <input type="file" accept="image/*" capture="environment" className="hidden" disabled={busy}
+                      onChange={(e) => { e.target.files[0] && addPhoto(e.target.files[0]); e.target.value = ''; }} />
+                  </label>
+                  {/* R1-047: same upload path as the camera tile (addPhoto) -
+                      just without `capture`, so the OS opens its normal file
+                      picker (gallery/library) instead of jumping straight to
+                      the camera. Works the same on phones and tablets. */}
+                  <label className={`flex h-20 w-20 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 hover:border-brand-500 ${busy ? 'opacity-50' : ''}`}>
+                    <span className="text-2xl">🖼️</span>
+                    <span className="text-[10px] font-medium text-center leading-tight">{busy ? 'Saving…' : 'Choose from gallery'}</span>
+                    <input type="file" accept="image/*" className="hidden" disabled={busy}
+                      onChange={(e) => { e.target.files[0] && addPhoto(e.target.files[0]); e.target.value = ''; }} />
+                  </label>
+                </>
               )}
             </div>
           ) : (

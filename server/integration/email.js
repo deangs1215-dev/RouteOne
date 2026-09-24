@@ -5,6 +5,7 @@
 // Integration page.
 import { db, getSetting, VAT_RATE } from '../db.js';
 import { decryptSecret } from '../crypto.js';
+import { loadDoc, customerDetails } from './docData.js';
 
 function smtpConfig() {
   const host = getSetting('smtp_host', '');
@@ -90,15 +91,16 @@ const fmtR = (n) => 'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFract
 // Escape user-entered text before embedding it in email HTML.
 export const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-function docTable(items, doc) {
+export function docTable(items, doc, type = 'order') {
   const rows = items.map((i) => {
     const kgFactor = i.conv_factor_alt_uom || i.pack_weight_kg;
     const kgPrice = kgFactor > 0 ? i.unit_price / kgFactor : null;
     return `
     <tr>
       <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">
+        ${i.product_code ? `<div style="font-weight:bold;font-size:15px;color:#152a44">${esc(i.product_code)}</div>` : ''}
+        ${i.product_code && type === 'quote' ? `<div style="font-size:11px;color:#94a3b8">${esc(i.product_code.slice(0, 5))}</div>` : ''}
         ${esc(i.product_name)}
-        ${i.product_code ? `<div style="color:#94a3b8;font-size:11px">${esc(i.product_code)}</div>` : ''}
       </td>
       <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${i.qty} ${i.uom || ''}</td>
       <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right">
@@ -165,16 +167,62 @@ export function wrap(title, inner) {
   </div>`;
 }
 
+// Order/quote notes and delivery instructions, shown bold in a highlighted box
+// so telesales don't miss them. includeNotes=false for customer-facing emails
+// where only the delivery instructions belong.
+export function notesHtml(doc, { includeNotes = true } = {}) {
+  const item = (label, text) => `
+      <div style="font-size:11px;font-weight:bold;letter-spacing:.5px;color:#92400e;text-transform:uppercase">${label}</div>
+      <div style="font-size:15px;font-weight:bold;color:#1e293b;margin:2px 0 8px">${esc(text).replace(/\r?\n/g, '<br>')}</div>`;
+  const parts = [];
+  if (includeNotes && doc.notes) parts.push(item('Notes', doc.notes));
+  if (doc.delivery_instructions) parts.push(item('Delivery notes', doc.delivery_instructions));
+  if (!parts.length) return '';
+  return `
+    <div style="margin:0 0 14px;padding:10px 14px 2px;background:#fff7d6;border-left:4px solid #f59e0b;border-radius:4px">${parts.join('')}
+    </div>`;
+}
+
+// The customer details block shared by every order/quote email (and mirrored in
+// the PDF): To / Customer Code / Contact Person / Phone / Cell / E-mail / VAT /
+// Address on the left, Placed By / Warehouse on the right.
+export function customerBlockHtml(doc) {
+  const d = customerDetails(doc);
+  const multi = (arr) => (arr.length ? arr.map(esc).join('<br>') : '-');
+  const lbl = 'font-weight:bold;color:#1e293b;padding:3px 14px 3px 0;vertical-align:top;white-space:nowrap';
+  const row = (label, value) => `<tr><td style="${lbl}">${label}</td><td style="padding:3px 0;vertical-align:top">${value}</td></tr>`;
+  return `
+    <table width="100%" style="border-collapse:collapse;font-size:13px;margin:0 0 14px">
+      <tr>
+        <td valign="top" style="padding:0">
+          <table style="border-collapse:collapse;font-size:13px">
+            ${row('To', `${esc(d.toName)}${d.toCity ? '<br>' + esc(d.toCity) : ''}`)}
+            ${row('Customer Code', `<b>${esc(d.code) || '-'}</b>`)}
+            ${row('Contact Person', multi(d.contacts))}
+            ${row('Phone no', esc(d.phone) || '-')}
+            ${row('Cell no', esc(d.cell) || '-')}
+            ${row('E-mail', esc(d.email) || '-')}
+            ${row('VAT no', esc(d.vat) || '-')}
+            ${row('Address', multi(d.address))}
+          </table>
+        </td>
+        <td valign="top" style="padding:0 0 0 16px">
+          <table style="border-collapse:collapse;font-size:13px">
+            ${row('Placed By', esc(d.placedBy) || '-')}
+            ${row('Warehouse', esc(d.warehouse) || '-')}
+          </table>
+        </td>
+      </tr>
+    </table>`;
+}
+
 // Regenerate the PDF for a customer-facing email (quote / order confirmation)
 // at send time, so attachments never need to live in the email_log table.
 async function pdfForEmail(kind, refId) {
   const { buildDocumentPdf } = await import('./pdf.js');
   const company = companyDetails();
   if (kind === 'quote') {
-    const doc = db.prepare(`
-      SELECT q.*, c.name AS customer_name, c.code AS customer_code, c.contact_name, c.address, c.city
-      FROM quotes q JOIN customers c ON c.id = q.customer_id WHERE q.id = ?
-    `).get(refId);
+    const doc = loadDoc('quote', refId);
     if (!doc) return null;
     const items = db.prepare(`
       SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
@@ -182,10 +230,7 @@ async function pdfForEmail(kind, refId) {
     `).all(refId);
     return { filename: `Quotation-${doc.number}.pdf`, content: await buildDocumentPdf({ type: 'quote', doc, items, company }) };
   }
-  const doc = db.prepare(`
-    SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.contact_name, c.address, c.city
-    FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = ?
-  `).get(refId);
+  const doc = loadDoc('order', refId);
   if (!doc) return null;
   const items = db.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
@@ -195,12 +240,7 @@ async function pdfForEmail(kind, refId) {
 }
 
 export function buildOrderEmail(orderId) {
-  const order = db.prepare(`
-    SELECT o.*, c.name AS customer_name, c.code AS customer_code, c.address, c.city,
-      c.payment_terms, u.name AS rep_name, u.email AS rep_email
-    FROM orders o JOIN customers c ON c.id = o.customer_id
-    LEFT JOIN users u ON u.id = o.rep_id WHERE o.id = ?
-  `).get(orderId);
+  const order = loadDoc('order', orderId);
   if (!order) throw new Error('Order not found');
   const items = db.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
@@ -211,16 +251,12 @@ export function buildOrderEmail(orderId) {
     <p>New sales order captured in the field — please capture in SYSPRO.</p>
     <table style="font-size:14px;margin-bottom:14px">
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Order no</td><td><b>${order.number}</b></td></tr>
-      <tr><td style="color:#64748b;padding:2px 12px 2px 0">SYSPRO account</td><td><b>${order.customer_code}</b></td></tr>
-      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Customer</td><td>${esc(order.customer_name)}</td></tr>
-      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Delivery</td><td>${esc(order.address || '')}${order.city ? ', ' + esc(order.city) : ''}</td></tr>
-      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Terms</td><td>${esc(order.payment_terms || '')}</td></tr>
-      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Rep</td><td>${esc(order.rep_name || '—')}</td></tr>
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Captured</td><td>${order.order_date}</td></tr>
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Terms</td><td>${esc(order.payment_terms || '')}</td></tr>
       ${order.customer_order_no ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Customer order no.</td><td><b>${esc(order.customer_order_no)}</b></td></tr>` : ''}
-      ${order.notes ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Notes</td><td>${esc(order.notes)}</td></tr>` : ''}
-      ${order.delivery_instructions ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Delivery notes</td><td>${esc(order.delivery_instructions)}</td></tr>` : ''}
     </table>
+    ${notesHtml(order)}
+    ${customerBlockHtml(order)}
     ${docTable(items, order)}
     <p style="color:#94a3b8;font-size:12px;margin-top:16px">Product codes are SYSPRO stock codes. Prices shown are the app's contract/list prices at capture time.</p>`;
 
@@ -238,29 +274,42 @@ export function buildOrderEmail(orderId) {
 
 // Customer-facing order confirmation - friendly wording, no internal jargon.
 export function buildOrderConfirmationEmail(orderId) {
-  const order = db.prepare(`
-    SELECT o.*, c.name AS customer_name, c.email AS customer_email, c.contact_name,
-      u.name AS rep_name, u.email AS rep_email
-    FROM orders o JOIN customers c ON c.id = o.customer_id
-    LEFT JOIN users u ON u.id = o.rep_id WHERE o.id = ?
-  `).get(orderId);
+  const order = loadDoc('order', orderId);
   if (!order) throw new Error('Order not found');
   const items = db.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM order_items i
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ?
   `).all(orderId);
 
+  // R1-049: point the customer at their own rep only, never a shared/generic
+  // contact - there's no Reply-To override anywhere in this file, so "reply
+  // to this email" went to the fixed smtp_from address (a shared mailbox),
+  // exactly the kind of generic order-processing contact this is meant to
+  // avoid. Falls back to a bare "contact us" only when an order genuinely has
+  // no rep assigned - there's no one to name in that case.
+  const repContact = order.rep_name ? `
+    <p style="font-size:14px;margin-top:14px">Questions or changes? Please contact your Sales Representative, <b>${esc(order.rep_name)}</b>.</p>
+    <table style="font-size:14px;margin:4px 0 14px">
+      ${order.rep_email ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Email</td><td>${esc(order.rep_email)}</td></tr>` : ''}
+      ${order.rep_phone ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Phone</td><td>${esc(order.rep_phone)}</td></tr>` : ''}
+    </table>` : `
+    <p style="font-size:14px;margin-top:14px">Questions or changes about this order? Please contact us.</p>`;
+
+  // R1-048: many customer email addresses are generic/bulk/shared, not
+  // reliably the actual contact - a named greeting was often wrong for
+  // whoever actually opened the email. Always "Dear Customer," instead.
   const inner = `
-    <p>Dear ${esc(order.contact_name || order.customer_name)},</p>
+    <p>Dear Customer,</p>
     <p>Thank you for your order! Here's a summary of what we received — our team is processing it now.</p>
     <table style="font-size:14px;margin-bottom:14px">
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Order reference</td><td><b>${order.number}</b></td></tr>
       ${order.customer_order_no ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Your order no.</td><td><b>${esc(order.customer_order_no)}</b></td></tr>` : ''}
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Placed</td><td>${order.order_date}</td></tr>
-      ${order.delivery_instructions ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Delivery notes</td><td>${esc(order.delivery_instructions)}</td></tr>` : ''}
     </table>
+    ${notesHtml(order, { includeNotes: false })}
+    ${customerBlockHtml(order)}
     ${docTable(items, order)}
-    <p style="font-size:14px;margin-top:14px">Questions or changes? ${order.rep_name ? `Contact ${esc(order.rep_name)}` : 'Contact us'} or simply reply to this email.</p>`;
+    ${repContact}`;
 
   return {
     kind: 'order',
@@ -273,12 +322,7 @@ export function buildOrderConfirmationEmail(orderId) {
 }
 
 export function buildQuoteEmail(quoteId) {
-  const quote = db.prepare(`
-    SELECT q.*, c.name AS customer_name, c.code AS customer_code, c.email AS customer_email,
-      c.contact_name, u.name AS rep_name, u.email AS rep_email
-    FROM quotes q JOIN customers c ON c.id = q.customer_id
-    LEFT JOIN users u ON u.id = q.rep_id WHERE q.id = ?
-  `).get(quoteId);
+  const quote = loadDoc('quote', quoteId);
   if (!quote) throw new Error('Quote not found');
   const items = db.prepare(`
     SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
@@ -288,8 +332,14 @@ export function buildQuoteEmail(quoteId) {
   const inner = `
     <p>Dear ${esc(quote.contact_name || quote.customer_name)},</p>
     <p>Thank you for your time. Please find our quotation below — valid until <b>${quote.valid_until || ''}</b>.</p>
-    ${docTable(items, quote)}
-    ${quote.notes ? `<p style="font-size:14px">${esc(quote.notes)}</p>` : ''}
+    <table style="font-size:14px;margin-bottom:14px">
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Quotation no</td><td><b>${quote.number}</b></td></tr>
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Date</td><td>${(quote.quote_date || '').slice(0, 16)}</td></tr>
+      ${quote.valid_until ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Valid until</td><td>${quote.valid_until}</td></tr>` : ''}
+    </table>
+    ${customerBlockHtml(quote)}
+    ${docTable(items, quote, 'quote')}
+    ${notesHtml(quote)}
     <p style="font-size:14px">To place this order, simply reply to this email or contact ${quote.rep_name ? esc(quote.rep_name) : 'your rep'}.</p>`;
 
   return {
@@ -302,12 +352,12 @@ export function buildQuoteEmail(quoteId) {
   };
 }
 
-// Internal notification for a Technical-category form submission — goes to
-// technical_email, not the customer. No PDF attachment (see attemptSend).
-export function buildFormEmail(submissionId) {
+// Internal notification for a form submission — sent to the rep who submitted it.
+// No PDF attachment (see attemptSend).
+export function buildFormEmail(submissionId, repEmail) {
   const submission = db.prepare(`
     SELECT s.*, t.name AS template_name, t.fields AS template_fields,
-      t.notify_email AS notify_email, t.category AS template_category,
+      t.category AS template_category,
       c.name AS customer_name, c.code AS customer_code, u.name AS user_name
     FROM form_submissions s
     JOIN form_templates t ON t.id = s.template_id
@@ -330,7 +380,7 @@ export function buildFormEmail(submissionId) {
   }).join('');
 
   const inner = `
-    <p>A technical form was completed in the field.</p>
+    <p>A form was completed in the field.</p>
     <table style="font-size:14px;margin-bottom:14px">
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Form</td><td><b>${esc(submission.template_name)}</b></td></tr>
       ${submission.customer_name ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Customer</td><td>${esc(submission.customer_name)}${submission.customer_code ? ` (${esc(submission.customer_code)})` : ''}</td></tr>` : ''}
@@ -339,15 +389,53 @@ export function buildFormEmail(submissionId) {
     </table>
     <table style="font-size:14px;border-collapse:collapse">${rows}</table>`;
 
-  const toAddr = submission.notify_email || (submission.template_category === 'technical' ? getSetting('technical_email', '') : '');
-
   return {
     kind: 'form',
     ref_id: submission.id,
-    to_addr: toAddr,
+    to_addr: repEmail,
     cc_addr: null,
     subject: `Form: ${submission.template_name}${submission.customer_name ? ` — ${submission.customer_name}` : ''}`,
     body_html: wrap(`Form submission — ${submission.template_name}`, inner)
+  };
+}
+
+// Support ticket status notification — goes to whoever logged the ticket,
+// whenever admin changes its status (see support.routes.js).
+const TICKET_STATUS_LABELS = { open: 'Open', in_progress: 'In progress', resolved: 'Resolved' };
+export function buildSupportTicketEmail(ticketId) {
+  const ticket = db.prepare(`
+    SELECT t.*, u.name AS created_by_name, u.email AS created_by_email,
+      c.name AS customer_name, o.number AS order_number, r.name AS resolved_by_name
+    FROM support_tickets t
+    JOIN users u ON u.id = t.created_by
+    LEFT JOIN customers c ON c.id = t.customer_id
+    LEFT JOIN orders o ON o.id = t.order_id
+    LEFT JOIN users r ON r.id = t.resolved_by
+    WHERE t.id = ?
+  `).get(ticketId);
+  if (!ticket) throw new Error('Support ticket not found');
+
+  const statusLabel = TICKET_STATUS_LABELS[ticket.status] || ticket.status;
+  const inner = `
+    <p>Your support ticket has been updated to <b>${esc(statusLabel)}</b>.</p>
+    <table style="font-size:14px;margin-bottom:14px">
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Subject</td><td><b>${esc(ticket.subject)}</b></td></tr>
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Status</td><td>${esc(statusLabel)}</td></tr>
+      ${ticket.customer_name ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Customer</td><td>${esc(ticket.customer_name)}</td></tr>` : ''}
+      ${ticket.order_number ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Order</td><td>${esc(ticket.order_number)}</td></tr>` : ''}
+      ${ticket.resolved_by_name && ticket.status === 'resolved' ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Resolved by</td><td>${esc(ticket.resolved_by_name)}</td></tr>` : ''}
+      ${ticket.admin_notes ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0;vertical-align:top">Notes</td><td>${esc(ticket.admin_notes)}</td></tr>` : ''}
+    </table>
+    <p style="color:#64748b;font-size:13px">Original description:</p>
+    <p style="font-size:14px;white-space:pre-wrap">${esc(ticket.description)}</p>`;
+
+  return {
+    kind: 'support_ticket',
+    ref_id: ticket.id,
+    to_addr: ticket.created_by_email,
+    cc_addr: null,
+    subject: `Support ticket ${statusLabel}: ${ticket.subject}`,
+    body_html: wrap('Support ticket update', inner)
   };
 }
 
@@ -403,6 +491,64 @@ export function buildRepDigestEmail(rep, { yesterdayOrders, today }) {
     cc_addr: null,
     subject: `Your RouteOne day — ${visits.length} customer${visits.length === 1 ? '' : 's'}, ${yesterdayOrders.length} order${yesterdayOrders.length === 1 ? '' : 's'} yesterday`,
     body_html: wrap('Daily digest', inner)
+  };
+}
+
+// Daily sync digest: every SYSPRO sync run (per entity) from the last 24
+// hours, newest first - so an admin can see overnight/scheduled syncs
+// without opening the Integration page. Failed runs are called out in red;
+// a run with skipped/dropped rows is flagged amber so a silent data-loss
+// bug (like the customer_pricing bind-error one) doesn't go unnoticed.
+export function buildSyncDigestEmail(runs, { toAddr } = {}) {
+  const completed = runs.filter((r) => r.status === 'completed');
+  const failed = runs.filter((r) => r.status === 'failed');
+  const withSkips = completed.filter((r) => (r.rows_skipped || 0) > 0 || (r.error));
+
+  const durationLabel = (r) => {
+    if (!r.finished_at) return '—';
+    const ms = new Date(r.finished_at.replace(' ', 'T') + 'Z') - new Date(r.started_at.replace(' ', 'T') + 'Z');
+    if (!(ms > 0)) return '—';
+    return ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${(ms / 60000).toFixed(1)}m`;
+  };
+
+  const rows = runs.map((r) => {
+    const statusColor = r.status === 'failed' ? '#dc2626' : (r.rows_skipped > 0 || r.error) ? '#b45309' : '#16a34a';
+    const statusLabel = r.status === 'failed' ? 'Failed' : (r.rows_skipped > 0 || r.error) ? 'Completed (with issues)' : 'Completed';
+    return `
+      <tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">${esc(r.entity)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;color:${statusColor};font-weight:bold">${statusLabel}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${r.status === 'failed' ? '—' : `${r.rows_upserted ?? 0} / ${r.rows_read ?? 0}`}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;text-align:right">${durationLabel(r)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;color:#64748b;font-size:12px">${esc(r.started_at)}</td>
+        ${r.error ? `<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;color:#dc2626;font-size:12px">${esc(r.error.slice(0, 200))}</td>` : '<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0"></td>'}
+      </tr>`;
+  }).join('');
+
+  const inner = runs.length === 0
+    ? `<p style="font-size:13px;color:#94a3b8">No SYSPRO syncs ran in the last 24 hours.</p>`
+    : `
+    <p>${completed.length} completed, ${failed.length} failed${withSkips.length ? `, ${withSkips.length} with skipped/dropped rows` : ''} in the last 24 hours.</p>
+    <table style="font-size:13px;border-collapse:collapse;width:100%">
+      <tr style="background:#f1f5f9">
+        <th style="padding:4px 8px;text-align:left">Entity</th>
+        <th style="padding:4px 8px;text-align:left">Status</th>
+        <th style="padding:4px 8px;text-align:right">Rows (upserted/read)</th>
+        <th style="padding:4px 8px;text-align:right">Duration</th>
+        <th style="padding:4px 8px;text-align:left">Started</th>
+        <th style="padding:4px 8px;text-align:left">Error</th>
+      </tr>
+      ${rows}
+    </table>
+    <p style="color:#94a3b8;font-size:12px;margin-top:18px">This is an automated summary from RouteOne — open the Integration page for full detail.</p>`;
+
+  return {
+    kind: 'sync_digest',
+    ref_id: 0, // email_log.ref_id is NOT NULL; a digest has no single referenced row, so 0 is the "none" sentinel (ids are AUTOINCREMENT from 1)
+    to_addr: toAddr,
+    cc_addr: null,
+    subject: `RouteOne sync summary — ${completed.length} completed${failed.length ? `, ${failed.length} failed` : ''}`,
+    body_html: wrap('Daily sync summary', inner)
   };
 }
 
@@ -492,6 +638,34 @@ export function buildPasswordResetEmail(user, resetLink) {
     cc_addr: null,
     subject: 'Reset your RouteOne password',
     body_html: wrap('Password reset', inner)
+  };
+}
+
+// Welcome email with a temporary password, sent from Users -> Send login details.
+export function buildLoginDetailsEmail(user, tempPassword) {
+  const inner = `
+    <p>Hello ${esc(user.name)},</p>
+    <p>Your RouteOne account has been created. You can now log in with the following credentials:</p>
+    <table style="font-size:14px;margin-bottom:14px">
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Email</td><td><b>${esc(user.email)}</b></td></tr>
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Temporary password</td><td><b>${esc(tempPassword)}</b></td></tr>
+    </table>
+    <p>On your first login, you will be required to change your password to something more secure.</p>
+    <p><b>Password requirements:</b></p>
+    <ul>
+      <li>Minimum 9 characters</li>
+      <li>At least one capital letter (A-Z)</li>
+      <li>At least one number (0-9)</li>
+    </ul>
+    <p>Best regards,<br>RouteOne Team</p>`;
+
+  return {
+    kind: 'login_details',
+    ref_id: user.id,
+    to_addr: user.email,
+    cc_addr: null,
+    subject: 'Welcome to RouteOne - Your Login Details',
+    body_html: wrap('Your login details', inner)
   };
 }
 

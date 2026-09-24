@@ -78,19 +78,45 @@ router.get('/customers/:id', (req, res) => {
   // Invoices from SYSPRO, rolling last 30 days (newest first). Cap at today so
   // any future-dated ERP artifacts (e.g. credit-note reversals stamped years
   // ahead) don't leak into the "last 30 days" window.
+  //
+  // Matches billed-to OR delivered-to, same as invoices.routes.js - a store
+  // invoiced centrally under a parent/group account (e.g. BRACKENHURST under
+  // its head office) never appears as invoices.customer_id, only as an
+  // invoice_items.delivery_customer_id on the group's invoice. Without this,
+  // a group-billed store's profile shows no invoices at all.
+  //
+  // UNION of two branches rather than one `customer_id = ? OR EXISTS(...)` -
+  // an OR spanning invoices and invoice_items can't be satisfied by either
+  // column's index (confirmed via EXPLAIN QUERY PLAN against the live
+  // 271k-row invoice_items table: it fell back to a full scan every time,
+  // ~750ms, regardless of how few rows actually matched). Each UNION branch
+  // uses its own index instead. `i.*`/`i.id` in every branch keeps UNION's
+  // dedup keyed on invoice identity, not on total/balance happening to match.
   customer.recent_invoices = db.prepare(`
-    SELECT * FROM invoices
-    WHERE customer_id = ? AND invoice_date >= date('now', '-30 days') AND invoice_date <= date('now')
+    SELECT i.* FROM invoices i
+    WHERE i.customer_id = ?
+      AND i.invoice_date >= date('now', '-30 days') AND i.invoice_date <= date('now')
+    UNION
+    SELECT i.* FROM invoices i JOIN invoice_items ii ON ii.invoice_id = i.id
+    WHERE ii.delivery_customer_id = ?
+      AND i.invoice_date >= date('now', '-30 days') AND i.invoice_date <= date('now')
     ORDER BY invoice_date DESC
-  `).all(customer.id);
+  `).all(customer.id, customer.id);
   customer.invoice_summary = db.prepare(`
     SELECT
       COUNT(*) AS count,
       COALESCE(SUM(total), 0) AS total,
       COALESCE(SUM(balance), 0) AS outstanding
-    FROM invoices
-    WHERE customer_id = ? AND invoice_date >= date('now', '-30 days') AND invoice_date <= date('now')
-  `).get(customer.id);
+    FROM (
+      SELECT DISTINCT i.id, i.total, i.balance FROM invoices i
+      WHERE i.customer_id = ?
+        AND i.invoice_date >= date('now', '-30 days') AND i.invoice_date <= date('now')
+      UNION
+      SELECT DISTINCT i.id, i.total, i.balance FROM invoices i JOIN invoice_items ii ON ii.invoice_id = i.id
+      WHERE ii.delivery_customer_id = ?
+        AND i.invoice_date >= date('now', '-30 days') AND i.invoice_date <= date('now')
+    ) combined
+  `).get(customer.id, customer.id);
   customer.prices = db.prepare(`
     SELECT cp.product_id, cp.price, p.code, p.name, p.list_price
     FROM customer_prices cp JOIN products p ON p.id = cp.product_id
@@ -423,12 +449,20 @@ router.get('/customers/:id/timeline', (req, res) => {
   `).all(customer.id);
   timeline.push(...forms.map(f => ({ ...f, date_for_sort: f.date })));
 
-  // Invoices (last 12 months)
+  // Invoices (last 12 months). Matches billed-to OR delivered-to, same as
+  // recent_invoices above - a group-billed store (see there) never appears
+  // as invoices.customer_id, only as an invoice_items.delivery_customer_id
+  // on the parent account's invoice. UNION of two branches, not one OR - see
+  // recent_invoices for why (an OR spanning the join can't use either index).
   const invoices = db.prepare(`
-    SELECT 'invoice' AS type, id, number, order_number, total, balance, status, due_date, invoice_date AS date, NULL AS rep_name
-    FROM invoices
-    WHERE customer_id = ? AND invoice_date >= date('now', '-365 days')
-  `).all(customer.id);
+    SELECT 'invoice' AS type, i.id, i.number, i.order_number, i.total, i.balance, i.status, i.due_date, i.invoice_date AS date, NULL AS rep_name
+    FROM invoices i
+    WHERE i.customer_id = ? AND i.invoice_date >= date('now', '-365 days')
+    UNION
+    SELECT 'invoice' AS type, i.id, i.number, i.order_number, i.total, i.balance, i.status, i.due_date, i.invoice_date AS date, NULL AS rep_name
+    FROM invoices i JOIN invoice_items ii ON ii.invoice_id = i.id
+    WHERE ii.delivery_customer_id = ? AND i.invoice_date >= date('now', '-365 days')
+  `).all(customer.id, customer.id);
   timeline.push(...invoices.map(i => ({ ...i, date_for_sort: i.date })));
 
   // Contact logged without a visit - calls, emails, WhatsApps, meetings.

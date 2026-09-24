@@ -73,6 +73,28 @@ export default function Kpis() {
                     </div>
                   )}
                 </div>
+
+                {/* R1-056: Jan-through-selected-month, not the full annual
+                    target - see the server-side comment on ytdSales/ytdTarget
+                    for why comparing e.g. September actuals against a
+                    12-month target would misleadingly understate achievement. */}
+                <div className="mb-3">
+                  <div className="flex items-baseline justify-between text-sm">
+                    <span className="text-slate-500">YTD vs target</span>
+                    <span className="font-semibold">{fmtR(k.ytd_sales)}
+                      {k.ytd_target > 0 && <span className="ml-1 text-xs font-normal text-slate-400">/ {fmtR(k.ytd_target)}</span>}
+                    </span>
+                  </div>
+                  {k.ytd_target > 0 && (
+                    <div className="mt-1.5 h-2.5 rounded-full bg-slate-100">
+                      <div className={`h-2.5 rounded-full ${k.ytd_target_pct >= 100 ? 'bg-emerald-500' : 'bg-brand-500'}`}
+                        style={{ width: `${Math.min(100, k.ytd_target_pct)}%` }} />
+                    </div>
+                  )}
+                  {k.ytd_target_pct != null && (
+                    <div className={`mt-1 text-right text-xs font-semibold ${pctColor(k.ytd_target_pct)}`}>{k.ytd_target_pct}% YTD achieved</div>
+                  )}
+                </div>
                 <div className="grid grid-cols-3 gap-x-3 gap-y-3 text-center">
                   <Kpi label="Orders" value={k.orders} />
                   <Kpi label="Avg order" value={fmtR(k.avg_order_value)} />

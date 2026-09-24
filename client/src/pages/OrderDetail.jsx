@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { api, fmtR, fmtDateTime } from '../api';
 import { Card, Table, Spinner, OrderStatusBadge, ErrorNote } from '../components/ui';
+import { PRICE_SOURCE_LABELS } from '../components/NewOrderModal';
 import { useAuth } from '../auth';
 
 const NEXT_ACTIONS = {
@@ -88,7 +89,15 @@ export default function OrderDetail() {
               </td>
               <td className="td">{i.qty}</td>
               <td className="td text-slate-500">{i.uom}</td>
-              <td className="td">{fmtR(i.unit_price)}</td>
+              <td className="td">
+                {fmtR(i.unit_price)}
+                {/* R1-044: which tier this line's price came from, so a rep
+                    questioning it later doesn't have to guess or ask office -
+                    older lines from before this was tracked show nothing. */}
+                {i.price_source && PRICE_SOURCE_LABELS[i.price_source] && (
+                  <div className="text-[11px] font-normal text-slate-400">{PRICE_SOURCE_LABELS[i.price_source]}</div>
+                )}
+              </td>
               <td className="td text-slate-500">{i.discount_pct ? `${i.discount_pct}%` : '—'}</td>
               <td className="td font-medium">{fmtR(i.line_total)}</td>
             </tr>

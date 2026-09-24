@@ -67,6 +67,10 @@ WHERE w.Warehouse NOT LIKE 'Z%';
 | email | varchar | ArCustomer.Email |
 | address | varchar | ArCustomer.SoldToAddr1 + 2 |
 | city | varchar | ArCustomer.SoldToAddr3 |
+| ship_to_name | varchar | ArCustomer.ShipToName |
+| ship_to_address | varchar | ArCustomer.ShipToAddr1 + 2 |
+| ship_to_city | varchar | ArCustomer.ShipToAddr3 |
+| ship_to_postcode | varchar | ArCustomer.ShipToAddr4 |
 | credit_limit | decimal | ArCustomer.CreditLimit |
 | balance | decimal | ArCustomerBal.CurrentBalance1 |
 | payment_terms | varchar | terms description |
@@ -83,6 +87,10 @@ SELECT
   RTRIM(c.Email)                       AS email,
   RTRIM(c.SoldToAddr1) + ', ' + RTRIM(c.SoldToAddr2) AS address,
   RTRIM(c.SoldToAddr3)                 AS city,
+  RTRIM(c.ShipToName)                  AS ship_to_name,
+  RTRIM(c.ShipToAddr1) + ', ' + RTRIM(c.ShipToAddr2) AS ship_to_address,
+  RTRIM(c.ShipToAddr3)                 AS ship_to_city,
+  RTRIM(c.ShipToAddr4)                 AS ship_to_postcode,
   c.CreditLimit                        AS credit_limit,
   ISNULL(b.CurrentBalance1, 0)         AS balance,
   RTRIM(c.TermsCode)                   AS payment_terms,   -- or join to terms description

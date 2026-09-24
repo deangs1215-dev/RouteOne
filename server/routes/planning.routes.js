@@ -218,6 +218,7 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), (req, res)
   const scope = scopeForUser(req.user);
   const month = req.query.month || getTodayISO().slice(0, 7); // YYYY-MM
   const monthNum = Number(month.slice(5, 7));
+  const year = month.slice(0, 4);
   const start = `${month}-01`;
   const reps = db.prepare(`
     SELECT u.id, u.name, u.sales_target
@@ -261,12 +262,28 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), (req, res)
     // Target rolls automatically with the selected month: a rep_budgets figure
     // for that month if set, otherwise the flat sales_target fallback.
     const target = repMonthTarget(rep.id, monthNum);
+
+    // R1-056: YTD = January through the selected month, not the full 12-month
+    // annual target - comparing e.g. September YTD sales against a full-year
+    // target would understate achievement for 3/4 of the year by design, not
+    // by mistake, which is exactly the misleading percentage the ticket calls
+    // out. Both sides of the fraction stop at the same month for that reason.
+    const ytdSales = db.prepare(`
+      SELECT COALESCE(SUM(sales_value), 0) AS total FROM rep_monthly_sales
+      WHERE rep_id = ? AND month >= ? AND month <= ?
+    `).get(rep.id, `${year}-01`, month).total;
+    let ytdTarget = 0;
+    for (let m = 1; m <= monthNum; m++) ytdTarget += repMonthTarget(rep.id, m);
+
     return {
       rep_id: rep.id,
       name: rep.name,
       sales: repSales.sales_value,
       target,
       target_pct: target ? Math.round((repSales.sales_value / target) * 100) : null,
+      ytd_sales: ytdSales,
+      ytd_target: ytdTarget,
+      ytd_target_pct: ytdTarget ? Math.round((ytdSales / ytdTarget) * 100) : null,
       orders: orderStats.orders,
       avg_order_value: orderStats.aov,
       visits_completed: visits.completed,

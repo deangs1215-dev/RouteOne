@@ -130,8 +130,15 @@ router.post('/reset-password', async (req, res) => {
   if (!passwordIsStrong(newPassword)) {
     return res.status(400).json({ error: 'Use at least 12 characters and avoid common passwords' });
   }
-  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, reset_token_hash = NULL, reset_token_expires = NULL WHERE id = ?')
-    .run(await bcrypt.hash(newPassword, 12), user.id);
+  // token_version + 1 ends every existing session for this account. A reset is
+  // the one moment where that is the whole point: whoever prompted it may be
+  // holding a stolen token, and it must stop working now, not in 12 hours.
+  db.prepare(`
+    UPDATE users SET password_hash = ?, must_change_password = 0,
+      reset_token_hash = NULL, reset_token_expires = NULL,
+      token_version = token_version + 1
+    WHERE id = ?
+  `).run(await bcrypt.hash(newPassword, 12), user.id);
   logActivity(user.id, 'password_reset', 'user', user.id);
   res.json({ ok: true });
 });
@@ -147,10 +154,13 @@ router.post('/change-password', requireAuth, async (req, res) => {
   if (await bcrypt.compare(newPassword, req.user.password_hash)) {
     return res.status(400).json({ error: 'New password must be different' });
   }
-  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
-    .run(await bcrypt.hash(newPassword, 12), req.user.id);
+  // Ends the user's other sessions, then re-issues a token at the new version
+  // so the browser doing the change stays signed in.
+  const nextVersion = (req.user.token_version ?? 0) + 1;
+  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, token_version = ? WHERE id = ?')
+    .run(await bcrypt.hash(newPassword, 12), nextVersion, req.user.id);
   logActivity(req.user.id, 'password_change', 'user', req.user.id);
-  const user = { ...req.user, must_change_password: 0 };
+  const user = { ...req.user, must_change_password: 0, token_version: nextVersion };
   const token = signToken(user);
   setSessionCookie(res, token);
   res.json({ user: publicUser(user) });

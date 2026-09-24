@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { db, nextNumber, logActivity, effectivePrice, effectivePriceSource, PRICE_SOURCES, adjustOrderStock, VAT_RATE, getSetting, round2 } from '../db.js';
 import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
-import { buildQuoteEmail, sendEmail, wrap, esc, companyDetails } from '../integration/email.js';
+import { buildQuoteEmail, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
+import { loadDoc } from '../integration/docData.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
 
 const router = Router();
@@ -9,29 +10,6 @@ const router = Router();
 const isEmail = (s) => typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 
 const fmtR = (n) => 'R ' + Number(n || 0).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-function docTable(items, doc) {
-  const rows = items.map((i) => `
-    <tr>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">${esc(i.product_name)}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${i.qty} ${i.uom || ''}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right">${fmtR(i.unit_price)}</td>
-      <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right">${fmtR(i.line_total)}</td>
-    </tr>`).join('');
-  return `
-    <table style="border-collapse:collapse;width:100%;font-size:14px">
-      <tr style="background:#f1f5f9">
-        <th style="padding:6px 10px;text-align:left">Product</th>
-        <th style="padding:6px 10px;text-align:center">Qty</th>
-        <th style="padding:6px 10px;text-align:right">Unit price</th>
-        <th style="padding:6px 10px;text-align:right">Total</th>
-      </tr>
-      ${rows}
-      <tr><td colspan="3" style="padding:6px 10px;text-align:right;color:#64748b">Subtotal</td><td style="padding:6px 10px;text-align:right">${fmtR(doc.subtotal)}</td></tr>
-      <tr><td colspan="3" style="padding:6px 10px;text-align:right;color:#64748b">VAT (${VAT_RATE * 100}%)</td><td style="padding:6px 10px;text-align:right">${fmtR(doc.vat_amount)}</td></tr>
-      <tr><td colspan="3" style="padding:6px 10px;text-align:right;font-weight:bold">Total</td><td style="padding:6px 10px;text-align:right;font-weight:bold">${fmtR(doc.total)}</td></tr>
-    </table>`;
-}
 
 router.get('/quotes', (req, res) => {
   const { q, status, customer_id } = req.query;
@@ -69,16 +47,16 @@ router.get('/quotes/:id', (req, res) => {
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
   }
-  quote.items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
+  quote.items = db.prepare(`
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
+    LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
+  `).all(quote.id);
   res.json(quote);
 });
 
 // Downloadable quotation PDF - same layout as the email attachment.
 router.get('/quotes/:id/pdf', async (req, res) => {
-  const quote = db.prepare(`
-    SELECT qu.*, c.name AS customer_name, c.code AS customer_code, c.contact_name, c.address, c.city
-    FROM quotes qu JOIN customers c ON c.id = qu.customer_id WHERE qu.id = ?
-  `).get(req.params.id);
+  const quote = loadDoc('quote', req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
@@ -277,6 +255,26 @@ router.post('/quotes/:id/convert', (req, res) => {
   if (customer.status === 'on_hold') return res.status(400).json({ error: 'Customer account is on hold - order blocked' });
   const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
 
+  // A quote can be converted long after it was written, so every line is
+  // re-checked against the product's CURRENT state - the same guard order and
+  // quote capture already apply. Copying quote_items straight across skipped
+  // it entirely, which let an old quote resurrect a product SYSPRO has since
+  // discontinued. Price is deliberately NOT re-derived: honouring the quoted
+  // price is the whole point of converting a quote.
+  for (const i of items) {
+    const product = db.prepare('SELECT name, active, discontinued FROM products WHERE id = ?').get(i.product_id);
+    if (!product) {
+      return res.status(400).json({ error: `${i.product_name} no longer exists and cannot be ordered` });
+    }
+    if (!product.active) {
+      return res.status(400).json({
+        error: product.discontinued
+          ? `${product.name} has been discontinued and can no longer be ordered`
+          : `${product.name} is not available for ordering`
+      });
+    }
+  }
+
   const convert = db.transaction(() => {
     const number = nextNumber('ORD');
     const info = db.prepare(`
@@ -307,15 +305,13 @@ router.post('/quotes/:id/convert', (req, res) => {
 // Send a quote to selected recipients (admin/manager only).
 router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (req, res) => {
   const { recipients = [], send_to_rep, send_to_customer } = req.body || {};
-  const quote = db.prepare(`
-    SELECT q.*, c.name AS customer_name, c.email AS customer_email, c.warehouse_id AS customer_warehouse_id,
-      u.name AS rep_name, u.email AS rep_email
-    FROM quotes q JOIN customers c ON c.id = q.customer_id
-    LEFT JOIN users u ON u.id = q.rep_id WHERE q.id = ?
-  `).get(req.params.id);
+  const quote = loadDoc('quote', req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
-  const items = db.prepare('SELECT * FROM quote_items WHERE quote_id = ? ORDER BY id').all(quote.id);
+  const items = db.prepare(`
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
+    LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
+  `).all(quote.id);
   const emailsToSend = [];
 
   // Send to configured recipients (empty selection = none, not a SQL error).
@@ -332,11 +328,12 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
       <p>Please find the quotation below for your records.</p>
       <table style="font-size:14px;margin-bottom:14px">
         <tr><td style="color:#64748b;padding:2px 12px 2px 0">Quote no</td><td><b>${quote.number}</b></td></tr>
-        <tr><td style="color:#64748b;padding:2px 12px 2px 0">Customer</td><td>${esc(quote.customer_name)}</td></tr>
         <tr><td style="color:#64748b;padding:2px 12px 2px 0">Amount</td><td><b>${fmtR(quote.total)}</b></td></tr>
         <tr><td style="color:#64748b;padding:2px 12px 2px 0">Valid until</td><td>${quote.valid_until || ''}</td></tr>
       </table>
-      ${docTable(items, quote)}`;
+      ${notesHtml(quote)}
+      ${customerBlockHtml(quote)}
+      ${docTable(items, quote, 'quote')}`;
 
     emailsToSend.push({
       kind: 'quote',
@@ -356,7 +353,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
       to_addr: quote.rep_email,
       cc_addr: null,
       subject: `Quote confirmation: ${quote.number} — ${quote.customer_name}`,
-      body_html: wrap('Quote confirmation', `<p>Your quote <b>${quote.number}</b> for <b>${esc(quote.customer_name)}</b> has been sent.</p>${docTable(items, quote)}`)
+      body_html: wrap('Quote confirmation', `<p>Your quote <b>${quote.number}</b> for <b>${esc(quote.customer_name)}</b> has been sent.</p>${docTable(items, quote, 'quote')}`)
     });
   }
 

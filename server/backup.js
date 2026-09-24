@@ -116,12 +116,14 @@ export async function restoreBackup(name) {
   const sourceUploadsPath = path.join(sourceDir, 'uploads');
   if (!fs.existsSync(sourceDbPath)) throw new Error('Backup is missing its database file');
 
+  // Safety net: snapshot the current (pre-restore) state so an accidental
+  // restore is itself recoverable. This runs BEFORE the restore claims the
+  // `running` lock, because runBackup() takes that same lock itself - claiming
+  // it first made every restore fail on "A backup is already running".
+  await runBackup();
+
   running = true;
   try {
-    // Safety net: snapshot the current (pre-restore) state so an accidental
-    // restore is itself recoverable.
-    await runBackup();
-
     closeDb();
     // WAL/SHM sidecar files must go too, or the restored .db reopens against
     // stale write-ahead data left over from the live database.

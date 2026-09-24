@@ -32,6 +32,62 @@ CHANGELOG.md instead of leaving it checked off here.
       run `pip install "graphifyy[office]"` and re-index them, or confirm they're
       stale and can be ignored.
 
+## UAT issues (R1 series)
+
+Numbering continues the R1 series. **R1-058 is derived from the highest number
+referenced in this repo (R1-057, `intelligence.routes.js`)** — the canonical
+tracker is the user's, and per the 2026-08-28 handover several R1 numbers exist
+there that never reached the code, so bump this if the tracker is further along.
+
+- [ ] **R1-058 — Rep "Sales this month" understates actual SYSPRO sales.**
+      Reported 2026-09-12: the mobile Today card showed **R 925 841,46 (35% of a
+      R 2 634 923 target)** for a rep, which isn't a believable figure.
+
+      *Scope is wider than that one card* — `rep_monthly_sales` is also the source
+      for Rep KPIs (`/kpis`, `/kpis/monthly-history`), Sales AI analytics
+      (`/analytics` monthly chart + MTD revenue) and the desktop dashboard's
+      `sales_mtd`. All of them are understated by the same amount.
+
+      **Direction is confirmed, not guessed.** The card reads exactly one value —
+      `rep_monthly_sales.sales_value` for (rep, current month) — and that table is
+      populated solely by the `rep_sales` sync from `vw_FS_RepSalesByMonth`. That
+      sync skips ~51% of its rows (run 7233, 2026-09-08: 5922 read, 2891 upserted,
+      **3031 skipped**), and `upsertRepSales` discards a skipped row's NSV rather
+      than crediting it anywhere. See `docs/sql/vw_FS_RepSalesByMonth-skip-diagnostic.sql`.
+
+      **Probable root cause:** `vw_FS_RepSalesByMonth` is the only sales view in
+      `docs/sql/` that doesn't `RTRIM` its columns. SYSPRO's `Branch` and
+      `Salesperson` are fixed-width `char`, so they arrive space-padded, while
+      `import-reps.js` trims them on the way in — so `matchRep`'s bare `=` never
+      matched. The skip diagnostic needed `RTRIM()` on both sides of its join,
+      which is the tell.
+
+      **Already done (UNVERIFIED against live data):** `matchRep()` in
+      `server/integration/sync.js` now trims both sides. On branch
+      `pricing-convfactaltuom`, **not yet deployed**. Same function assigns
+      `customers.rep_id`, so if padding is the cause this also explains customers
+      silently not being reassigned when SYSPRO moves them.
+
+      **To verify:** deploy, re-run the rep_sales sync, then
+      `SELECT id, rows_read, rows_upserted, rows_skipped FROM sync_runs WHERE entity='rep_sales' ORDER BY id DESC LIMIT 5;`
+      — `rows_skipped` should collapse and the Today figure should rise. Expect
+      *some* legitimate residual skips (house/export codes, terminated reps).
+
+      **If the skip count doesn't move, next suspects:**
+      - `TrnMonth` may be a SYSPRO *financial period*, not a calendar month.
+        `upsertRepSales` builds `'YYYY-MM'` straight from `TrnYear`/`TrnMonth`
+        and the card compares it against `strftime('%Y-%m','now')`.
+      - The view credits the customer's **currently assigned** rep retroactively
+        (documented in its own header), so any reassignment shifts historical
+        months between reps.
+- [ ] **Fix the duplicate-check in `vw_FS_RepSalesByMonth.sql`.** Its validation
+      query is commented "Should return ZERO rows" but groups by
+      `TrnYear, TrnMonth, CustomerBranch, [Customer SalesPerson]` while the view's
+      own `GROUP BY` also includes `TrnBranch`. It therefore returns rows whenever
+      a customer is invoiced from more than one branch, and has never actually
+      validated the property it claims. Add `TrnBranch` to the check. (RouteOne
+      summing those rows is correct — they're disjoint by `TrnBranch`.)
+
 ## Before production (from the 2026-07-26 audit)
 
 See [docs/PRODUCTION-READINESS-AUDIT-2026-07-26.md](docs/PRODUCTION-READINESS-AUDIT-2026-07-26.md)

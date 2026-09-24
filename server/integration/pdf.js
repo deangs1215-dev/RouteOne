@@ -5,6 +5,7 @@
 // NB: these are QUOTATION / ORDER CONFIRMATION documents, not tax invoices -
 // the fiscal invoice is produced by SYSPRO when telesales capture the order.
 import PDFDocument from 'pdfkit';
+import { customerDetails } from './docData.js';
 
 const NAVY = '#152a44';
 const TEAL = '#1a7ea8';
@@ -70,7 +71,6 @@ export function buildDocumentPdf({ type, doc, items, company }) {
     // The customer's own reference belongs on the printed confirmation - it is
     // what they file and reconcile the delivery against.
     if (doc.customer_order_no) metaRows.push(['Your order no.', doc.customer_order_no]);
-    if (doc.customer_code) metaRows.push(['Account', doc.customer_code]);
 
     pdf.fontSize(10).font('Helvetica');
     let my = y;
@@ -81,15 +81,45 @@ export function buildDocumentPdf({ type, doc, items, company }) {
       my += 16;
     }
 
-    // Bill-to on the right
-    pdf.fillColor(GREY).fontSize(9).text('TO', right - 250, y, { width: 250, align: 'right' });
-    pdf.fillColor(NAVY).font('Helvetica-Bold').fontSize(11)
-      .text(doc.customer_name || '', right - 250, y + 12, { width: 250, align: 'right' });
-    pdf.font('Helvetica').fontSize(9).fillColor(GREY);
-    const custLines = [doc.contact_name, doc.address, doc.city].filter(Boolean).join('\n');
-    if (custLines) pdf.text(custLines, right - 250, y + 28, { width: 250, align: 'right' });
+    // --- Customer details block ---------------------------------------------
+    // To / Customer Code / Contact Person / Phone / Cell / E-mail / VAT / Address
+    // on the left, Placed By / Warehouse on the right - same block as the emails.
+    const d = customerDetails(doc);
+    const dash = (v) => (v ? String(v) : '-');
+    const leftRows = [
+      ['To', [d.toName, d.toCity].filter(Boolean).join('\n')],
+      ['Customer Code', dash(d.code)],
+      ['Contact Person', d.contacts.length ? d.contacts.join('\n') : '-'],
+      ['Phone no', dash(d.phone)],
+      ['Cell no', dash(d.cell)],
+      ['E-mail', dash(d.email)],
+      ['VAT no', dash(d.vat)],
+      ['Address', d.address.length ? d.address.join('\n') : '-']
+    ];
+    const rightRows = [
+      ['Placed By', dash(d.placedBy)],
+      ['Warehouse', dash(d.warehouse)]
+    ];
+    let cy = my + 12;
+    const rowsTop = cy;
+    const labelW = 88;
+    const leftValW = 235;
+    for (const [label, value] of leftRows) {
+      pdf.font('Helvetica-Bold').fontSize(9).fillColor(NAVY).text(label, left, cy, { width: labelW });
+      pdf.font('Helvetica').fontSize(9).fillColor(NAVY).text(value, left + labelW, cy, { width: leftValW });
+      const h = pdf.heightOfString(value, { width: leftValW });
+      cy += Math.max(13, h) + 4;
+    }
+    let ry = rowsTop;
+    const rx = left + 350;
+    for (const [label, value] of rightRows) {
+      pdf.font('Helvetica-Bold').fontSize(9).fillColor(NAVY).text(label, rx, ry, { width: 62 });
+      pdf.font('Helvetica').fontSize(9).fillColor(NAVY).text(value, rx + 66, ry, { width: right - rx - 66 });
+      const h = pdf.heightOfString(value, { width: right - rx - 66 });
+      ry += Math.max(13, h) + 4;
+    }
 
-    y = Math.max(my, y + 70) + 10;
+    y = Math.max(cy, ry) + 10;
 
     // --- Line items table -----------------------------------------------------
     const cols = { product: left, qty: 320, unit: 390, total: 470 };
@@ -170,9 +200,13 @@ export function buildDocumentPdf({ type, doc, items, company }) {
     y += 40;
 
     // --- Notes + footer -------------------------------------------------------
-    if (doc.notes) {
-      pdf.fillColor(GREY).font('Helvetica').fontSize(9).text(doc.notes, left, y, { width: right - left });
-      y += pdf.heightOfString(doc.notes, { width: right - left }) + 10;
+    // Notes and delivery instructions in bold so they are not missed.
+    for (const [label, text] of [['NOTES', doc.notes], ['DELIVERY NOTES', type === 'order' ? doc.delivery_instructions : null]]) {
+      if (!text) continue;
+      pdf.fillColor(GREY).font('Helvetica-Bold').fontSize(8).text(label, left, y, { width: right - left });
+      y += 11;
+      pdf.fillColor(NAVY).font('Helvetica-Bold').fontSize(11).text(text, left, y, { width: right - left });
+      y += pdf.heightOfString(text, { width: right - left }) + 10;
     }
 
     const footerParts = [];

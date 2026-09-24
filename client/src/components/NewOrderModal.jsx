@@ -5,6 +5,7 @@ import { api, fmtR } from '../api';
 import { Modal, Field, ErrorNote } from './ui';
 import OrderSummary from './OrderSummary';
 import OrderSendModal from './OrderSendModal';
+import ProductPurchaseHistory from './ProductPurchaseHistory';
 import { useAuth } from '../auth';
 
 const VAT_RATE = 0.15;
@@ -123,6 +124,9 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   const [search, setSearch] = useState('');
   const [filterMode, setFilterMode] = useState('bought'); // 'bought' | 'all'
   const [sortByCode, setSortByCode] = useState(false); // false = name (default) | true = SYSPRO stock code, lowest to highest
+  // R1-053: which product's purchase-history panel is open, if any - only one
+  // at a time, matching the mobile capture screen's same behaviour.
+  const [expandedHistoryId, setExpandedHistoryId] = useState(null);
   const [lines, setLines] = useState([]); // { product, qty }
   const [notes, setNotes] = useState('');
   // The customer's own PO / reference. Kept out of notes on purpose - it's the
@@ -131,7 +135,12 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   const [delivery, setDelivery] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [showSummary, setShowSummary] = useState(false); // review screen before final submit
+  // R1-052: 'builder' (product lines) -> 'notes' (Order/Quote Notes & Special
+  // Instructions, its own step) -> 'summary' (final review, notes shown
+  // read-only). Was a single showSummary boolean before this ticket - notes
+  // lived as a small field on the builder screen instead of a dedicated stop
+  // between capture and review. Mirrors RepOrderCapture.jsx's mobile flow.
+  const [step, setStep] = useState('builder');
   const [createdOrder, setCreatedOrder] = useState(null); // order/quote just created - drives the confirmation screen
   const [showSendModal, setShowSendModal] = useState(false);
   // R1-026: which cart line (by product id) currently has its price/discount
@@ -284,18 +293,46 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
     </Modal>
   );
 
-  if (showSummary) return (
+  if (step === 'notes') return (
+    // key forces a remount, matching the summary/builder screens below -
+    // without it React reuses the same Modal DOM node across steps.
+    <Modal
+      key="notes"
+      title={`${kind === 'quote' ? 'Quote' : 'Order'} notes`}
+      onClose={() => setStep('builder')}
+      wide
+      footer={
+        <div className="flex justify-end gap-2">
+          <button className="btn-secondary" onClick={() => setStep('builder')} disabled={busy}>Back</button>
+          <button className="btn-primary" onClick={() => setStep('summary')} disabled={busy}>{`Review ${kind}`}</button>
+        </div>
+      }
+    >
+      <Field label={`${kind === 'quote' ? 'Quote' : 'Order'} Notes & Special Instructions`}>
+        <textarea
+          className="input"
+          rows={8}
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="e.g. free stock required, COA required, sample/promotional stock, special delivery instructions, customer-specific instructions, telesales instructions…"
+        />
+      </Field>
+      <p className="mt-1 text-xs text-slate-400">Optional — leave blank if there's nothing special to note.</p>
+    </Modal>
+  );
+
+  if (step === 'summary') return (
     // key forces a remount on entering the review screen - without it, React
     // reuses the same Modal DOM node and the scroll position from the (often
     // long) product list carries over instead of starting at the top.
     <Modal
       key="summary"
       title={`Review ${kind}`}
-      onClose={() => setShowSummary(false)}
+      onClose={() => setStep('notes')}
       wide
       footer={
         <div className="flex gap-2">
-          <button className="btn-secondary" onClick={() => setShowSummary(false)} disabled={busy}>Back</button>
+          <button className="btn-secondary" onClick={() => setStep('notes')} disabled={busy}>Back</button>
           <button className="btn-primary" disabled={busy} onClick={confirmSubmit}>
             {busy ? 'Submitting...' : kind === 'quote' ? 'Create quote' : 'Submit order'}
           </button>
@@ -365,8 +402,8 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
           </div>
           <div className="flex gap-2">
             <button className="btn-secondary" onClick={onClose}>Cancel</button>
-            <button className="btn-primary" disabled={busy || lines.length === 0} onClick={() => setShowSummary(true)}>
-              {busy ? 'Loading...' : `Review ${kind}`}
+            <button className="btn-primary" disabled={busy || lines.length === 0} onClick={() => setStep('notes')}>
+              {busy ? 'Loading...' : 'Continue'}
             </button>
           </div>
         </div>
@@ -387,11 +424,21 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
       {custId && (
         <>
           {selectedCustomer && (
-            <div className="mb-4 text-sm text-slate-500">
-              Warehouse:{' '}
-              {selectedCustomer.warehouse_name
-                ? <span className="font-medium text-slate-700">{selectedCustomer.warehouse_name} ({selectedCustomer.warehouse_code})</span>
-                : <span className="text-amber-600">Not assigned — set on this customer's SYSPRO record</span>}
+            <div className="mb-4 space-y-2 text-sm text-slate-500">
+              <div>
+                Warehouse:{' '}
+                {selectedCustomer.warehouse_name
+                  ? <span className="font-medium text-slate-700">{selectedCustomer.warehouse_name} ({selectedCustomer.warehouse_code})</span>
+                  : <span className="text-amber-600">Not assigned — set on this customer's SYSPRO record</span>}
+              </div>
+              {(selectedCustomer.ship_to_name || selectedCustomer.ship_to_address || selectedCustomer.ship_to_city || selectedCustomer.ship_to_postcode) && (
+                <div className="border-t pt-2">
+                  <div className="font-medium text-slate-700 mb-1">Ship to:</div>
+                  {selectedCustomer.ship_to_name && <div>{selectedCustomer.ship_to_name}</div>}
+                  {selectedCustomer.ship_to_address && <div>{selectedCustomer.ship_to_address}</div>}
+                  {selectedCustomer.ship_to_city && <div>{selectedCustomer.ship_to_city}{selectedCustomer.ship_to_postcode && ` ${selectedCustomer.ship_to_postcode}`}</div>}
+                </div>
+              )}
             </div>
           )}
           <div className="mb-4">
@@ -415,43 +462,58 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
             <div className="mt-1 card p-0 max-h-64 overflow-y-auto">
               {filtered.map((p) => {
                 const blocked = !!p.discontinued || !!p.no_price;
+                const historyOpen = expandedHistoryId === p.id;
                 return (
-                <button key={p.id} disabled={blocked}
-                  title={p.discontinued ? 'Discontinued in SYSPRO — cannot be ordered' : p.no_price ? 'No price set in SYSPRO — cannot be ordered' : undefined}
-                  className={`flex w-full items-center justify-between border-b border-slate-100 px-4 py-2.5 text-left text-sm ${
-                    blocked ? 'cursor-not-allowed bg-red-50/50 opacity-60' : 'hover:bg-slate-50'}`}
-                  onClick={() => { if (!blocked) addLine(p); }}>
-                  <span>
-                    <span className={`font-medium ${blocked ? 'text-red-700 line-through' : ''}`}>{p.name}</span>
-                    {p.discontinued && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">discontinued</span>}
-                    {!p.discontinued && p.no_price && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">no price set</span>}
-                    {!blocked && p.times_bought > 0 && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">bought {p.times_bought}x</span>}
-                    {/* R1-024: SYSPRO's own selling-unit UOM, shown before the
-                        rep picks the product, not only after it's been added. */}
-                    <span className="ml-2 text-xs text-slate-400">{p.code} · {p.uom || 'each'} · stock {p.stock_qty}</span>
-                  </span>
-                  <span className="text-right">
-                    <span className="font-medium">
-                      {fmtR(p.effective_price)}
-                      <PriceSourceBadge className="ml-1 text-xs" source={priceSourceForLine(p, p.effective_price)} />
+                <div key={p.id} className="border-b border-slate-100">
+                  <div role="button" tabIndex={blocked ? -1 : 0} aria-disabled={blocked}
+                    title={p.discontinued ? 'Discontinued in SYSPRO — cannot be ordered' : p.no_price ? 'No price set in SYSPRO — cannot be ordered' : undefined}
+                    className={`flex w-full items-center justify-between px-4 py-2.5 text-left text-sm ${
+                      blocked ? 'cursor-not-allowed bg-red-50/50 opacity-60' : 'cursor-pointer hover:bg-slate-50'}`}
+                    onClick={() => { if (!blocked) addLine(p); }}
+                    onKeyDown={(e) => { if (!blocked && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); addLine(p); } }}>
+                    <span>
+                      <span className={`font-medium ${blocked ? 'text-red-700 line-through' : ''}`}>{p.name}</span>
+                      {p.discontinued && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">discontinued</span>}
+                      {!p.discontinued && p.no_price && <span className="ml-2 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700">no price set</span>}
+                      {!blocked && p.times_bought > 0 && <span className="ml-2 rounded bg-emerald-50 px-1.5 py-0.5 text-xs text-emerald-600">bought {p.times_bought}x</span>}
+                      {/* R1-024: SYSPRO's own selling-unit UOM, shown before the
+                          rep picks the product, not only after it's been added. */}
+                      <span className="ml-2 text-xs text-slate-400">{p.code} · {p.uom || 'each'} · stock {p.stock_qty}</span>
                     </span>
-                    {kgPriceFor(p, p.effective_price) != null && (
-                      <div className="text-xs text-slate-400">{fmtR(kgPriceFor(p, p.effective_price))}/kg</div>
-                    )}
-                    {/* R1-019/R1-020: G Price alongside the negotiated price, plus the
-                        % it's discounted by - shown only where SYSPRO pricing actually
-                        applies, so it isn't confused with a RouteOne qty-break saving. */}
-                    {p.syspro_pricing_tier && (() => {
-                      const g = gPriceFor(p);
-                      const pct = discountPctFor(g, p.effective_price);
-                      return g > 0 ? (
-                        <div className="text-xs text-slate-400">
-                          G {fmtR(g)}{pct != null && <span className="ml-1 font-medium text-emerald-600">-{pct}%</span>}
-                        </div>
-                      ) : null;
-                    })()}
-                  </span>
-                </button>
+                    <span className="text-right">
+                      <span className="font-medium">
+                        {fmtR(p.effective_price)}
+                        <PriceSourceBadge className="ml-1 text-xs" source={priceSourceForLine(p, p.effective_price)} />
+                      </span>
+                      {kgPriceFor(p, p.effective_price) != null && (
+                        <div className="text-xs text-slate-400">{fmtR(kgPriceFor(p, p.effective_price))}/kg</div>
+                      )}
+                      {/* R1-019/R1-020: G Price alongside the negotiated price, plus the
+                          % it's discounted by - shown only where SYSPRO pricing actually
+                          applies, so it isn't confused with a RouteOne qty-break saving. */}
+                      {p.syspro_pricing_tier && (() => {
+                        const g = gPriceFor(p);
+                        const pct = discountPctFor(g, p.effective_price);
+                        return g > 0 ? (
+                          <div className="text-xs text-slate-400">
+                            G {fmtR(g)}{pct != null && <span className="ml-1 font-medium text-emerald-600">-{pct}%</span>}
+                          </div>
+                        ) : null;
+                      })()}
+                    </span>
+                  </div>
+                  {/* R1-053: lazy-loaded - ProductPurchaseHistory only fetches once expanded */}
+                  <button type="button"
+                    className="px-4 pb-1.5 text-[11px] font-medium text-brand-600"
+                    onClick={() => setExpandedHistoryId((cur) => (cur === p.id ? null : p.id))}>
+                    {historyOpen ? '▲ Hide purchase history' : '▼ Purchase history'}
+                  </button>
+                  {historyOpen && (
+                    <div className="px-4 pb-2">
+                      <ProductPurchaseHistory productId={p.id} customerId={Number(custId)} />
+                    </div>
+                  )}
+                </div>
               );})}
               {filtered.length === 0 && (
                 <div className="px-4 py-3 text-sm text-slate-400">
@@ -541,14 +603,12 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
             </Field>
           )}
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label={kind === 'quote' ? 'Quote notes' : 'Order notes'}>
-              <input className="input" value={notes} onChange={(e) => setNotes(e.target.value)} />
-            </Field>
-            {kind !== 'quote' && (
-              <Field label="Delivery instructions"><input className="input" value={delivery} onChange={(e) => setDelivery(e.target.value)} /></Field>
-            )}
-          </div>
+          {/* R1-052: notes moved to its own step between this screen and the
+              review (see step === 'notes' above) - kept here only for
+              delivery instructions, a separate field from notes. */}
+          {kind !== 'quote' && (
+            <Field label="Delivery instructions"><input className="input" value={delivery} onChange={(e) => setDelivery(e.target.value)} /></Field>
+          )}
         </>
       )}
     </Modal>

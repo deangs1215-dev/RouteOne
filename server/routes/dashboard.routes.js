@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db, logActivity, getLocalDateISO } from '../db.js';
 import { passwordIsStrong, requireRole, scopeForUser } from '../auth.js';
-import { sendEmail } from '../integration/email.js';
+import { buildLoginDetailsEmail, sendEmail } from '../integration/email.js';
 import bcrypt from 'bcryptjs';
 
 const router = Router();
@@ -255,23 +255,13 @@ router.post('/users/:id/send-login-details', requireRole('admin', 'manager'), as
       WHERE id = ?
     `).run(bcrypt.hashSync(tempPassword, 12), req.params.id);
 
-    // Send welcome email
-    const emailHtml = `
-      <p>Hello ${user.name},</p>
-      <p>Your RouteOne account has been created. You can now log in with the following credentials:</p>
-      <p><strong>Email:</strong> ${user.email}</p>
-      <p><strong>Temporary Password:</strong> ${tempPassword}</p>
-      <p>On your first login, you will be required to change your password to something more secure.</p>
-      <p><strong>Password requirements:</strong></p>
-      <ul>
-        <li>Minimum 9 characters</li>
-        <li>At least one capital letter (A-Z)</li>
-        <li>At least one number (0-9)</li>
-      </ul>
-      <p>Best regards,<br>RouteOne Team</p>
-    `;
-
-    await sendEmail(user.email, `Welcome to RouteOne - Your Login Details`, emailHtml);
+    // Send welcome email. sendEmail logs the outcome instead of throwing, so
+    // check the result - the password has already been reset at this point.
+    const sent = await sendEmail(buildLoginDetailsEmail(user, tempPassword));
+    if (sent.status !== 'sent') {
+      console.error('Login details email not sent:', sent.error);
+      return res.status(502).json({ error: `Password was reset but the email was not sent (${sent.error || 'unknown error'}). Use Send login details again once email is working.` });
+    }
 
     logActivity(req.user.id, 'send', 'user-login-details', user.id, { name: user.name, email: user.email });
     res.json({ ok: true, message: `Login details sent to ${user.email}` });

@@ -32,6 +32,7 @@ import supportRoutes from './routes/support.routes.js';
 import branchClockInRoutes from './routes/branch-clock-in.routes.js';
 import { startScheduler } from './integration/scheduler.js';
 import { startRepDigestScheduler } from './integration/repDigest.js';
+import { startSyncDigestScheduler } from './integration/syncDigest.js';
 import { startBackupScheduler } from './backup.js';
 import { ensureDefaultForms } from './defaultForms.js';
 
@@ -199,6 +200,7 @@ export function startServer(port = process.env.API_PORT || 4200) {
     if (process.env.DISABLE_SCHEDULERS !== '1') {
       startScheduler();
       startRepDigestScheduler();
+      startSyncDigestScheduler();
       startBackupScheduler();
     }
   });

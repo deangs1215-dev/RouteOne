@@ -1,11 +1,11 @@
 @echo off
-REM Deploy RouteOne - Sync local to server Z:\ and restart
+REM Deploy RouteOne - Sync local to server Y:\ and restart
 REM Double-click to run, or: deploy.bat
 
 setlocal enabledelayedexpansion
 
 set LocalPath=C:\Projects\RouteOne
-set ServerDrive=Z:
+set ServerDrive=Y:
 
 cls
 echo.
@@ -28,7 +28,7 @@ if not exist "%LocalPath%" (
 if not exist "%ServerDrive%" (
     color 0c
     echo ERROR: Server drive not found: %ServerDrive%
-    echo Make sure Z:\ is mapped to your server
+    echo Make sure Y:\ is mapped to your server
     pause
     exit /b 1
 )
