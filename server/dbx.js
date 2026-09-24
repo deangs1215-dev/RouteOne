@@ -52,6 +52,14 @@ export function isUniqueViolation(err) {
     n === 2627 || n === 2601;
 }
 
+// True for any constraint violation (unique, foreign key, check, not null).
+// SQLite codes start with SQLITE_CONSTRAINT; SQL Server uses 547 (foreign
+// key / check) alongside the duplicate-key numbers above.
+export function isConstraintViolation(err) {
+  const n = err?.number ?? err?.originalError?.info?.number;
+  return String(err?.code || '').startsWith('SQLITE_CONSTRAINT') || n === 547 || n === 515 || isUniqueViolation(err);
+}
+
 // Portable upsert. `keys` identify the row; `set` columns are overwritten on
 // conflict; `add` columns are incremented by the given amount on conflict (and
 // inserted as-is when new); `now` columns are stamped with the current UTC time
@@ -174,6 +182,13 @@ export function createSqliteDbx(db) {
 }
 
 // --- SQL Server backend -----------------------------------------------------
+// SQL Server hands back DATETIME columns as JS Date objects; SQLite returns the
+// text 'YYYY-MM-DD HH:MM:SS' that the app was written against (string
+// comparison, .slice(), .replace(' ', 'T')). Converting here keeps route code
+// identical on both backends. Values are UTC on both: SQLite's datetime('now')
+// and this schema's SYSUTCDATETIME() defaults.
+const dateToText = (d) => d.toISOString().slice(0, 19).replace('T', ' ');
+
 export function createMssqlDbx(pool, sql) {
   const translations = new Map();
   // `target` is the pool, or a Transaction for tx handles.
@@ -194,7 +209,11 @@ export function createMssqlDbx(pool, sql) {
       }
       const req = request();
       params.forEach((v, i) => req.input(`p${i}`, v === undefined ? null : v));
-      return req.query(q);
+      const result = await req.query(q);
+      for (const row of result.recordset ?? []) {
+        for (const key in row) if (row[key] instanceof Date) row[key] = dateToText(row[key]);
+      }
+      return result;
     }
 
     const self = {

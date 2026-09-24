@@ -12,7 +12,12 @@
 //   datetime('now'[, modifiers])      SYSUTCDATETIME() / DATEADD(...)
 //   strftime('%Y-%m', expr)           CONVERT(VARCHAR(7), expr, 23)
 //   strftime('%Y-01', expr)           CONVERT(VARCHAR(4), expr, 23) + '-01'
+//   julianday(x)                      (DATEDIFF_BIG(SECOND, '1970-01-01', x) / 86400.0)
 //   ... LIMIT n                       SELECT TOP (n) ...   (numeric literal only)
+//
+// julianday() is only faithful for DIFFERENCES ('julianday(a) - julianday(b)' is
+// the gap in days): the T-SQL form counts days from 1970, not from the Julian
+// epoch, so never use an absolute julianday value.
 //
 // date()/strftime() return text on SQLite, so the T-SQL forms return VARCHAR.
 // CONVERT(VARCHAR(n), x, 23) also truncates a text column ('2026-03-01 10:00')
@@ -78,6 +83,11 @@ function buildCall(name, args) {
     if (!isNow(args[0])) throw new Error('sqlDialect: only datetime(\'now\'[, modifiers]) is supported');
     return applyModifiers(NOW, args.slice(1), 'datetime');
   }
+  if (name === 'julianday') {
+    if (args.length !== 1) throw new Error('sqlDialect: julianday() modifiers are not supported');
+    const src = isNow(args[0]) ? NOW : args[0];
+    return `(DATEDIFF_BIG(SECOND, '1970-01-01', ${src}) / 86400.0)`;
+  }
   // strftime
   const fmt = /^'(.*)'$/.exec(args[0] ?? '')?.[1];
   const src = isNow(args[1]) ? NOW : args[1];
@@ -86,7 +96,7 @@ function buildCall(name, args) {
   throw new Error(`sqlDialect: unsupported strftime format ${args[0]}`);
 }
 
-const FUNCS = new Set(['date', 'datetime', 'strftime']);
+const FUNCS = new Set(['date', 'datetime', 'strftime', 'julianday']);
 
 function translateFunctions(sql) {
   let out = '';

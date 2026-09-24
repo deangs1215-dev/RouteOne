@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { db, logActivity, priceBreaks, activeRules, getTodayISO } from '../db.js';
-import { requireRole, userCanAccessCustomer, withoutCostFields } from '../auth.js';
+import { dbx, priceBreaks, getTodayISO } from '../db.js';
+import { logActivity, activeRules } from '../dbh.js';
+import { requireRole, userCanAccessCustomerAsync, withoutCostFields } from '../auth.js';
 
 const router = Router();
 
@@ -13,14 +14,14 @@ function isPriceValid(startDate, endDate) {
   return true;
 }
 
-router.get('/products', (req, res) => {
+router.get('/products', async (req, res) => {
   const { q, category_id, active } = req.query;
   const where = [];
   const params = [];
   if (q) { where.push('(p.name LIKE ? OR p.code LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
   if (category_id) { where.push('p.category_id = ?'); params.push(category_id); }
   if (active !== undefined) { where.push('p.active = ?'); params.push(active === 'false' ? 0 : 1); }
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT p.*, c.name AS category_name
     FROM products p LEFT JOIN product_categories c ON c.id = p.category_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
@@ -30,7 +31,7 @@ router.get('/products', (req, res) => {
   let stockByProduct = {};
   let stockQtyByProduct = {};
   if (req.user.role === 'rep' && req.user.warehouse_id) {
-    const stockRows = db.prepare(`
+    const stockRows = await dbx.prepare(`
       SELECT ps.product_id, w.code AS warehouse_code, w.name AS warehouse_name, ps.qty_available
       FROM product_stock ps JOIN warehouses w ON w.id = ps.warehouse_id
       WHERE ps.warehouse_id = ?
@@ -41,7 +42,7 @@ router.get('/products', (req, res) => {
     }
   } else {
     // Per-branch stock breakdown for admin/manager/office users
-    const stockRows = db.prepare(`
+    const stockRows = await dbx.prepare(`
       SELECT ps.product_id, w.code AS warehouse_code, w.name AS warehouse_name, ps.qty_available
       FROM product_stock ps JOIN warehouses w ON w.id = ps.warehouse_id
       ORDER BY w.code
@@ -60,10 +61,10 @@ router.get('/products', (req, res) => {
 // Quick stock lookup for a rep on the road - searches by code or name and
 // shows only their own depot's stock, not the company-wide total, since
 // that's what actually matters when deciding whether to sell it.
-router.get('/products/depot-stock', (req, res) => {
+router.get('/products/depot-stock', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.json([]);
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT id, code, name, uom, pack_size
     FROM products
     WHERE active = 1 AND (name LIKE ? OR code LIKE ?)
@@ -74,7 +75,7 @@ router.get('/products/depot-stock', (req, res) => {
   if (!req.user.warehouse_id) {
     return res.json(rows.map((p) => ({ ...p, stock_qty: null }))); // no depot assigned - can't scope stock
   }
-  const stockRows = db.prepare('SELECT product_id, qty_available FROM product_stock WHERE warehouse_id = ?').all(req.user.warehouse_id);
+  const stockRows = await dbx.prepare('SELECT product_id, qty_available FROM product_stock WHERE warehouse_id = ?').all(req.user.warehouse_id);
   const stockByProductId = {};
   for (const s of stockRows) stockByProductId[s.product_id] = s.qty_available;
   res.json(rows.map((p) => ({ ...p, stock_qty: stockByProductId[p.id] ?? 0 })));
@@ -82,16 +83,16 @@ router.get('/products/depot-stock', (req, res) => {
 
 // Product list with the effective price for one customer (SYSPRO pricing > contract > qty breaks > list)
 // plus price breaks so the client can price qty discounts locally.
-router.get('/products/for-customer/:customerId', (req, res) => {
+router.get('/products/for-customer/:customerId', async (req, res) => {
   const cid = req.params.customerId;
   // Get customer code for SYSPRO pricing lookup
-  const customer = db.prepare('SELECT code FROM customers WHERE id = ?').get(cid);
+  const customer = await dbx.prepare('SELECT code FROM customers WHERE id = ?').get(cid);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (!userCanAccessCustomer(req.user, cid)) {
+  if (!await userCanAccessCustomerAsync(req.user, cid)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT p.*, c.name AS category_name,
       COALESCE(cp.price, p.list_price) AS effective_price,
       CASE WHEN cp.price IS NOT NULL THEN 1 ELSE 0 END AS has_contract_price
@@ -142,7 +143,7 @@ router.get('/products/for-customer/:customerId', (req, res) => {
   // (idx_invoices_customer / idx_invoice_items_delivery_customer)
   // independently - same result set, verified byte-for-byte against the
   // OR version, but ~0-1ms instead.
-  const purchaseRows = db.prepare(`
+  const purchaseRows = await dbx.prepare(`
     SELECT product_id,
       SUM(CASE WHEN src = 'order' THEN 1 ELSE 0 END) AS order_count,
       SUM(CASE WHEN src = 'invoice' THEN 1 ELSE 0 END) AS invoice_count,
@@ -177,14 +178,14 @@ router.get('/products/for-customer/:customerId', (req, res) => {
   let stockByProductId = null;
   if (req.user.role === 'rep' && req.user.warehouse_id) {
     stockByProductId = {};
-    const stockRows = db.prepare('SELECT product_id, qty_available FROM product_stock WHERE warehouse_id = ?').all(req.user.warehouse_id);
+    const stockRows = await dbx.prepare('SELECT product_id, qty_available FROM product_stock WHERE warehouse_id = ?').all(req.user.warehouse_id);
     for (const s of stockRows) stockByProductId[s.product_id] = s.qty_available;
   }
 
   // Fetch SYSPRO pricing for this customer if available (table may not exist in dev)
   let sysproPricingByProductCode = {};
   try {
-    const sysproRows = db.prepare(`
+    const sysproRows = await dbx.prepare(`
       SELECT product_code, contract_price, buying_group_price, price_code_price,
              contract_start_date, contract_end_date, buying_group_start_date, buying_group_end_date
       FROM syspro_customer_pricing
@@ -197,7 +198,7 @@ router.get('/products/for-customer/:customerId', (req, res) => {
     // Table may not exist yet in dev environment
   }
 
-  const rules = activeRules();
+  const rules = await activeRules();
   res.json(rows.map((p) => {
     // Check SYSPRO pricing first (contract > buying group > price code > list)
     const syspro = sysproPricingByProductCode[p.code];
@@ -271,11 +272,11 @@ router.get('/products/for-customer/:customerId', (req, res) => {
 // there is no more history than this to show at the per-product line-item
 // level; the client labels this "last 30 days" rather than implying it's the
 // full buying history.
-router.get('/products/:productId/purchase-history', (req, res) => {
+router.get('/products/:productId/purchase-history', async (req, res) => {
   const productId = req.params.productId;
   const customerId = req.query.customer_id;
   if (!customerId) return res.status(400).json({ error: 'customer_id is required' });
-  if (!userCanAccessCustomer(req.user, customerId)) {
+  if (!await userCanAccessCustomerAsync(req.user, customerId)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 
@@ -284,7 +285,7 @@ router.get('/products/:productId/purchase-history', (req, res) => {
   // column's index (see products.routes.js's times_bought above / the R1-052
   // session notes for the measured ~750ms-vs-~1ms difference on the live
   // 271k-row table). Each branch here narrows on an indexed column first.
-  const purchases = db.prepare(`
+  const purchases = await dbx.prepare(`
     SELECT ii.qty, ii.unit_price, ii.line_total, i.invoice_date AS date, i.number AS invoice_number
       FROM invoices i JOIN invoice_items ii ON ii.invoice_id = i.id
       WHERE i.customer_id = ? AND ii.product_id = ?
@@ -306,8 +307,8 @@ router.get('/products/:productId/purchase-history', (req, res) => {
 
 // --- Price rules (Phase 2 pricing beyond contract prices) ---
 
-router.get('/price-rules', (req, res) => {
-  res.json(db.prepare(`
+router.get('/price-rules', async (req, res) => {
+  res.json(await dbx.prepare(`
     SELECT r.*, p.name AS product_name, c.name AS category_name
     FROM price_rules r
     LEFT JOIN products p ON p.id = r.product_id
@@ -316,14 +317,14 @@ router.get('/price-rules', (req, res) => {
   `).all());
 });
 
-router.post('/price-rules', requireRole('admin', 'manager', 'office'), (req, res) => {
+router.post('/price-rules', requireRole('admin', 'manager', 'office'), async (req, res) => {
   const b = req.body || {};
   if (!b.name) return res.status(400).json({ error: 'Rule name is required' });
   if (!b.product_id && !b.category_id) return res.status(400).json({ error: 'Pick a product or a category' });
   if (b.rule_type === 'fixed_price' ? b.fixed_price == null : b.discount_pct == null) {
     return res.status(400).json({ error: 'Set a discount % or a fixed price' });
   }
-  const info = db.prepare(`
+  const info = await dbx.prepare(`
     INSERT INTO price_rules (name, product_id, category_id, rule_type, discount_pct, fixed_price, min_qty, starts_on, ends_on, active)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
@@ -331,15 +332,15 @@ router.post('/price-rules', requireRole('admin', 'manager', 'office'), (req, res
     b.discount_pct ?? null, b.fixed_price ?? null, b.min_qty || 0,
     b.starts_on || null, b.ends_on || null, b.active === 0 ? 0 : 1
   );
-  logActivity(req.user.id, 'create', 'price_rule', info.lastInsertRowid, { name: b.name });
+  await logActivity(req.user.id, 'create', 'price_rule', info.lastInsertRowid, { name: b.name });
   res.json({ id: info.lastInsertRowid });
 });
 
-router.put('/price-rules/:id', requireRole('admin', 'manager', 'office'), (req, res) => {
+router.put('/price-rules/:id', requireRole('admin', 'manager', 'office'), async (req, res) => {
   const b = req.body || {};
-  const existing = db.prepare('SELECT * FROM price_rules WHERE id = ?').get(req.params.id);
+  const existing = await dbx.prepare('SELECT * FROM price_rules WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Rule not found' });
-  db.prepare(`
+  await dbx.prepare(`
     UPDATE price_rules SET name = ?, product_id = ?, category_id = ?, rule_type = ?, discount_pct = ?,
       fixed_price = ?, min_qty = ?, starts_on = ?, ends_on = ?, active = ?
     WHERE id = ?
@@ -352,30 +353,30 @@ router.put('/price-rules/:id', requireRole('admin', 'manager', 'office'), (req, 
   res.json({ ok: true });
 });
 
-router.delete('/price-rules/:id', requireRole('admin', 'manager', 'office'), (req, res) => {
-  db.prepare('DELETE FROM price_rules WHERE id = ?').run(req.params.id);
+router.delete('/price-rules/:id', requireRole('admin', 'manager', 'office'), async (req, res) => {
+  await dbx.prepare('DELETE FROM price_rules WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
 
-router.post('/products', requireRole('admin', 'manager', 'office'), (req, res) => {
+router.post('/products', requireRole('admin', 'manager', 'office'), async (req, res) => {
   const b = req.body || {};
   if (!b.code || !b.name) return res.status(400).json({ error: 'Product code and name are required' });
-  const info = db.prepare(`
+  const info = await dbx.prepare(`
     INSERT INTO products (code, name, category_id, description, uom, pack_size, list_price, cost_price, stock_qty, active)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     b.code, b.name, b.category_id || null, b.description || null, b.uom || 'each',
     b.pack_size || null, b.list_price || 0, b.cost_price || 0, b.stock_qty || 0, b.active === 0 ? 0 : 1
   );
-  logActivity(req.user.id, 'create', 'product', info.lastInsertRowid, { name: b.name });
-  res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(info.lastInsertRowid));
+  await logActivity(req.user.id, 'create', 'product', info.lastInsertRowid, { name: b.name });
+  res.json(await dbx.prepare('SELECT * FROM products WHERE id = ?').get(info.lastInsertRowid));
 });
 
-router.put('/products/:id', requireRole('admin', 'manager', 'office'), (req, res) => {
+router.put('/products/:id', requireRole('admin', 'manager', 'office'), async (req, res) => {
   const b = req.body || {};
-  const existing = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+  const existing = await dbx.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Product not found' });
-  db.prepare(`
+  await dbx.prepare(`
     UPDATE products SET code = ?, name = ?, category_id = ?, description = ?, uom = ?, pack_size = ?,
       list_price = ?, cost_price = ?, stock_qty = ?, active = ?
     WHERE id = ?
@@ -385,25 +386,25 @@ router.put('/products/:id', requireRole('admin', 'manager', 'office'), (req, res
     b.list_price ?? existing.list_price, b.cost_price ?? existing.cost_price,
     b.stock_qty ?? existing.stock_qty, b.active ?? existing.active, req.params.id
   );
-  logActivity(req.user.id, 'update', 'product', req.params.id);
-  res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
+  await logActivity(req.user.id, 'update', 'product', req.params.id);
+  res.json(await dbx.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
 });
 
-router.get('/product-categories', (req, res) => {
-  res.json(db.prepare('SELECT * FROM product_categories ORDER BY name').all());
+router.get('/product-categories', async (req, res) => {
+  res.json(await dbx.prepare('SELECT * FROM product_categories ORDER BY name').all());
 });
 
-router.post('/product-categories', requireRole('admin', 'manager', 'office'), (req, res) => {
+router.post('/product-categories', requireRole('admin', 'manager', 'office'), async (req, res) => {
   const name = req.body?.name;
   if (!name) return res.status(400).json({ error: 'Category name is required' });
-  const info = db.prepare('INSERT INTO product_categories (name) VALUES (?)').run(name);
-  res.json(db.prepare('SELECT * FROM product_categories WHERE id = ?').get(info.lastInsertRowid));
+  const info = await dbx.prepare('INSERT INTO product_categories (name) VALUES (?)').run(name);
+  res.json(await dbx.prepare('SELECT * FROM product_categories WHERE id = ?').get(info.lastInsertRowid));
 });
 
 // SYSPRO customer pricing (contract, buying group, price code, falling back to
 // the product's list price - list price isn't stored per customer, see schema.sql)
 // Synced from SYSPRO's vw_FS_CustomerPricing_ContractBuyingGroup view
-router.get('/customer-pricing', (req, res) => {
+router.get('/customer-pricing', async (req, res) => {
   const { customer_code, product_code } = req.query;
   if (!customer_code || !product_code) {
     return res.status(400).json({ error: 'customer_code and product_code are required' });
@@ -414,17 +415,17 @@ router.get('/customer-pricing', (req, res) => {
   // read any account's negotiated contract and buying-group pricing just by
   // knowing its SYSPRO code. Resolve the code to an id and apply the same rule
   // every other customer-scoped route uses.
-  const customer = db.prepare('SELECT id FROM customers WHERE code = ?').get(customer_code);
+  const customer = await dbx.prepare('SELECT id FROM customers WHERE code = ?').get(customer_code);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (!userCanAccessCustomer(req.user, customer.id)) {
+  if (!await userCanAccessCustomerAsync(req.user, customer.id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 
-  const product = db.prepare('SELECT list_price, pack_weight_kg, conv_factor_alt_uom FROM products WHERE code = ?').get(product_code);
+  const product = await dbx.prepare('SELECT list_price, pack_weight_kg, conv_factor_alt_uom FROM products WHERE code = ?').get(product_code);
   if (!product) return res.status(404).json({ error: 'Product not found' });
   const packWeight = product.conv_factor_alt_uom || product.pack_weight_kg || 1;
 
-  const override = db.prepare(`
+  const override = await dbx.prepare(`
     SELECT contract_price, buying_group_price, price_code_price,
            contract_start_date, contract_end_date, buying_group_start_date, buying_group_end_date
     FROM syspro_customer_pricing

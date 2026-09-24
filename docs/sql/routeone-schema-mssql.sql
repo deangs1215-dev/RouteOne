@@ -47,7 +47,7 @@ CREATE TABLE warehouses (
   code NVARCHAR(20) UNIQUE NOT NULL,
   [name] NVARCHAR(255) NOT NULL,
   active INT DEFAULT 1,
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -76,7 +76,7 @@ CREATE TABLE users (
   home_address NVARCHAR(MAX),
   home_lat FLOAT,
   home_lng FLOAT,
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -120,7 +120,7 @@ CREATE TABLE customers (
   ship_to_address NVARCHAR(MAX),
   ship_to_city NVARCHAR(100),
   ship_to_postcode NVARCHAR(20),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -150,7 +150,7 @@ CREATE TABLE customer_intel (
   competitor_notes NVARCHAR(MAX),
   general_notes NVARCHAR(MAX),
   updated_by INT REFERENCES users(id),
-  updated_at DATETIME DEFAULT GETDATE()
+  updated_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -160,7 +160,7 @@ CREATE TABLE customer_notes (
   [user_id] INT NOT NULL REFERENCES users(id),
   note_type NVARCHAR(20) NOT NULL DEFAULT 'note',
   note NVARCHAR(MAX) NOT NULL,
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_customer_notes_customer ON customer_notes(customer_id, created_at DESC);
@@ -192,7 +192,7 @@ CREATE TABLE products (
   stock_qty FLOAT DEFAULT 0,
   discontinued INT DEFAULT 0,
   active INT DEFAULT 1,
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_products_category ON products(category_id);
@@ -231,7 +231,7 @@ CREATE TABLE syspro_customer_pricing (
   contract_end_date NVARCHAR(10),
   buying_group_start_date NVARCHAR(10),
   buying_group_end_date NVARCHAR(10),
-  synced_at DATETIME DEFAULT GETDATE(),
+  synced_at DATETIME DEFAULT SYSUTCDATETIME(),
   PRIMARY KEY (customer_code, product_code)
 );
 GO
@@ -259,7 +259,7 @@ CREATE TABLE price_rules (
   starts_on NVARCHAR(10),
   ends_on NVARCHAR(10),
   active INT DEFAULT 1,
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_price_rules_product ON price_rules(active, product_id);
@@ -289,7 +289,7 @@ CREATE TABLE visits (
   check_out_lng FLOAT,
   notes NVARCHAR(MAX),
   outcome NVARCHAR(50),
-  created_at DATETIME DEFAULT GETDATE(),
+  created_at DATETIME DEFAULT SYSUTCDATETIME(),
   updated_at DATETIME
 );
 GO
@@ -305,7 +305,7 @@ CREATE TABLE visit_reschedules (
   to_date NVARCHAR(10) NOT NULL,
   reason NVARCHAR(255),
   rescheduled_by INT NOT NULL REFERENCES users(id),
-  rescheduled_at DATETIME DEFAULT GETDATE()
+  rescheduled_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_visit_reschedules_visit ON visit_reschedules(visit_id);
@@ -316,7 +316,7 @@ CREATE TABLE visit_photos (
   visit_id INT NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
   path NVARCHAR(MAX) NOT NULL,
   caption NVARCHAR(MAX),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_visit_photos_visit ON visit_photos(visit_id);
@@ -327,7 +327,7 @@ CREATE TABLE rep_locations (
   [user_id] INT NOT NULL REFERENCES users(id),
   lat FLOAT NOT NULL,
   lng FLOAT NOT NULL,
-  recorded_at DATETIME DEFAULT GETDATE()
+  recorded_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_rep_locations_user ON rep_locations(user_id, recorded_at);
@@ -345,7 +345,7 @@ CREATE TABLE orders (
   visit_id INT REFERENCES visits(id),
   warehouse_id INT REFERENCES warehouses(id),
   [status] NVARCHAR(20) DEFAULT 'submitted',
-  order_date DATETIME DEFAULT GETDATE(),
+  order_date DATETIME DEFAULT SYSUTCDATETIME(),
   subtotal FLOAT DEFAULT 0,
   vat_amount FLOAT DEFAULT 0,
   total FLOAT DEFAULT 0,
@@ -353,7 +353,7 @@ CREATE TABLE orders (
   notes NVARCHAR(MAX),
   delivery_instructions NVARCHAR(MAX),
   signature NVARCHAR(MAX),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_orders_customer ON orders(customer_id);
@@ -390,14 +390,14 @@ CREATE TABLE quotes (
   rep_id INT REFERENCES users(id),
   visit_id INT REFERENCES visits(id),
   [status] NVARCHAR(20) DEFAULT 'sent',
-  quote_date DATETIME DEFAULT GETDATE(),
+  quote_date DATETIME DEFAULT SYSUTCDATETIME(),
   valid_until NVARCHAR(10),
   subtotal FLOAT DEFAULT 0,
   vat_amount FLOAT DEFAULT 0,
   total FLOAT DEFAULT 0,
   notes NVARCHAR(MAX),
   [order_id] INT REFERENCES orders(id),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_quotes_customer ON quotes(customer_id);
@@ -439,7 +439,7 @@ CREATE TABLE invoices (
   amount_paid FLOAT DEFAULT 0,
   balance FLOAT DEFAULT 0,
   [status] NVARCHAR(20) DEFAULT 'outstanding',
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_invoices_customer ON invoices(customer_id, invoice_date);
@@ -471,7 +471,7 @@ CREATE TABLE rep_monthly_sales (
   rep_id INT NOT NULL REFERENCES users(id),
   [month] NVARCHAR(7) NOT NULL,
   sales_value FLOAT NOT NULL DEFAULT 0,
-  synced_at DATETIME DEFAULT GETDATE(),
+  synced_at DATETIME DEFAULT SYSUTCDATETIME(),
   UNIQUE(rep_id, month)
 );
 GO
@@ -482,7 +482,7 @@ CREATE TABLE customer_monthly_sales (
   customer_code NVARCHAR(20) NOT NULL,
   [month] NVARCHAR(7) NOT NULL,
   sales_value FLOAT NOT NULL DEFAULT 0,
-  synced_at DATETIME DEFAULT GETDATE(),
+  synced_at DATETIME DEFAULT SYSUTCDATETIME(),
   PRIMARY KEY (customer_code, month)
 );
 GO
@@ -501,7 +501,7 @@ CREATE TABLE form_templates (
   category NVARCHAR(50) DEFAULT 'general',
   notify_email NVARCHAR(255),
   active INT DEFAULT 1,
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -512,7 +512,7 @@ CREATE TABLE form_submissions (
   customer_id INT REFERENCES customers(id),
   [user_id] INT REFERENCES users(id),
   [data] NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_form_submissions_visit ON form_submissions(visit_id);
@@ -532,8 +532,8 @@ CREATE TABLE drafts (
   visit_id INT REFERENCES visits(id),
   label NVARCHAR(255),
   [data] NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-  updated_at DATETIME DEFAULT GETDATE(),
-  created_at DATETIME DEFAULT GETDATE()
+  updated_at DATETIME DEFAULT SYSUTCDATETIME(),
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_drafts_rep ON drafts(rep_id, kind);
@@ -550,7 +550,7 @@ CREATE TABLE email_recipients (
   description NVARCHAR(MAX),
   category NVARCHAR(50) NOT NULL DEFAULT 'orders',
   warehouse_id INT REFERENCES warehouses(id),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -559,7 +559,7 @@ CREATE TABLE rep_email_contacts (
   [user_id] INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   [name] NVARCHAR(255) NOT NULL,
   email NVARCHAR(255) NOT NULL,
-  created_at DATETIME DEFAULT GETDATE(),
+  created_at DATETIME DEFAULT SYSUTCDATETIME(),
   UNIQUE (user_id, email)
 );
 GO
@@ -576,7 +576,7 @@ CREATE TABLE email_log (
   body_html NVARCHAR(MAX) NOT NULL,
   [status] NVARCHAR(20) DEFAULT 'pending',
   error NVARCHAR(MAX),
-  created_at DATETIME DEFAULT GETDATE(),
+  created_at DATETIME DEFAULT SYSUTCDATETIME(),
   sent_at DATETIME
 );
 GO
@@ -592,7 +592,7 @@ CREATE TABLE activity_log (
   entity_type NVARCHAR(50) NOT NULL,
   entity_id INT,
   detail NVARCHAR(MAX),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -609,7 +609,7 @@ CREATE TABLE sync_runs (
   rows_upserted INT DEFAULT 0,
   rows_skipped INT DEFAULT 0,
   error NVARCHAR(MAX),
-  started_at DATETIME DEFAULT GETDATE(),
+  started_at DATETIME DEFAULT SYSUTCDATETIME(),
   finished_at DATETIME
 );
 GO
@@ -624,7 +624,7 @@ CREATE TABLE documents (
   description NVARCHAR(MAX),
   file_path NVARCHAR(MAX) NOT NULL,
   uploaded_by INT REFERENCES users(id),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 
@@ -641,7 +641,7 @@ CREATE TABLE route_cycles (
   cycle_weeks INT NOT NULL DEFAULT 8,
   repeat_count INT NOT NULL DEFAULT 1,
   active INT NOT NULL DEFAULT 1,
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_route_cycles_rep ON route_cycles(rep_id, active);
@@ -674,8 +674,8 @@ CREATE TABLE tasks (
   notes NVARCHAR(MAX),
   [status] NVARCHAR(20) NOT NULL DEFAULT 'open',
   branch NVARCHAR(100),
-  created_at DATETIME DEFAULT GETDATE(),
-  updated_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME(),
+  updated_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_tasks_assigned_to ON tasks(assigned_to, status, follow_up_date);
@@ -690,10 +690,10 @@ GO
 CREATE TABLE branch_clock_ins (
   id INT IDENTITY(1,1) PRIMARY KEY,
   rep_id INT NOT NULL REFERENCES users(id),
-  clock_in_at DATETIME NOT NULL DEFAULT GETDATE(),
+  clock_in_at DATETIME NOT NULL DEFAULT SYSUTCDATETIME(),
   clock_out_at DATETIME,
   notes NVARCHAR(MAX),
-  created_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_branch_clock_ins_rep ON branch_clock_ins(rep_id, clock_in_at DESC);
@@ -712,8 +712,8 @@ CREATE TABLE rep_budgets (
   rep_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   [month] INT NOT NULL CHECK (month BETWEEN 1 AND 12),
   budget FLOAT NOT NULL DEFAULT 0,
-  created_at DATETIME DEFAULT GETDATE(),
-  updated_at DATETIME DEFAULT GETDATE(),
+  created_at DATETIME DEFAULT SYSUTCDATETIME(),
+  updated_at DATETIME DEFAULT SYSUTCDATETIME(),
   PRIMARY KEY (rep_id, month)
 );
 GO
@@ -723,8 +723,8 @@ CREATE TABLE sales_pushes (
   message NVARCHAR(MAX) NOT NULL,
   active INT NOT NULL DEFAULT 1,
   created_by INT NOT NULL REFERENCES users(id),
-  created_at DATETIME DEFAULT GETDATE(),
-  updated_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME(),
+  updated_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_sales_pushes_active ON sales_pushes(active, created_at);
@@ -747,8 +747,8 @@ CREATE TABLE support_tickets (
   admin_notes NVARCHAR(MAX),
   resolved_by INT REFERENCES users(id),
   resolved_at DATETIME,
-  created_at DATETIME DEFAULT GETDATE(),
-  updated_at DATETIME DEFAULT GETDATE()
+  created_at DATETIME DEFAULT SYSUTCDATETIME(),
+  updated_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO
 CREATE INDEX idx_support_tickets_status ON support_tickets(status, created_at);

@@ -22,6 +22,8 @@ const cases = [
   ["SELECT a, (SELECT x FROM u WHERE u.a = t.a ORDER BY y LIMIT 1) AS f FROM t ORDER BY a LIMIT 20",
     "SELECT TOP (20) a, (SELECT TOP (1) x FROM u WHERE u.a = t.a ORDER BY y) AS f FROM t ORDER BY a"],
   ["WHERE id IN (SELECT id FROM l WHERE u = ? ORDER BY r DESC LIMIT 50)", "WHERE id IN (SELECT TOP (50) id FROM l WHERE u = ? ORDER BY r DESC)"],
+  ["(julianday(check_out_at) - julianday(check_in_at)) * 24", "((DATEDIFF_BIG(SECOND, '1970-01-01', check_out_at) / 86400.0) - (DATEDIFF_BIG(SECOND, '1970-01-01', check_in_at) / 86400.0)) * 24"],
+  ["julianday('now')", "(DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()) / 86400.0)"],
   // things that must be left alone
   ["SELECT 'date(x) LIMIT 5', ? FROM t", "SELECT 'date(x) LIMIT 5', ? FROM t"],
   ["SELECT SYSUTCDATETIME(), update_date(x), a.date(y) FROM t", "SELECT SYSUTCDATETIME(), update_date(x), a.date(y) FROM t"],
