@@ -180,15 +180,65 @@ const upsertInvoice = async (row, conn) => {
   });
 };
 
-const upsertCustomerPricing = (row, conn) => {
-  // Convert Date objects from SQL Server to ISO strings, coerce all values to safe types
-  const toSafeValue = (v) => {
-    if (v === null || v === undefined) return null;
-    if (v instanceof Date) return v.toISOString().split('T')[0]; // YYYY-MM-DD
-    if (typeof v === 'number' || typeof v === 'string') return v;
-    return String(v); // fallback: stringify anything else
-  };
+// Convert Date objects from SQL Server to ISO strings, coerce all values to safe types
+const toSafeValue = (v) => {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) return v.toISOString().split('T')[0]; // YYYY-MM-DD
+  if (typeof v === 'number' || typeof v === 'string') return v;
+  return String(v); // fallback: stringify anything else
+};
 
+// customer_pricing is millions of rows. On SQL Server it is loaded with
+// dbx.bulkUpsert (staging table + set-based apply) instead of one upsert per
+// row - see BULK_UPSERT. SQLite has no bulkUpsert and keeps the per-row path.
+const PRICING_COLUMNS = [
+  { name: 'customer_code', type: 'nvarchar(20)' },
+  { name: 'product_code', type: 'nvarchar(20)' },
+  { name: 'contract_price', type: 'float' },
+  { name: 'buying_group_price', type: 'float' },
+  { name: 'price_code_price', type: 'float' },
+  { name: 'contract_start_date', type: 'nvarchar(10)' },
+  { name: 'contract_end_date', type: 'nvarchar(10)' },
+  { name: 'buying_group_start_date', type: 'nvarchar(10)' },
+  { name: 'buying_group_end_date', type: 'nvarchar(10)' }
+];
+
+const toBulkNumber = (v) => {
+  const x = toSafeValue(v);
+  if (x === null || x === '') return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+};
+
+// Same coercion as upsertCustomerPricing, shaped for the staging table.
+// Returns null for a row with no usable key (counted as skipped).
+const pricingBulkRow = (row) => {
+  const customer_code = toSafeValue(row.customer_code);
+  const product_code = toSafeValue(row.product_code);
+  if (customer_code == null || product_code == null) return null;
+  return {
+    customer_code: String(customer_code), product_code: String(product_code),
+    contract_price: toBulkNumber(row.contract_price),
+    buying_group_price: toBulkNumber(row.buying_group_price),
+    price_code_price: toBulkNumber(row.price_code_price),
+    contract_start_date: toSafeValue(row.contract_start_date),
+    contract_end_date: toSafeValue(row.contract_end_date),
+    buying_group_start_date: toSafeValue(row.buying_group_start_date),
+    buying_group_end_date: toSafeValue(row.buying_group_end_date)
+  };
+};
+
+const BULK_UPSERT = {
+  customer_pricing: {
+    table: 'syspro_customer_pricing',
+    columns: PRICING_COLUMNS,
+    keys: ['customer_code', 'product_code'],
+    now: ['synced_at'],
+    mapRow: pricingBulkRow
+  }
+};
+
+const upsertCustomerPricing = (row, conn) => {
   return conn.upsert('syspro_customer_pricing', {
     keys: { customer_code: toSafeValue(row.customer_code), product_code: toSafeValue(row.product_code) },
     set: {
@@ -410,6 +460,19 @@ export async function runSync(entity, { provider = null } = {}) {
         await CLEAR_BEFORE_SYNC[entity](tx);
         for (const row of rows) await applyRow(row, tx);
       });
+    } else if (BULK_UPSERT[entity] && dbx.bulkUpsert) {
+      const { mapRow, ...spec } = BULK_UPSERT[entity];
+      const bulkRows = [];
+      for (const row of rows) {
+        const mapped = mapRow(row);
+        if (mapped) bulkRows.push(mapped);
+        else skipped += 1;
+      }
+      const { inserted, updated } = await dbx.bulkUpsert(spec.table, { ...spec, rows: bulkRows });
+      // "upserted" means read and applied. Unchanged rows are deliberately not
+      // rewritten (see dbx.bulkUpsert), so the split is logged, not reported.
+      upserted = bulkRows.length;
+      console.log(`[sync] ${entity}: ${inserted} inserted, ${updated} changed, ${bulkRows.length - inserted - updated} unchanged`);
     } else {
       // Indices rather than array slices - avoids copying batches out of a
       // list that is already several million rows on this path.

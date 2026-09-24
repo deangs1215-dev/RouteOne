@@ -223,8 +223,95 @@ export function createMssqlDbx(pool, sql) {
     return self;
   };
 
+  // 'nvarchar(20)' | 'float' | 'int' | 'bigint' -> mssql column type.
+  const bulkType = (desc) => {
+    const m = /^(nvarchar|float|int|bigint)(?:\((\d+|max)\))?$/i.exec(desc);
+    if (!m) throw new Error(`dbx.bulkUpsert: unsupported column type '${desc}'`);
+    switch (m[1].toLowerCase()) {
+      case 'nvarchar': return sql.NVarChar(m[2] && m[2] !== 'max' ? Number(m[2]) : sql.MAX);
+      case 'float': return sql.Float;
+      case 'int': return sql.Int;
+      default: return sql.BigInt;
+    }
+  };
+
+  // Set-based upsert for large loads (SQL Server only - the SQLite backend has
+  // no equivalent because per-row upserts are already fast there). Rows are
+  // bulk-copied into a temp staging table, de-duplicated on the key (last row
+  // wins, matching what row-by-row upserting would leave), then applied with
+  // one UPDATE and one INSERT. Millions of single-row round trips become a
+  // handful of statements per chunk.
+  //
+  //   columns: [{ name, type }]  type is 'nvarchar(n)' | 'float' | 'int' | 'bigint'
+  //   keys:    column names identifying a row (a subset of columns)
+  //   now:     columns stamped with the current UTC time on insert/change
+  //   rows:    objects keyed by column name
+  //
+  // An existing row is only UPDATEd (and its `now` columns only stamped) when a
+  // non-key value actually differs, so an unchanged nightly re-sync writes almost
+  // nothing - no data pages, no index maintenance. Each chunk is its own
+  // transaction, so memory and log growth stay bounded and a failure loses at
+  // most the current chunk. Returns { inserted, updated }.
+  async function bulkUpsert(table, { columns, keys, now = [], rows, chunkSize = 50000 }) {
+    const q = (c) => `[${c}]`;
+    const valueCols = columns.filter((c) => !keys.includes(c.name));
+    if (!valueCols.length) throw new Error('dbx.bulkUpsert: no non-key columns');
+    const colList = columns.map((c) => q(c.name)).join(', ');
+    const onKeys = (a, b) => keys.map((k) => `${a}.${q(k)} = ${b}.${q(k)}`).join(' AND ');
+    // NULL-safe "is different": EXCEPT treats two NULLs as equal.
+    const differs = `EXISTS (SELECT ${valueCols.map((c) => `s.${q(c.name)}`).join(', ')} EXCEPT SELECT ${valueCols.map((c) => `t.${q(c.name)}`).join(', ')})`;
+    // Temp tables belong to the pooled connection, not the transaction, so they
+    // outlive the commit and would collide with the next chunk on the same
+    // connection - hence the drop before create and again after use.
+    const dropStage = "IF OBJECT_ID('tempdb..#stage') IS NOT NULL DROP TABLE #stage";
+    const stageDdl = `CREATE TABLE #stage (__ord INT NOT NULL, ${columns.map((c) => `${q(c.name)} ${c.type.toUpperCase()} NULL`).join(', ')})`;
+    const dedupe = `
+      ;WITH d AS (SELECT ROW_NUMBER() OVER (PARTITION BY ${keys.map(q).join(', ')} ORDER BY __ord DESC) AS rn FROM #stage)
+      DELETE FROM d WHERE rn > 1`;
+    const update = `
+      UPDATE t SET ${valueCols.map((c) => `t.${q(c.name)} = s.${q(c.name)}`).concat(now.map((c) => `t.${q(c)} = SYSUTCDATETIME()`)).join(', ')}
+      FROM ${table} t JOIN #stage s ON ${onKeys('t', 's')}
+      WHERE ${differs}`;
+    const insert = `
+      INSERT INTO ${table} (${colList}${now.length ? ', ' + now.map(q).join(', ') : ''})
+      SELECT ${columns.map((c) => `s.${q(c.name)}`).join(', ')}${now.length ? ', ' + now.map(() => 'SYSUTCDATETIME()').join(', ') : ''}
+      FROM #stage s
+      WHERE NOT EXISTS (SELECT 1 FROM ${table} t WHERE ${onKeys('t', 's')})`;
+
+    let inserted = 0;
+    let updated = 0;
+    for (let start = 0; start < rows.length; start += chunkSize) {
+      const end = Math.min(start + chunkSize, rows.length);
+      const tx = new sql.Transaction(pool);
+      await tx.begin();
+      try {
+        await new sql.Request(tx).batch(`${dropStage}; ${stageDdl}`);
+        const stage = new sql.Table('#stage');
+        stage.create = false;
+        stage.columns.add('__ord', sql.Int, { nullable: false });
+        for (const c of columns) stage.columns.add(c.name, bulkType(c.type), { nullable: true });
+        for (let i = start; i < end; i++) {
+          stage.rows.add(i, ...columns.map((c) => rows[i][c.name] ?? null));
+        }
+        await new sql.Request(tx).bulk(stage);
+        await new sql.Request(tx).batch(dedupe);
+        // Update first: rows it touches then already exist for the INSERT's
+        // NOT EXISTS, and rows the INSERT adds are not re-visited.
+        updated += (await new sql.Request(tx).batch(update)).rowsAffected?.[0] ?? 0;
+        inserted += (await new sql.Request(tx).batch(insert)).rowsAffected?.[0] ?? 0;
+        await new sql.Request(tx).batch(dropStage);
+        await tx.commit();
+      } catch (err) {
+        try { await tx.rollback(); } catch { /* already aborted by the server */ }
+        throw err;
+      }
+    }
+    return { inserted, updated };
+  }
+
   return {
     ...handle(pool),
+    bulkUpsert,
     async transaction(fn) {
       const tx = new sql.Transaction(pool);
       await tx.begin();

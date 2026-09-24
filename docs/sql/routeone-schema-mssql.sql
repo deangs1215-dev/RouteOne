@@ -66,7 +66,7 @@ CREATE TABLE users (
   customer_id INT,  -- for customer-portal logins (foreign key set below after customers table created)
   rep_code NVARCHAR(20),  -- rep's own code, e.g. matches SYSPRO/call-cycle sheets
   warehouse_id INT REFERENCES warehouses(id),  -- rep's home branch/depot
-  sales_target REAL DEFAULT 0,
+  sales_target FLOAT DEFAULT 0,
   active INT DEFAULT 1,
   must_change_password INT NOT NULL DEFAULT 1,
   reset_token_hash NVARCHAR(255),
@@ -74,8 +74,8 @@ CREATE TABLE users (
   token_version INT NOT NULL DEFAULT 0,
   documents_last_viewed_at DATETIME,
   home_address NVARCHAR(MAX),
-  home_lat REAL,
-  home_lng REAL,
+  home_lat FLOAT,
+  home_lng FLOAT,
   created_at DATETIME DEFAULT GETDATE()
 );
 GO
@@ -97,10 +97,10 @@ CREATE TABLE customers (
   email NVARCHAR(255),
   address NVARCHAR(MAX),
   city NVARCHAR(100),
-  lat REAL,
-  lng REAL,
-  credit_limit REAL DEFAULT 0,
-  balance REAL DEFAULT 0,
+  lat FLOAT,
+  lng FLOAT,
+  credit_limit FLOAT DEFAULT 0,
+  balance FLOAT DEFAULT 0,
   payment_terms NVARCHAR(50) DEFAULT '30 days',
   visit_frequency NVARCHAR(20) DEFAULT 'weekly',
   [status] NVARCHAR(20) DEFAULT 'active',
@@ -109,8 +109,8 @@ CREATE TABLE customers (
   onsite_name NVARCHAR(255),
   onsite_phone NVARCHAR(20),
   onsite_address NVARCHAR(MAX),
-  onsite_lat REAL,
-  onsite_lng REAL,
+  onsite_lat FLOAT,
+  onsite_lng FLOAT,
   onsite_contact NVARCHAR(MAX),
   onsite_cell NVARCHAR(20),
   onsite_pricelist NVARCHAR(100),
@@ -185,11 +185,11 @@ CREATE TABLE products (
   description NVARCHAR(MAX),
   uom NVARCHAR(20) DEFAULT 'each',
   pack_size NVARCHAR(50),
-  pack_weight_kg REAL,
-  conv_factor_alt_uom REAL,
-  list_price REAL NOT NULL DEFAULT 0,
-  cost_price REAL DEFAULT 0,
-  stock_qty REAL DEFAULT 0,
+  pack_weight_kg FLOAT,
+  conv_factor_alt_uom FLOAT,
+  list_price FLOAT NOT NULL DEFAULT 0,
+  cost_price FLOAT DEFAULT 0,
+  stock_qty FLOAT DEFAULT 0,
   discontinued INT DEFAULT 0,
   active INT DEFAULT 1,
   created_at DATETIME DEFAULT GETDATE()
@@ -202,7 +202,7 @@ GO
 CREATE TABLE product_stock (
   product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   warehouse_id INT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
-  qty_available REAL NOT NULL DEFAULT 0,
+  qty_available FLOAT NOT NULL DEFAULT 0,
   PRIMARY KEY (product_id, warehouse_id)
 );
 GO
@@ -210,7 +210,7 @@ GO
 CREATE TABLE customer_prices (
   customer_id INT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
   product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-  price REAL NOT NULL,
+  price FLOAT NOT NULL,
   PRIMARY KEY (customer_id, product_id)
 );
 GO
@@ -224,9 +224,9 @@ GO
 CREATE TABLE syspro_customer_pricing (
   customer_code NVARCHAR(20) NOT NULL,
   product_code NVARCHAR(20) NOT NULL,
-  contract_price REAL,
-  buying_group_price REAL,
-  price_code_price REAL,
+  contract_price FLOAT,
+  buying_group_price FLOAT,
+  price_code_price FLOAT,
   contract_start_date NVARCHAR(10),
   contract_end_date NVARCHAR(10),
   buying_group_start_date NVARCHAR(10),
@@ -253,9 +253,9 @@ CREATE TABLE price_rules (
   product_id INT REFERENCES products(id) ON DELETE CASCADE,
   category_id INT REFERENCES product_categories(id) ON DELETE CASCADE,
   rule_type NVARCHAR(20) NOT NULL DEFAULT 'discount_pct',
-  discount_pct REAL,
-  fixed_price REAL,
-  min_qty REAL DEFAULT 0,
+  discount_pct FLOAT,
+  fixed_price FLOAT,
+  min_qty FLOAT DEFAULT 0,
   starts_on NVARCHAR(10),
   ends_on NVARCHAR(10),
   active INT DEFAULT 1,
@@ -279,14 +279,14 @@ CREATE TABLE visits (
   [status] NVARCHAR(20) DEFAULT 'planned',
   route_order INT,
   check_in_at DATETIME,
-  check_in_lat REAL,
-  check_in_lng REAL,
-  check_in_distance_m REAL,
+  check_in_lat FLOAT,
+  check_in_lng FLOAT,
+  check_in_distance_m FLOAT,
   check_in_type NVARCHAR(20) DEFAULT 'onsite',
   check_in_address NVARCHAR(MAX),
   check_out_at DATETIME,
-  check_out_lat REAL,
-  check_out_lng REAL,
+  check_out_lat FLOAT,
+  check_out_lng FLOAT,
   notes NVARCHAR(MAX),
   outcome NVARCHAR(50),
   created_at DATETIME DEFAULT GETDATE(),
@@ -325,8 +325,8 @@ GO
 CREATE TABLE rep_locations (
   id INT IDENTITY(1,1) PRIMARY KEY,
   [user_id] INT NOT NULL REFERENCES users(id),
-  lat REAL NOT NULL,
-  lng REAL NOT NULL,
+  lat FLOAT NOT NULL,
+  lng FLOAT NOT NULL,
   recorded_at DATETIME DEFAULT GETDATE()
 );
 GO
@@ -346,9 +346,9 @@ CREATE TABLE orders (
   warehouse_id INT REFERENCES warehouses(id),
   [status] NVARCHAR(20) DEFAULT 'submitted',
   order_date DATETIME DEFAULT GETDATE(),
-  subtotal REAL DEFAULT 0,
-  vat_amount REAL DEFAULT 0,
-  total REAL DEFAULT 0,
+  subtotal FLOAT DEFAULT 0,
+  vat_amount FLOAT DEFAULT 0,
+  total FLOAT DEFAULT 0,
   customer_order_no NVARCHAR(100),
   notes NVARCHAR(MAX),
   delivery_instructions NVARCHAR(MAX),
@@ -367,11 +367,11 @@ CREATE TABLE order_items (
   [order_id] INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
   product_id INT NOT NULL REFERENCES products(id),
   product_name NVARCHAR(255) NOT NULL,
-  qty REAL NOT NULL,
+  qty FLOAT NOT NULL,
   uom NVARCHAR(20),
-  unit_price REAL NOT NULL,
-  discount_pct REAL DEFAULT 0,
-  line_total REAL NOT NULL,
+  unit_price FLOAT NOT NULL,
+  discount_pct FLOAT DEFAULT 0,
+  line_total FLOAT NOT NULL,
   price_source NVARCHAR(50)
 );
 GO
@@ -392,9 +392,9 @@ CREATE TABLE quotes (
   [status] NVARCHAR(20) DEFAULT 'sent',
   quote_date DATETIME DEFAULT GETDATE(),
   valid_until NVARCHAR(10),
-  subtotal REAL DEFAULT 0,
-  vat_amount REAL DEFAULT 0,
-  total REAL DEFAULT 0,
+  subtotal FLOAT DEFAULT 0,
+  vat_amount FLOAT DEFAULT 0,
+  total FLOAT DEFAULT 0,
   notes NVARCHAR(MAX),
   [order_id] INT REFERENCES orders(id),
   created_at DATETIME DEFAULT GETDATE()
@@ -410,11 +410,11 @@ CREATE TABLE quote_items (
   quote_id INT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
   product_id INT NOT NULL REFERENCES products(id),
   product_name NVARCHAR(255) NOT NULL,
-  qty REAL NOT NULL,
+  qty FLOAT NOT NULL,
   uom NVARCHAR(20),
-  unit_price REAL NOT NULL,
-  discount_pct REAL DEFAULT 0,
-  line_total REAL NOT NULL,
+  unit_price FLOAT NOT NULL,
+  discount_pct FLOAT DEFAULT 0,
+  line_total FLOAT NOT NULL,
   price_source NVARCHAR(50)
 );
 GO
@@ -433,11 +433,11 @@ CREATE TABLE invoices (
   order_number NVARCHAR(50),
   invoice_date NVARCHAR(10) NOT NULL,
   due_date NVARCHAR(10),
-  subtotal REAL DEFAULT 0,
-  vat_amount REAL DEFAULT 0,
-  total REAL DEFAULT 0,
-  amount_paid REAL DEFAULT 0,
-  balance REAL DEFAULT 0,
+  subtotal FLOAT DEFAULT 0,
+  vat_amount FLOAT DEFAULT 0,
+  total FLOAT DEFAULT 0,
+  amount_paid FLOAT DEFAULT 0,
+  balance FLOAT DEFAULT 0,
   [status] NVARCHAR(20) DEFAULT 'outstanding',
   created_at DATETIME DEFAULT GETDATE()
 );
@@ -452,9 +452,9 @@ CREATE TABLE invoice_items (
   product_code NVARCHAR(20) NOT NULL,
   delivery_customer_id INT REFERENCES customers(id),
   delivery_customer_code NVARCHAR(20),
-  qty REAL NOT NULL,
-  unit_price REAL NOT NULL,
-  line_total REAL NOT NULL
+  qty FLOAT NOT NULL,
+  unit_price FLOAT NOT NULL,
+  line_total FLOAT NOT NULL
 );
 GO
 CREATE INDEX idx_invoice_items_invoice ON invoice_items(invoice_id);
@@ -470,7 +470,7 @@ CREATE TABLE rep_monthly_sales (
   id INT IDENTITY(1,1) PRIMARY KEY,
   rep_id INT NOT NULL REFERENCES users(id),
   [month] NVARCHAR(7) NOT NULL,
-  sales_value REAL NOT NULL DEFAULT 0,
+  sales_value FLOAT NOT NULL DEFAULT 0,
   synced_at DATETIME DEFAULT GETDATE(),
   UNIQUE(rep_id, month)
 );
@@ -481,7 +481,7 @@ GO
 CREATE TABLE customer_monthly_sales (
   customer_code NVARCHAR(20) NOT NULL,
   [month] NVARCHAR(7) NOT NULL,
-  sales_value REAL NOT NULL DEFAULT 0,
+  sales_value FLOAT NOT NULL DEFAULT 0,
   synced_at DATETIME DEFAULT GETDATE(),
   PRIMARY KEY (customer_code, month)
 );
@@ -711,7 +711,7 @@ GO
 CREATE TABLE rep_budgets (
   rep_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   [month] INT NOT NULL CHECK (month BETWEEN 1 AND 12),
-  budget REAL NOT NULL DEFAULT 0,
+  budget FLOAT NOT NULL DEFAULT 0,
   created_at DATETIME DEFAULT GETDATE(),
   updated_at DATETIME DEFAULT GETDATE(),
   PRIMARY KEY (rep_id, month)
