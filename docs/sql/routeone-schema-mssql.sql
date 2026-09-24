@@ -72,6 +72,7 @@ CREATE TABLE users (
   reset_token_hash NVARCHAR(255),
   reset_token_expires DATETIME,
   token_version INT NOT NULL DEFAULT 0,
+  documents_last_viewed_at DATETIME,
   home_address NVARCHAR(MAX),
   home_lat REAL,
   home_lng REAL,
