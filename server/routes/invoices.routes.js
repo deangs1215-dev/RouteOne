@@ -1,10 +1,11 @@
 import { Router } from 'express';
-import { db, logActivity } from '../db.js';
+import { dbx } from '../db.js';
+import { logActivity } from '../dbh.js';
 import { scopeForUser } from '../auth.js';
 
 const router = Router();
 
-router.get('/invoices', (req, res) => {
+router.get('/invoices', async (req, res) => {
   const { q, status, customer_id, rep_id } = req.query;
   const scope = scopeForUser(req.user);
   const where = [];
@@ -39,7 +40,7 @@ router.get('/invoices', (req, res) => {
   where.push("i.invoice_date <= date('now')");
 
   const whereClause = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT i.*, c.name AS customer_name, c.id AS cust_id, u.name AS rep_name
     FROM invoices i
     LEFT JOIN customers c ON c.id = i.customer_id
@@ -52,8 +53,8 @@ router.get('/invoices', (req, res) => {
   res.json(rows);
 });
 
-router.get('/invoices/:id', (req, res) => {
-  const invoice = db.prepare(`
+router.get('/invoices/:id', async (req, res) => {
+  const invoice = await dbx.prepare(`
     SELECT i.*, c.name AS customer_name, c.rep_id
     FROM invoices i LEFT JOIN customers c ON c.id = i.customer_id
     WHERE i.id = ?
@@ -63,7 +64,7 @@ router.get('/invoices/:id', (req, res) => {
   // delivery check a rep could see a group-billed invoice in the list and then
   // get a 403 opening it.
   if (scopeForUser(req.user).isRep && invoice.rep_id !== req.user.id) {
-    const deliveredToRep = db.prepare(`
+    const deliveredToRep = await dbx.prepare(`
       SELECT 1 FROM invoice_items ii
       JOIN customers dc ON dc.id = ii.delivery_customer_id
       WHERE ii.invoice_id = ? AND dc.rep_id = ?
@@ -79,7 +80,7 @@ router.get('/invoices/:id', (req, res) => {
   // the linked RouteOne order's items as a best-effort approximation - SYSPRO
   // can still adjust qty/price at invoicing time, or split/merge orders
   // across invoices, so that fallback is never treated as authoritative.
-  let items = db.prepare(`
+  let items = await dbx.prepare(`
     SELECT ii.product_code, ii.qty, ii.unit_price, ii.line_total, p.name AS product_name, p.uom,
       ii.delivery_customer_code, dc.name AS delivery_customer_name
     FROM invoice_items ii
@@ -96,9 +97,9 @@ router.get('/invoices/:id', (req, res) => {
   let itemsSource = items.length ? 'syspro' : null;
 
   if (!items.length && invoice.order_number) {
-    const order = db.prepare('SELECT id FROM orders WHERE number = ?').get(invoice.order_number);
+    const order = await dbx.prepare('SELECT id FROM orders WHERE number = ?').get(invoice.order_number);
     if (order) {
-      items = db.prepare(`
+      items = await dbx.prepare(`
         SELECT i.product_name, i.qty, i.uom, i.unit_price, i.line_total, p.code AS product_code
         FROM order_items i LEFT JOIN products p ON p.id = i.product_id
         WHERE i.order_id = ?

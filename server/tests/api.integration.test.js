@@ -618,3 +618,67 @@ test('settings routes: rep contacts are private, recipients are admin-only, dupl
   assert.ok(all.body.some((r) => r.id === made.body.id));
   assert.equal((await request(`/api/email-recipients/${made.body.id}`, opts(adminCookie, { method: 'DELETE' }))).response.status, 200);
 });
+
+test('small route files still work after the async migration (tasks, documents, pushes, tickets, clock-in, invoices, drafts)', async () => {
+  const adminCookie = await login(fixture.admin.email);
+  const repCookie = await login(fixture.reps[0].email);
+  const o = (cookie, method = 'GET', body) => ({ cookie, origin: allowedOrigin, method, ...(body ? { body } : {}) });
+  const ok = (r, label) => assert.equal(r.response.status, 200, `${label}: ${r.response.status} ${JSON.stringify(r.body)}`);
+
+  // tasks
+  const day = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const task = await request('/api/tasks', o(repCookie, 'POST', { customer_id: fixture.customers[0].id, task_type: 'Call Customer', follow_up_date: day, notes: 'ring' }));
+  ok(task, 'create task');
+  assert.ok(task.body.id);
+  ok(await request(`/api/tasks/${task.body.id}`, o(repCookie, 'PUT', { status: 'done' })), 'update task');
+  const tasks = await request('/api/tasks?filter=all', o(repCookie));
+  ok(tasks, 'list tasks');
+  assert.ok(Array.isArray(tasks.body));
+  ok(await request('/api/tasks/all', o(adminCookie)), 'all tasks');
+  ok(await request(`/api/customers/${fixture.customers[0].id}/tasks`, o(repCookie)), 'customer tasks');
+  assert.equal((await request('/api/tasks', o(repCookie, 'POST', { customer_id: fixture.customers[1].id, task_type: 'Call Customer', follow_up_date: day }))).response.status, 403);
+
+  // documents
+  ok(await request('/api/documents', o(repCookie)), 'documents');
+  const before = await request('/api/documents/unread-count', o(repCookie));
+  ok(before, 'unread');
+  assert.equal(typeof before.body.count, 'number');
+  ok(await request('/api/documents/mark-viewed', o(repCookie, 'POST')), 'mark viewed');
+
+  // sales pushes
+  const push = await request('/api/sales-pushes', o(adminCookie, 'POST', { message: 'Push flour' }));
+  ok(push, 'create push');
+  ok(await request(`/api/sales-pushes/${push.body.id}`, o(adminCookie, 'PUT', { message: 'Push flour hard', active: true })), 'update push');
+  const active = await request('/api/sales-pushes/active', o(repCookie));
+  assert.ok(active.body.some((p) => p.id === push.body.id && p.message === 'Push flour hard'));
+  ok(await request('/api/sales-pushes', o(adminCookie)), 'list pushes');
+  ok(await request(`/api/sales-pushes/${push.body.id}`, o(adminCookie, 'DELETE')), 'delete push');
+
+  // support tickets
+  const ticket = await request('/api/support-tickets', o(repCookie, 'POST', { subject: 'App slow', description: 'Very', category: 'other' }));
+  ok(ticket, 'create ticket');
+  ok(await request('/api/support-tickets', o(adminCookie)), 'list tickets');
+  ok(await request(`/api/support-tickets/${ticket.body.id}`, o(adminCookie)), 'get ticket');
+  ok(await request(`/api/support-tickets/${ticket.body.id}`, o(adminCookie, 'PUT', { status: 'resolved', admin_notes: 'done' })), 'update ticket');
+
+  // branch clock-in
+  const clock = await request('/api/branch-clock-in', o(repCookie, 'POST', { notes: 'arrived' }));
+  ok(clock, 'clock in');
+  ok(await request('/api/branch-clock-in/today', o(repCookie)), 'clock-ins today');
+  ok(await request(`/api/branch-clock-in/${clock.body.id}`, o(repCookie, 'PUT', { notes: 'edited' })), 'edit clock-in');
+  ok(await request(`/api/branch-clock-in/${clock.body.id}/clock-out`, o(repCookie, 'POST')), 'clock out');
+
+  // invoices
+  const invoices = await request('/api/invoices', o(adminCookie));
+  ok(invoices, 'invoices');
+  assert.ok(Array.isArray(invoices.body));
+  ok(await request(`/api/invoices/${fixture.invoiceId}`, o(adminCookie)), 'invoice detail');
+
+  // drafts
+  const draft = await request('/api/drafts', o(repCookie, 'POST', { kind: 'order', customer_id: fixture.customers[0].id, label: 'wip', data: { a: 1 } }));
+  assert.equal(draft.response.status, 201, JSON.stringify(draft.body));
+  ok(await request(`/api/drafts/${draft.body.id}`, o(repCookie, 'PUT', { label: 'wip2', data: { a: 2 } })), 'update draft');
+  ok(await request(`/api/drafts/${draft.body.id}`, o(repCookie)), 'get draft');
+  ok(await request('/api/drafts', o(repCookie)), 'list drafts');
+  ok(await request(`/api/drafts/${draft.body.id}`, o(repCookie, 'DELETE')), 'delete draft');
+});

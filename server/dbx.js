@@ -15,8 +15,11 @@
 //   transaction(async (tx) => {})-> tx has the same prepare/exec; commits on
 //                                   return, rolls back on throw
 //
-// SQL is written with `?` placeholders. The mssql backend rewrites them to
-// @p0, @p1... (skipping string literals).
+// SQL is written with `?` placeholders and SQLite date/LIMIT syntax. The mssql
+// backend rewrites `?` to @p0, @p1... (skipping string literals) and translates
+// the SQLite-only forms to T-SQL - see sqlDialect.js.
+
+import { sqliteToTsql } from './sqlDialect.js';
 
 // Rewrites `?` to @pN outside single-quoted string literals.
 export function toNamedParams(sql) {
@@ -177,7 +180,7 @@ export function createMssqlDbx(pool, sql) {
     async function execute(text, params) {
       let translated = translations.get(text);
       if (!translated) {
-        translated = toNamedParams(text);
+        translated = toNamedParams(sqliteToTsql(text));
         if (translations.size >= 2000) translations.clear();
         translations.set(text, translated);
       }

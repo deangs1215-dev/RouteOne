@@ -1,8 +1,9 @@
 // Phase 5: Task management. Reps create and manage their own tasks, assigned by themselves or managers.
 // Tasks are linked to customers and appear in activity timeline and daily call cycle.
 import { Router } from 'express';
-import { db, logActivity, getTodayISO } from '../db.js';
-import { requireRole, scopeForUser, userCanAccessCustomer } from '../auth.js';
+import { dbx, getTodayISO } from '../db.js';
+import { logActivity } from '../dbh.js';
+import { requireRole, scopeForUser, userCanAccessCustomerAsync } from '../auth.js';
 
 const router = Router();
 
@@ -11,7 +12,7 @@ const TASK_TYPES = ['Call Customer', 'Visit Customer', 'Follow Up Quote', 'Follo
 // --- Create task ---
 // Body: { customer_id, assigned_to, task_type, follow_up_date, notes? }
 // Auto-populated: created_by (from req.user), branch (from user's branch if available), created_at
-router.post('/tasks', (req, res) => {
+router.post('/tasks', async (req, res) => {
   const b = req.body || {};
   const scope = scopeForUser(req.user);
 
@@ -28,20 +29,20 @@ router.post('/tasks', (req, res) => {
     return res.status(400).json({ error: `Invalid task_type. Must be one of: ${TASK_TYPES.join(', ')}` });
   }
 
-  const customer = b.customer_id ? db.prepare('SELECT id FROM customers WHERE id = ?').get(b.customer_id) : null;
+  const customer = b.customer_id ? await dbx.prepare('SELECT id FROM customers WHERE id = ?').get(b.customer_id) : null;
   if (b.customer_id && !customer) {
     return res.status(404).json({ error: 'Customer not found' });
   }
-  if (b.customer_id && !userCanAccessCustomer(req.user, b.customer_id)) {
+  if (b.customer_id && !await userCanAccessCustomerAsync(req.user, b.customer_id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 
-  const assignee = db.prepare('SELECT id FROM users WHERE id = ?').get(assignedTo);
+  const assignee = await dbx.prepare('SELECT id FROM users WHERE id = ?').get(assignedTo);
   if (!assignee) {
     return res.status(404).json({ error: 'Assigned user not found' });
   }
 
-  const info = db.prepare(`
+  const info = await dbx.prepare(`
     INSERT INTO tasks (customer_id, assigned_to, created_by, task_type, follow_up_date, notes, status)
     VALUES (?, ?, ?, ?, ?, ?, 'open')
   `).run(
@@ -53,7 +54,7 @@ router.post('/tasks', (req, res) => {
     b.notes || null
   );
 
-  logActivity(req.user.id, 'create', 'task', info.lastInsertRowid, {
+  await logActivity(req.user.id, 'create', 'task', info.lastInsertRowid, {
     customer_id: b.customer_id,
     assigned_to: assignedTo,
     task_type: b.task_type
@@ -74,9 +75,9 @@ router.post('/tasks', (req, res) => {
 
 // --- Update task (edit, reschedule, mark done/cancelled, reassign) ---
 // Body: { follow_up_date?, notes?, status?, assigned_to? } — only send fields you're changing
-router.put('/tasks/:id', (req, res) => {
+router.put('/tasks/:id', async (req, res) => {
   const b = req.body || {};
-  const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
+  const task = await dbx.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
   if (!task) return res.status(404).json({ error: 'Task not found' });
 
   const scope = scopeForUser(req.user);
@@ -98,13 +99,13 @@ router.put('/tasks/:id', (req, res) => {
   }
 
   if (b.assigned_to !== undefined) {
-    const assignee = db.prepare('SELECT id FROM users WHERE id = ?').get(b.assigned_to);
+    const assignee = await dbx.prepare('SELECT id FROM users WHERE id = ?').get(b.assigned_to);
     if (!assignee) {
       return res.status(404).json({ error: 'Assigned user not found' });
     }
   }
 
-  db.prepare(`
+  await dbx.prepare(`
     UPDATE tasks SET
       follow_up_date = COALESCE(?, follow_up_date),
       notes = COALESCE(?, notes),
@@ -114,15 +115,15 @@ router.put('/tasks/:id', (req, res) => {
     WHERE id = ?
   `).run(b.follow_up_date || null, b.notes || null, b.status || null, b.assigned_to || null, task.id);
 
-  logActivity(req.user.id, 'update', 'task', task.id, { status: b.status, follow_up_date: b.follow_up_date, assigned_to: b.assigned_to });
+  await logActivity(req.user.id, 'update', 'task', task.id, { status: b.status, follow_up_date: b.follow_up_date, assigned_to: b.assigned_to });
 
   res.json({ ok: true });
 });
 
 // --- List all tasks (managers see every rep's; reps see only their own) ---
-router.get('/tasks/all', (req, res) => {
+router.get('/tasks/all', async (req, res) => {
   const scope = scopeForUser(req.user);
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT t.*, c.name AS customer_name, u.name AS assigned_to_name
     FROM tasks t
     LEFT JOIN customers c ON c.id = t.customer_id
@@ -136,7 +137,7 @@ router.get('/tasks/all', (req, res) => {
 // --- List tasks with filter ---
 // Query: filter=today|overdue|upcoming|done
 // Returns tasks assigned to the current rep (or all if manager + no filter applied intelligently)
-router.get('/tasks', (req, res) => {
+router.get('/tasks', async (req, res) => {
   const scope = scopeForUser(req.user);
   const filter = req.query.filter || 'upcoming'; // default to upcoming
   const today = getTodayISO();
@@ -171,19 +172,19 @@ router.get('/tasks', (req, res) => {
     ORDER BY t.follow_up_date ASC, t.created_at DESC
   `;
 
-  const rows = db.prepare(sql).all(...params);
+  const rows = await dbx.prepare(sql).all(...params);
   res.json(rows);
 });
 
 // --- Tasks for a customer (for activity timeline) ---
-router.get('/customers/:customerId/tasks', (req, res) => {
+router.get('/customers/:customerId/tasks', async (req, res) => {
   if (scopeForUser(req.user).isRep) {
-    const customer = db.prepare('SELECT rep_id FROM customers WHERE id = ?').get(req.params.customerId);
+    const customer = await dbx.prepare('SELECT rep_id FROM customers WHERE id = ?').get(req.params.customerId);
     if (!customer || customer.rep_id !== req.user.id) {
       return res.status(403).json({ error: 'Not your customer' });
     }
   }
-  const rows = db.prepare(`
+  const rows = await dbx.prepare(`
     SELECT t.*, u.name AS assigned_to_name
     FROM tasks t
     LEFT JOIN users u ON u.id = t.assigned_to
