@@ -1,7 +1,7 @@
 // Phase 3: route planning, visit-frequency coverage, rep locations, rep KPIs.
 import { Router } from 'express';
 import { dbx, distanceM, getTodayISO } from '../db.js';
-import { logActivity, repMonthTarget } from '../dbh.js';
+import { logActivity, mapLimit, repTargetLookup } from '../dbh.js';
 import { requireRole, scopeForUser, userCanAccessCustomer } from '../auth.js';
 
 const router = Router();
@@ -232,8 +232,8 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), async (req
     WHERE r.name = 'rep' AND u.active = 1 ${scope.isRep ? 'AND u.id = ?' : ''}
   `).all(...(scope.isRep ? [req.user.id] : []));
 
-  const kpis = [];
-  for (const rep of reps) {
+  const targetFor = await repTargetLookup(monthNum);
+  const kpis = await mapLimit(reps, 8, async (rep) => {
     // Orders/AOV are app-native activity (orders actually captured in RouteOne);
     // the sales total itself comes from SYSPRO's actual invoiced sales
     // (rep_monthly_sales, synced from vw_FS_RepSalesByMonth) so "vs target"
@@ -268,7 +268,7 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), async (req
 
     // Target rolls automatically with the selected month: a rep_budgets figure
     // for that month if set, otherwise the flat sales_target fallback.
-    const target = await repMonthTarget(rep.id, monthNum);
+    const target = targetFor(rep, monthNum);
 
     // R1-056: YTD = January through the selected month, not the full 12-month
     // annual target - comparing e.g. September YTD sales against a full-year
@@ -280,9 +280,9 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), async (req
       WHERE rep_id = ? AND month >= ? AND month <= ?
     `).get(rep.id, `${year}-01`, month)).total;
     let ytdTarget = 0;
-    for (let m = 1; m <= monthNum; m++) ytdTarget += await repMonthTarget(rep.id, m);
+    for (let m = 1; m <= monthNum; m++) ytdTarget += targetFor(rep, m);
 
-    kpis.push({
+    return {
       rep_id: rep.id,
       name: rep.name,
       sales: repSales.sales_value,
@@ -303,8 +303,8 @@ router.get('/kpis', requireRole('admin', 'manager', 'office', 'rep'), async (req
       coverage_pct: coverage.assigned ? Math.round((coverage.visited / coverage.assigned) * 100) : null,
       quotes: quotes.total,
       quotes_accepted: quotes.accepted
-    });
-  }
+    };
+  });
 
   res.json({ month, kpis: kpis.sort((a, b) => b.sales - a.sales) });
 });

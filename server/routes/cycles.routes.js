@@ -5,7 +5,7 @@
 // rep checked in to them any day in that calendar week (Mon–Sun).
 import { Router } from 'express';
 import { dbx, getTodayISO } from '../db.js';
-import { logActivity, repMonthTarget } from '../dbh.js';
+import { logActivity, repMonthTarget, repTargetLookup } from '../dbh.js';
 import { requireRole, scopeForUser } from '../auth.js';
 
 const router = Router();
@@ -320,7 +320,8 @@ router.get('/reps', requireRole('admin', 'manager', 'office'), async (req, res) 
   `).all();
   // Show this month's target (rep_budgets if set, else the flat fallback).
   const thisMonth = new Date().getMonth() + 1;
-  for (const r of rows) r.sales_target = await repMonthTarget(r.id, thisMonth);
+  const targetFor = await repTargetLookup(thisMonth);
+  for (const r of rows) r.sales_target = targetFor(r, thisMonth);
   res.json(rows);
 });
 

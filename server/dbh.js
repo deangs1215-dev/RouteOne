@@ -10,6 +10,34 @@
 // file's contents fold back into db.js.
 import { dbx, round2, getTodayISO, PRICE_SOURCES, productUnitPrice, priceBreaks } from './db.js';
 
+// Runs fn over items with at most `limit` in flight, preserving order. Per-item
+// query loops that were free on in-process SQLite cost a network round trip each
+// on SQL Server; running them concurrently (bounded by the connection pool)
+// keeps a report over ~100 reps from taking minutes.
+export async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  }));
+  return out;
+}
+
+// Every rep's monthly budget for months 1..upToMonth in ONE query, as a lookup
+// (rep, month) -> budget, falling back to the rep's flat sales_target exactly as
+// repMonthTarget() does. Use instead of calling repMonthTarget in a loop.
+export async function repTargetLookup(upToMonth, conn = dbx) {
+  const rows = await conn.prepare('SELECT rep_id, [month], budget FROM rep_budgets WHERE [month] <= ?').all(upToMonth);
+  const budgets = new Map(rows.map((r) => [`${r.rep_id}:${r.month}`, r.budget]));
+  return (rep, month) => {
+    const key = `${rep.id}:${month}`;
+    return budgets.has(key) ? budgets.get(key) : (rep.sales_target || 0);
+  };
+}
+
 export async function getSetting(key, fallback = null, conn = dbx) {
   const row = await conn.prepare('SELECT [value] FROM settings WHERE [key] = ?').get(key);
   return row ? row.value : fallback;

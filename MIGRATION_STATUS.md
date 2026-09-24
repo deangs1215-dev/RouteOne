@@ -1,136 +1,68 @@
 # SQLite → SQL Server Migration Status
 
-**Last Updated:** 2026-09-24  
-**Current Phase:** 1 (Development Environment Setup)  
-**Overall Progress:** 40% (Phase 1 complete, Phase 1.3 blocked on token budget)
+**Last updated:** 2026-09-24
+**Branch:** `mssql-migration`
+**Where it stands:** the application code is migrated and the full integration suite passes on SQL Server (`RouteOne_Test`). Cutover to production has not been done.
 
 ---
 
-## What's Been Completed ✅
+## How the migration was done
 
-### Phase 1.1: SQL Server Schema
-- **Status:** COMPLETE
-- **What:** Created SQL Server database with 60+ tables, primary keys, foreign keys, and indexes
-- **File:** `docs/sql/routeone-schema-mssql.sql`
-- **Database Name:** RouteOne
-- **Server:** 192.168.0.53:1433
-- **User:** RouteOneApp
-- **Notes:** Schema file has reserved keywords escaped with square brackets
+The app talks to the database through one async facade, `server/dbx.js`, with two backends chosen by `DB_BACKEND` (`sqlite` default, or `mssql`). Route code is written once, with SQLite-style SQL, and runs on both.
 
-### Phase 1.2: Environment Configuration
-- **Status:** COMPLETE
-- **What:** Created `server/.env` with SQL Server and SMTP settings
-- **File:** `server/.env`
-- **Content:**
-  - Database: SQL Server connection details
-  - SMTP: sb-hosted.sbakels.co.za (sb@sbakels.co.za)
-  - SECRET_KEY: Generated
-  - SYSPRO: 192.168.0.53 (RouteOneApp user)
+| File | Role |
+|---|---|
+| `server/dbx.js` | `prepare().get/all/run`, `transaction`, `upsert`, `bulkUpsert` (SQL Server bulk load). SQL Server backend translates SQL and returns datetimes as SQLite-format text. |
+| `server/sqlDialect.js` | Translates the SQLite-only forms the code uses (`date('now',…)`, `datetime`, `strftime`, `julianday`, `LIMIT n`) to T-SQL. Throws on anything else. |
+| `server/dbh.js` | Async helpers (`getSetting`, `nextNumber`, `logActivity`, pricing, `mapLimit`, `repTargetLookup`). |
+| `server/dbxShadow.js` | Dev aid: `DBX_SHADOW_LOG=file npm test` binds every SQL statement the tests run against the real SQL Server schema (without executing) and logs errors. |
+| `server/migrate-to-mssql.js` | Data migration with audit mode (below). |
 
----
+`DB_BACKEND=mssql` runs with no SQLite file at all (`db` is `null`). `DB_TYPE` in `server/.env` is unrelated and unused.
 
-## What's Pending ⏳
+## Tests
 
-### Phase 1.3: Application Code Rewrite
-- **Status:** BLOCKED (out of tokens, requires fresh session)
-- **Scope:** Large - 2000+ lines across 25+ files
-- **What needs to happen:**
-  1. Rewrite `server/db.js` → use `mssql` package instead of `better-sqlite3`
-  2. Update all `server/routes/*.js` files → async queries + @paramName syntax
-  3. Update `server/integration/*.js` → sync/email/PDF logic
-  4. Remove SQLite-specific configurations (pragmas, WAL, etc.)
-  5. Update transaction handling for SQL Server
-  6. Migrate data from SQLite to SQL Server (see below)
+```
+npm test                                   # SQLite (default) - 59 pass, 1 skipped
+DBX_SHADOW_LOG=shadow.log npm test         # also validates all SQL against SQL Server; read shadow.log
+DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test-concurrency=1 server/tests/api.integration.test.js
+                                           # full API suite on SQL Server - 16 pass, 1 skipped (SQLite file backup)
+```
 
-### Data Migration
-- **Status:** NOT STARTED
-- **What:** Old SQLite database (fieldsales.db) has user data that needs to migrate to SQL Server
-- **Critical data to migrate:**
-  - Users (roles, permissions, credentials)
-  - Settings (SMTP, SYSPRO, email templates)
-  - Customers, products, pricing (if any test data)
-  - Historical data (orders, quotes, syncs)
-- **Note:** Encrypted passwords (SMTP, SYSPRO) will need to be re-encrypted or set via UI
+`server/tests/async-lint.test.js` fails on any un-awaited `dbx` query. Only the integration suite runs on SQL Server; the `sync`, `email`, `dbh` and `dbx` test files are SQLite-only.
 
----
+## Verified on SQL Server (RouteOne_Test)
 
-## Files Updated This Session
+- Full integration suite, including 40 concurrent reps.
+- Every `GET` route as admin and as rep at real scale (13,890 customers, 95 users): 0 server errors, slowest 3s (`/kpis`).
+- Data migration of a real backup: all 28 tables, every row count matches, all foreign keys validated.
+- `customer_pricing` bulk load: 500k rows in 27s (initial), 17s (unchanged re-sync).
 
-1. **DECISIONS.md** — Added decision entry for SQLite→SQL Server migration
-2. **MIGRATION_PLAN.md** — Detailed phased approach (4 phases, 4 environments)
-3. **docs/sql/routeone-schema-mssql.sql** — SQL Server schema (60+ tables)
-4. **server/.env** — New configuration file
-5. **server/.env.example** — Could be created for reference
+## Not yet verified / not done
 
----
+- **Production-volume behaviour** and the real SYSPRO sync on SQL Server (only a 500k-row scratch test).
+- **Scripts still on SQLite** (need `dbx`): `handover-rep`, `import-reps`, `reconcile-reps`, `reset-password`, `cleanup-demo-data`, `diagnose-unmatched`, `list-orphan-reps`, `lowercase-email-recipients`, `seed-invoices`, `seed-jhb-order-recipients`.
+- **`routes/monitoring.routes.js`** reports the SQLite file size (`DB_PATH`); needs a SQL Server equivalent.
+- **Schedulers, digests, email sending** have unit coverage for building emails only; they have not run against SQL Server.
+- **Backups:** on SQL Server the app backs up `uploads` only. The database must be backed up by SQL Server (scheduled `BACKUP DATABASE`). Restore in the app is refused on SQL Server.
+- **Live `RouteOne` database** was built from an older schema script (REAL columns, GETDATE defaults, missing `users.documents_last_viewed_at`). Rebuild it from the current `docs/sql/routeone-schema-mssql.sql` before loading data.
 
-## How to Continue in Next Session
+## Cutover runbook (do in a maintenance window; rehearse on a copy first)
 
-1. **Start Phase 1.3:**
-   - Read the full `server/db.js` and understand current query patterns
-   - Create wrapper functions for common operations (prepare, run, get)
-   - Rewrite db.js to use SQL Server connection pool
-   - Test basic connectivity
+1. **Back up** the production `fieldsales.db` (file copy) and note the current app version.
+2. **Rebuild the target** database from `docs/sql/routeone-schema-mssql.sql` (the current version). Grant `RouteOneApp` `db_datareader`, `db_datawriter`, `db_ddladmin`.
+3. **Stop the app and schedulers** (`nssm stop RouteOne`).
+4. **Audit** the production database - read-only, changes nothing:
+   `node --env-file=server/.env server/migrate-to-mssql.js --source <fieldsales.db> --target RouteOne --audit`
+   Fix anything it reports (column-length overflows, non-numeric text in numeric columns, bad dates) before continuing.
+5. **Migrate**: same command without `--audit` (add `--wipe` only if the target already has data). It refuses to run if the audit found problems unless `--force`.
+   It skips `syspro_customer_pricing` (rebuilt by the sync); use `--include-pricing` to copy it anyway.
+6. **Check the output**: every table `✔`, and no "unvalidated foreign keys" line.
+7. **Deploy** this branch with `DB_BACKEND=mssql` and `DB_*` set in the server's `.env` (quote any password containing `#`).
+8. **Start the app**, log in, load customers/orders/quotes.
+9. **Run the SYSPRO syncs** from Integration settings; confirm `customer_pricing` completes (expect minutes, not hours).
+10. **Re-enable schedulers**; watch logs for 24 hours.
 
-2. **Update routes incrementally:**
-   - Start with `server/routes/auth.routes.js` (simplest queries)
-   - Test each file before moving to next
-   - Common pattern: `db.prepare(sql).run(params)` → `pool.request().input('param', value).query(sql)`
+**Rollback:** stop the app, set `DB_BACKEND=sqlite` (or remove it), restore the saved `fieldsales.db`, start the app. The SQLite file is never written to by the migration tool.
 
-3. **Test before data migration:**
-   - Verify app starts with new SQL Server db
-   - Test login flow
-   - Test a sync (customers)
-   - Monitor performance
-
-4. **Then handle data migration:**
-   - Export users, settings from old SQLite
-   - Import into SQL Server
-   - Verify no data loss
-   - Handle encrypted passwords separately
-
----
-
-## Key Connection Details
-
-**SQL Server:**
-- Host: 192.168.0.53
-- Port: 1433
-- Database: RouteOne
-- User: RouteOneApp
-- Password: Ft#H!AUi6mON17Y
-
-**SYSPRO (same server, different database):**
-- Host: 192.168.0.53
-- Port: 1433
-- Database: SysproCompany001
-- User: RouteOneApp
-- Password: [same]
-
-**Deployment Topology:**
-- App Server: Windows Server (Y: drive / C:\RouteOne on server via RDP)
-- Database Server: SQL Server on same physical machine as SYSPRO
-- Network: 10 Gbps fiber link (no latency concerns)
-
----
-
-## Rollback Plan
-
-If the migration fails:
-1. Revert `server/db.js` to use `better-sqlite3`
-2. Restore `server/.env` to point to SQLite
-3. Use existing `server/data/fieldsales.db` (keep a backup)
-4. App returns to full operation within minutes
-
----
-
-## Documentation
-
-- **MIGRATION_PLAN.md** — Step-by-step phases and risk assessment
-- **DECISIONS.md** — Why we're doing this and expected benefits
-- **docs/sql/routeone-schema-mssql.sql** — Complete schema for reference
-- **This file** — Status tracking for continuity between sessions
-
----
-
-**Next Session Target:** Complete Phase 1.3 (application code rewrite) and begin Phase 2 (testing).
+Rehearsal: run steps 2-6 against `RouteOne_Test` using a copy of production, then the API suite above.
