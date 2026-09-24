@@ -137,7 +137,24 @@ const sysproProvider = {
     };
     const pool = await sysproPool(undefined, timeouts[entity] ?? 60000);
     try {
-      const result = await pool.request().query(`SELECT TOP (${limit + 1}) ${selectList} FROM ${quotedView}`);
+      // These views read straight off live SYSPRO OLTP tables (ArCustomer,
+      // ArCustomerBal, etc.) with no locking hints of their own - unlike
+      // vw_FS_Reps, which explicitly uses WITH (NOLOCK). Under the default
+      // READ COMMITTED isolation, a plain SELECT here can queue behind a
+      // concurrent write's lock on a 24/7 SYSPRO box, which is what turned an
+      // otherwise-sub-1s customers fetch into 23.7s with the server otherwise
+      // idle (confirmed: low CPU/memory, no connection cap, no logon
+      // trigger - so it wasn't a resource problem, it was a queuing one).
+      // READ UNCOMMITTED here reads the same way WITH (NOLOCK) would, without
+      // needing the DBA to touch the SYSPRO view definitions - dirty reads
+      // are an acceptable trade-off for a reporting/sync connection.
+      // One batch, not two separate .query() calls: the pool can hand two
+      // requests different pooled connections, and isolation level is
+      // per-session - splitting these risks the SET landing on a connection
+      // the SELECT never uses.
+      const result = await pool.request().query(
+        `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SELECT TOP (${limit + 1}) ${selectList} FROM ${quotedView}`
+      );
       if (result.recordset.length > limit) {
         throw new Error(`${entity} view exceeds the ${limit.toLocaleString()} row safety limit; narrow the DBA view before syncing`);
       }
