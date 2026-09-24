@@ -12,6 +12,8 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'routeone-email-test-'));
 process.env.DATABASE_PATH = path.join(tempDir, 'test.db');
 process.env.SECRET_KEY ||= 'a'.repeat(64);
 const { dbx, closeDb } = await import('../db.js');
+const { resetBackend } = await import('./backend.js');
+await resetBackend(dbx);
 const email = await import('../integration/email.js');
 const { loadDoc } = await import('../integration/docData.js');
 

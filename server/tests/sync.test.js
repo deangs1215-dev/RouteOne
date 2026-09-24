@@ -8,6 +8,8 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'routeone-sync-test-'));
 process.env.DATABASE_PATH = path.join(tempDir, 'test.db');
 process.env.SECRET_KEY ||= 'a'.repeat(64);
 const { dbx, closeDb } = await import('../db.js');
+const { resetBackend } = await import('./backend.js');
+await resetBackend(dbx);
 const { runSync, matchRep } = await import('../integration/sync.js');
 
 after(() => { closeDb(); fs.rmSync(tempDir, { recursive: true, force: true }); });

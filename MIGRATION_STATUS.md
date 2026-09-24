@@ -23,22 +23,25 @@ The app talks to the database through one async facade, `server/dbx.js`, with tw
 ## Tests
 
 ```
-npm test                                   # SQLite (default) - 59 pass, 1 skipped
-DBX_SHADOW_LOG=shadow.log npm test         # also validates all SQL against SQL Server; read shadow.log
-DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test-concurrency=1 server/tests/api.integration.test.js
-                                           # full API suite on SQL Server - 16 pass, 1 skipped (SQLite file backup)
+npm test            # SQLite (default): 68 pass, 1 skipped
+npm run test:mssql  # everything that can run on SQL Server, against RouteOne_Test (~5 min): 46 pass, 1 skipped
 ```
 
+`test:mssql` runs, in order: the API integration suite (incl. a crawl of every `GET` route and 40 concurrent reps), the admin/seed scripts, the sync engine (all entities, plus a 60k-row bulk `customer_pricing` load and re-sync), `dbh` helpers, email builders, and the schedulers/digests/backup. Each wipes `RouteOne_Test` first and refuses to run against any other database.
+
+Other checks:
+
 ```
-DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test-concurrency=1 server/tests/scripts.test.js
-                                           # the admin/seed scripts on SQL Server - 9 pass (refuses any DB but RouteOne_Test)
+DBX_SHADOW_LOG=shadow.log npm test                       # binds every SQL statement the tests execute against the SQL Server schema; read shadow.log
+node --env-file=server/.env server/check-sql-mssql.mjs   # static: binds all ~390 SQL strings in the source (incl. INSERT/UPDATE/DELETE) - read each rejection, some are placeholder artefacts
 ```
 
-`server/tests/async-lint.test.js` fails on any un-awaited `dbx` query. On SQL Server only the integration and scripts suites run; the `sync`, `email`, `dbh` and `dbx` test files are SQLite-only.
+`server/tests/async-lint.test.js` fails on any un-awaited `dbx` query. `dbx` and `sqlDialect` unit tests are SQLite/pure and do not run on SQL Server.
 
 ## Verified on SQL Server (RouteOne_Test)
 
-- Full integration suite, including 40 concurrent reps.
+- Every suite above (46 tests), including 40 concurrent reps, the sync engine, digests, schedulers and all admin scripts.
+- Static bind of all ~390 SQL statements in the source: no real T-SQL problems (the 13 rejections are placeholder artefacts or SQLite-only branches guarded by dialect checks).
 - Every `GET` route as admin and as rep at real scale (13,890 customers, 95 users): 0 server errors, slowest 3s (`/kpis`).
 - Data migration of a real backup: all 28 tables, every row count matches, all foreign keys validated.
 - `customer_pricing` bulk load: 500k rows in 27s (initial), 17s (unchanged re-sync).
@@ -49,7 +52,7 @@ DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test
 - **Two throwaway scripts stay SQLite-only:** `set-lizl-budgets.cjs` and `set-rep-budgets.cjs` open the SQLite file directly (their own headers say "delete when done").
 - **`reset-password.js`:** the password prompt needs a real terminal, so only its lookup path is tested; it does not bump `token_version`, so an existing session survives a reset (the admin UI reset does invalidate sessions).
 - **`cleanup-demo-data.js`** was already broken before this migration (it re-created roles it never deleted); it now clears `roles` and `territories` too.
-- **Schedulers, digests, email sending** have unit coverage for building emails only; they have not run against SQL Server.
+- **Timers:** the schedulers' `setInterval` ticks and real SMTP/Graph delivery are not exercised (jobs are called directly; email is logged, not sent).
 - **Backups:** on SQL Server the app backs up `uploads` only. The database must be backed up by SQL Server (scheduled `BACKUP DATABASE`). Restore in the app is refused on SQL Server.
 - **Live `RouteOne` database** was built from an older schema script (REAL columns, GETDATE defaults, missing `users.documents_last_viewed_at`). Rebuild it from the current `docs/sql/routeone-schema-mssql.sql` before loading data.
 

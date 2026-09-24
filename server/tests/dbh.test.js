@@ -7,6 +7,8 @@ import path from 'node:path';
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'routeone-dbh-test-'));
 process.env.DATABASE_PATH = path.join(tempDir, 'test.db');
 const { dbx, closeDb } = await import('../db.js');
+const { resetBackend } = await import('./backend.js');
+await resetBackend(dbx);
 const h = await import('../dbh.js');
 
 after(() => { closeDb(); fs.rmSync(tempDir, { recursive: true, force: true }); });
