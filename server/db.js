@@ -6,24 +6,29 @@ import { fileURLToPath } from 'url';
 import { createSqliteDbx, createMssqlDbx } from './dbx.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// DB_BACKEND=mssql runs entirely on SQL Server: no SQLite file is opened or
+// created, `db` is null, and only the async `dbx` facade exists. Anything still
+// using the synchronous `db` (the one-off admin/seed scripts) is SQLite-only.
+const useSqlite = (process.env.DB_BACKEND || 'sqlite').toLowerCase() !== 'mssql';
 const configuredPath = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
   : path.join(__dirname, 'data', 'fieldsales.db');
 const dataDir = path.dirname(configuredPath);
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (useSqlite && !fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 export const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 export const DB_PATH = configuredPath;
-export const db = new Database(configuredPath);
+export const db = useSqlite ? new Database(configuredPath) : null;
 
 // Releases the file lock on the live database - only ever used right before a
 // restore replaces the file wholesale, followed immediately by process exit
 // (see backup.js). Anything else querying `db` after this call will throw.
 export function closeDb() {
-  db.close();
+  db?.close();
 }
+if (useSqlite) {
 // Tuning for many concurrent reps hitting a single SQLite file:
 db.pragma('journal_mode = WAL');       // concurrent readers while one writer commits
 db.pragma('foreign_keys = ON');
@@ -153,12 +158,13 @@ try {
     WHERE (total IS NULL OR total = 0) AND (subtotal + vat_amount) > 0
   `);
 } catch { /* invoices table may not exist yet on a fresh db */ }
+}
 
 // Async facade over the database - see dbx.js. New/migrated code should use
 // `await dbx.prepare(...)` instead of the synchronous `db` above, so the backend
 // can move from SQLite to SQL Server (DB_BACKEND=mssql) one caller at a time.
 // `dbx` is a live binding: initDb() swaps it to the SQL Server backend.
-export let dbx = createSqliteDbx(db);
+export let dbx = useSqlite ? createSqliteDbx(db) : null;
 
 // Call once at startup, before serving requests. A no-op on SQLite. On SQL
 // Server it opens the connection pool. NOTE: do not enable DB_BACKEND=mssql
@@ -168,7 +174,7 @@ let initialised = false;
 export async function initDb() {
   if (initialised) return;
   initialised = true;
-  if ((process.env.DB_BACKEND || 'sqlite').toLowerCase() !== 'mssql') return;
+  if (useSqlite) return;
   const { default: sql } = await import('mssql');
   const pool = await new sql.ConnectionPool({
     server: process.env.DB_HOST,
@@ -367,9 +373,11 @@ export function packWeightKg(packSize) {
 // One-time backfill: products synced/created before pack_weight_kg existed
 // have it NULL. Parse it from their existing pack_size text so the fix takes
 // effect immediately, not just for the next sync.
+if (useSqlite) {
 for (const p of db.prepare("SELECT id, pack_size FROM products WHERE pack_weight_kg IS NULL AND pack_size IS NOT NULL").all()) {
   const kg = packWeightKg(p.pack_size);
   if (kg) db.prepare('UPDATE products SET pack_weight_kg = ? WHERE id = ?').run(kg, p.id);
+}
 }
 
 function rulePrice(rule, unitPrice) {

@@ -209,7 +209,14 @@ export function createMssqlDbx(pool, sql) {
       }
       const req = request();
       params.forEach((v, i) => req.input(`p${i}`, v === undefined ? null : v));
-      const result = await req.query(q);
+      let result;
+      try {
+        result = await req.query(q);
+      } catch (err) {
+        // Say which statement failed - the driver's message alone rarely does.
+        err.message = `${err.message} [sql: ${text.replace(/\s+/g, ' ').trim().slice(0, 240)}] [params: ${JSON.stringify(params).slice(0, 200)}]`;
+        throw err;
+      }
       for (const row of result.recordset ?? []) {
         for (const key in row) if (row[key] instanceof Date) row[key] = dateToText(row[key]);
       }

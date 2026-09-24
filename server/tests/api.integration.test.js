@@ -5,12 +5,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'routeone-api-test-'));
 const databasePath = path.join(tempDir, 'test.db');
+// Backend under test. Default SQLite; DB_BACKEND=mssql (with DB_NAME pointing at a
+// scratch database, run via `node --env-file=server/.env`) runs the same suite
+// against SQL Server. The fixture below goes through dbx, so it works on both.
+const useMssql = (process.env.DB_BACKEND || '').toLowerCase() === 'mssql';
+process.env.DATABASE_PATH = databasePath;
+const { dbx, closeDb } = await import('../db.js');
 const port = 4327;
 const baseUrl = `http://127.0.0.1:${port}`;
 const allowedOrigin = 'http://localhost:5190';
@@ -80,51 +85,50 @@ async function waitForServer() {
 
 before(async () => {
   await runNode('server/seed.js');
-  const db = new Database(databasePath);
   const hash = bcrypt.hashSync(testPassword, 10);
-  const reps = db.prepare(`
+  const reps = await dbx.prepare(`
     SELECT u.id, u.email FROM users u
     JOIN roles r ON r.id = u.role_id
     WHERE r.name = 'rep' ORDER BY u.id LIMIT 2
   `).all();
   assert.equal(reps.length, 2);
-  const admin = db.prepare(`
+  const admin = await dbx.prepare(`
     SELECT u.id, u.email FROM users u
     JOIN roles r ON r.id = u.role_id WHERE r.name = 'admin' LIMIT 1
   `).get();
   for (const user of [admin, ...reps]) {
-    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, user.id);
+    await dbx.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, user.id);
   }
 
-  const customers = reps.map((rep) =>
-    db.prepare('SELECT id FROM customers WHERE rep_id = ? ORDER BY id LIMIT 1').get(rep.id));
+  const customers = [];
+  for (const rep of reps) customers.push(await dbx.prepare('SELECT id FROM customers WHERE rep_id = ? ORDER BY id LIMIT 1').get(rep.id));
   assert.ok(customers.every(Boolean));
-  const product = db.prepare('SELECT id, list_price FROM products WHERE active = 1 AND list_price > 0 ORDER BY id LIMIT 1').get();
-  const template = db.prepare('SELECT id FROM form_templates WHERE active = 1 ORDER BY id LIMIT 1').get();
-  const invoice = db.prepare(`
+  const product = await dbx.prepare('SELECT id, list_price FROM products WHERE active = 1 AND list_price > 0 ORDER BY id LIMIT 1').get();
+  const template = await dbx.prepare('SELECT id FROM form_templates WHERE active = 1 ORDER BY id LIMIT 1').get();
+  const invoice = await dbx.prepare(`
     INSERT INTO invoices (number, customer_id, customer_code, invoice_date, total, balance, status)
     SELECT ?, id, code, date('now'), 500, 500, 'outstanding' FROM customers WHERE id = ?
   `).run('TEST-INV-REP2', customers[1].id);
 
-  const repRoleId = db.prepare("SELECT id FROM roles WHERE name = 'rep'").get().id;
-  const warehouseId = db.prepare('SELECT id FROM warehouses ORDER BY id LIMIT 1').get()?.id || null;
+  const repRoleId = (await dbx.prepare("SELECT id FROM roles WHERE name = 'rep'").get()).id;
+  const warehouseId = (await dbx.prepare('SELECT id FROM warehouses ORDER BY id LIMIT 1').get())?.id || null;
   const loadUsers = [];
-  const insertUser = db.prepare(`
-    INSERT INTO users (name, email, password_hash, role_id, warehouse_id, active, must_change_password)
-    VALUES (?, ?, ?, ?, ?, 1, 0)
-  `);
-  const insertCustomer = db.prepare(`
-    INSERT INTO customers (code, name, rep_id, warehouse_id, status)
-    VALUES (?, ?, ?, ?, 'active')
-  `);
-  db.transaction(() => {
+  await dbx.transaction(async (tx) => {
+    const insertUser = tx.prepare(`
+      INSERT INTO users (name, email, password_hash, role_id, warehouse_id, active, must_change_password)
+      VALUES (?, ?, ?, ?, ?, 1, 0)
+    `);
+    const insertCustomer = tx.prepare(`
+      INSERT INTO customers (code, name, rep_id, warehouse_id, status)
+      VALUES (?, ?, ?, ?, 'active')
+    `);
     for (let index = 1; index <= 40; index += 1) {
       const email = `load.rep.${index}@routeone.test`;
-      const userId = insertUser.run(`Load Rep ${index}`, email, hash, repRoleId, warehouseId).lastInsertRowid;
-      const customerId = insertCustomer.run(`LOAD-${index}`, `Load Customer ${index}`, userId, warehouseId).lastInsertRowid;
+      const userId = (await insertUser.run(`Load Rep ${index}`, email, hash, repRoleId, warehouseId)).lastInsertRowid;
+      const customerId = (await insertCustomer.run(`LOAD-${index}`, `Load Customer ${index}`, userId, warehouseId)).lastInsertRowid;
       loadUsers.push({ email, userId, customerId });
     }
-  })();
+  });
 
   fixture = {
     admin,
@@ -135,7 +139,6 @@ before(async () => {
     invoiceId: invoice.lastInsertRowid,
     loadUsers
   };
-  db.close();
 
   server = spawn(process.execPath, ['server/index.js'], {
     cwd: projectRoot,
@@ -163,6 +166,7 @@ after(async () => {
     server.kill();
     await exited;
   }
+  closeDb();
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -297,9 +301,7 @@ test('converting a quote honours quoted prices but re-checks product availabilit
   // otherwise conversion is a way around the discontinued guard that order
   // and quote capture both enforce.
   const stale = await newQuote();
-  const db = new Database(databasePath);
-  db.prepare('UPDATE products SET active = 0, discontinued = 1 WHERE id = ?').run(fixture.product.id);
-  db.close();
+  await dbx.prepare('UPDATE products SET active = 0, discontinued = 1 WHERE id = ?').run(fixture.product.id);
   try {
     const blocked = await request(`/api/quotes/${stale.id}/convert`, {
       method: 'POST', cookie: repCookie, origin: allowedOrigin
@@ -307,22 +309,15 @@ test('converting a quote honours quoted prices but re-checks product availabilit
     assert.equal(blocked.response.status, 400, JSON.stringify(blocked.body));
     assert.match(blocked.body.error, /discontinued/i);
   } finally {
-    const restore = new Database(databasePath);
-    restore.prepare('UPDATE products SET active = 1, discontinued = 0 WHERE id = ?').run(fixture.product.id);
-    restore.close();
+    await dbx.prepare('UPDATE products SET active = 1, discontinued = 0 WHERE id = ?').run(fixture.product.id);
   }
 });
 
 test('draft, submit, and cancel transitions preserve stock integrity', async () => {
   const repCookie = await login(fixture.reps[0].email);
   const adminCookie = await login(fixture.admin.email);
-  const readStock = () => {
-    const db = new Database(databasePath, { readonly: true });
-    const row = db.prepare('SELECT stock_qty FROM products WHERE id = ?').get(fixture.product.id);
-    db.close();
-    return row.stock_qty;
-  };
-  const before = readStock();
+  const readStock = async () => (await dbx.prepare('SELECT stock_qty FROM products WHERE id = ?').get(fixture.product.id)).stock_qty;
+  const before = await readStock();
   const created = await request('/api/orders', {
     method: 'POST',
     cookie: repCookie,
@@ -334,26 +329,24 @@ test('draft, submit, and cancel transitions preserve stock integrity', async () 
     }
   });
   assert.equal(created.response.status, 200, JSON.stringify(created.body));
-  assert.equal(readStock(), before);
+  assert.equal(await readStock(), before);
 
   const submitted = await request(`/api/orders/${created.body.id}/status`, {
     method: 'PUT', cookie: adminCookie, origin: allowedOrigin, body: { status: 'submitted' }
   });
   assert.equal(submitted.response.status, 200);
-  assert.equal(readStock(), before - 2);
+  assert.equal(await readStock(), before - 2);
 
   const cancelled = await request(`/api/orders/${created.body.id}/status`, {
     method: 'PUT', cookie: adminCookie, origin: allowedOrigin, body: { status: 'cancelled' }
   });
   assert.equal(cancelled.response.status, 200);
-  assert.equal(readStock(), before);
+  assert.equal(await readStock(), before);
 });
 
 test('password-change gate and logout lifecycle work end to end', async () => {
   const email = fixture.loadUsers[0].email;
-  const db = new Database(databasePath);
-  db.prepare('UPDATE users SET must_change_password = 1 WHERE email = ?').run(email);
-  db.close();
+  await dbx.prepare('UPDATE users SET must_change_password = 1 WHERE email = ?').run(email);
 
   const cookie = await login(email);
   const blocked = await request('/api/dashboard', { cookie });
@@ -383,13 +376,11 @@ test('changing a password ends every other session for that account', async () =
   // A user of its own: this test rotates a password, and the load test below
   // logs its 40 reps in with the shared one.
   const email = 'rotation.probe@routeone.test';
-  const setup = new Database(databasePath);
-  const repRoleId = setup.prepare("SELECT id FROM roles WHERE name = 'rep'").get().id;
-  setup.prepare(`
+  const repRoleId = (await dbx.prepare("SELECT id FROM roles WHERE name = 'rep'").get()).id;
+  await dbx.prepare(`
     INSERT INTO users (name, email, password_hash, role_id, active, must_change_password)
     VALUES (?, ?, ?, ?, 1, 0)
   `).run('Rotation Probe', email, bcrypt.hashSync(testPassword, 10), repRoleId);
-  setup.close();
 
   const staleCookie = await login(email);
   const activeCookie = await login(email);
@@ -411,19 +402,15 @@ test('changing a password ends every other session for that account', async () =
   assert.equal((await request('/api/dashboard', { cookie: staleCookie })).response.status, 401);
   assert.equal((await request('/api/dashboard', { cookie: activeCookie })).response.status, 401);
 
-  const cleanup = new Database(databasePath);
-  cleanup.prepare('DELETE FROM users WHERE email = ?').run(email);
-  cleanup.close();
+  await dbx.prepare('DELETE FROM users WHERE email = ?').run(email);
 });
 
 test('rep cannot price another rep customer and never receives cost price', async () => {
   const repCookie = await login(fixture.reps[0].email);
   const adminCookie = await login(fixture.admin.email);
-  const db = new Database(databasePath);
-  const mine = db.prepare('SELECT code FROM customers WHERE id = ?').get(fixture.customers[0].id);
-  const theirs = db.prepare('SELECT code FROM customers WHERE id = ?').get(fixture.customers[1].id);
-  const product = db.prepare('SELECT code FROM products WHERE id = ?').get(fixture.product.id);
-  db.close();
+  const mine = await dbx.prepare('SELECT code FROM customers WHERE id = ?').get(fixture.customers[0].id);
+  const theirs = await dbx.prepare('SELECT code FROM customers WHERE id = ?').get(fixture.customers[1].id);
+  const product = await dbx.prepare('SELECT code FROM products WHERE id = ?').get(fixture.product.id);
 
   const pricingUrl = (code) =>
     `/api/customer-pricing?customer_code=${encodeURIComponent(code)}&product_code=${encodeURIComponent(product.code)}`;
@@ -452,13 +439,11 @@ test('rep cannot price another rep customer and never receives cost price', asyn
 
 test('an unrecognised role is denied, not defaulted to office access', async () => {
   const email = 'auditor@routeone.test';
-  const db = new Database(databasePath);
-  const roleId = db.prepare("INSERT INTO roles (name) VALUES ('auditor')").run().lastInsertRowid;
-  db.prepare(`
+  const roleId = (await dbx.prepare("INSERT INTO roles (name) VALUES ('auditor')").run()).lastInsertRowid;
+  await dbx.prepare(`
     INSERT INTO users (name, email, password_hash, role_id, active, must_change_password)
     VALUES (?, ?, ?, ?, 1, 0)
   `).run('Auditor', email, bcrypt.hashSync(testPassword, 10), roleId);
-  db.close();
 
   try {
     // Credentials are valid, so the login itself succeeds - the role is only
@@ -471,10 +456,8 @@ test('an unrecognised role is denied, not defaulted to office access', async () 
     const customers = await request('/api/customers', { cookie });
     assert.equal(customers.response.status, 403);
   } finally {
-    const cleanup = new Database(databasePath);
-    cleanup.prepare('DELETE FROM users WHERE email = ?').run(email);
-    cleanup.prepare("DELETE FROM roles WHERE name = 'auditor'").run();
-    cleanup.close();
+    await dbx.prepare('DELETE FROM users WHERE email = ?').run(email);
+    await dbx.prepare("DELETE FROM roles WHERE name = 'auditor'").run();
   }
 });
 
@@ -517,7 +500,7 @@ test('document uploads validate file signatures and remain authenticated', async
   assert.equal((await request(document.file_path, { cookie: repCookie })).response.status, 403);
 });
 
-test('online backup captures the database and upload directory', async () => {
+test('online backup captures the database and upload directory', { skip: useMssql && 'SQL Server databases are backed up by SQL Server' }, async () => {
   const backupDir = path.join(tempDir, 'backups');
   await runNode('server/backup.js', { BACKUP_DIR: backupDir, BACKUP_RETENTION_DAYS: '2' });
   const snapshots = fs.readdirSync(backupDir)
