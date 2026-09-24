@@ -54,12 +54,12 @@ node --env-file=server/.env server/check-sql-mssql.mjs   # static: binds all ~39
 - **`cleanup-demo-data.js`** was already broken before this migration (it re-created roles it never deleted); it now clears `roles` and `territories` too.
 - **Timers:** the schedulers' `setInterval` ticks and real SMTP/Graph delivery are not exercised (jobs are called directly; email is logged, not sent).
 - **Backups:** on SQL Server the app backs up `uploads` only. The database must be backed up by SQL Server (scheduled `BACKUP DATABASE`). Restore in the app is refused on SQL Server.
-- **Live `RouteOne` database** was built from an older schema script (REAL columns, GETDATE defaults, missing `users.documents_last_viewed_at`). Rebuild it from the current `docs/sql/routeone-schema-mssql.sql` before loading data.
+- **Live `RouteOne` database** was rebuilt (empty) from the current schema script on 2026-09-24: 44 tables, no `REAL` columns, UTC defaults, `users.documents_last_viewed_at` present. It is ready for the real migration.
 
 ## Cutover runbook (do in a maintenance window; rehearse on a copy first)
 
 1. **Back up** the production `fieldsales.db` (file copy) and note the current app version.
-2. **Rebuild the target** database from `docs/sql/routeone-schema-mssql.sql` (the current version). Grant `RouteOneApp` `db_datareader`, `db_datawriter`, `db_ddladmin`.
+2. **Confirm the target** is empty and built from the current `docs/sql/routeone-schema-mssql.sql` (the live `RouteOne` database already is). `RouteOneApp` needs `db_datareader`, `db_datawriter`, `db_ddladmin`.
 3. **Stop the app and schedulers** (`nssm stop RouteOne`).
 4. **Audit** the production database - read-only, changes nothing:
    `node --env-file=server/.env server/migrate-to-mssql.js --source <fieldsales.db> --target RouteOne --audit`

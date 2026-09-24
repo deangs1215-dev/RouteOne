@@ -195,6 +195,25 @@ Record of significant technical decisions, rationale, and trade-offs.
 
 ---
 
+## 2026-09-24: Move from SQLite to SQL Server behind one async database facade
+
+**Decision:** The app talks to its own database only through `server/dbx.js` (async `prepare().get/all/run`, `transaction`, `upsert`, `bulkUpsert`), with a SQLite backend and a SQL Server backend chosen by `DB_BACKEND`. Route code keeps SQLite-style SQL; the SQL Server backend translates the few SQLite-only forms in use (`server/sqlDialect.js`) and returns datetimes as SQLite-format text. `DB_BACKEND=mssql` runs with no SQLite file at all.
+
+**Rationale:**
+- The SYSPRO `customer_pricing` sync wrote 4.47M rows in 70-80 minutes on SQLite and its single writer blocked the app; SQL Server bulk-loads the same data in minutes and serves reads during a sync.
+- A facade let 40+ files migrate incrementally while the app stayed runnable and the test suite green on SQLite, and made rollback a config change (`DB_BACKEND=sqlite`).
+- Writing SQL once (translator + `dbx.upsert`) avoided maintaining two query sets.
+
+**Trade-offs:**
+- SQL Server is stricter: `GROUP BY` must list selected columns, derived tables need aliases, no boolean expressions in `ORDER BY`, reserved words such as `open`. These are fixed in the queries and guarded by `npm run test:mssql`, the shadow validator (`DBX_SHADOW_LOG`) and `server/check-sql-mssql.mjs`.
+- The translator is deliberately narrow and throws on unsupported forms instead of guessing.
+- Per-row query loops that were free in-process cost a network round trip on SQL Server; batch or run them concurrently (`mapLimit`, `repTargetLookup`).
+- Database backups on SQL Server are SQL Server's job; the app backs up `uploads` only and refuses in-app restore.
+
+**Status:** Application migrated; all suites pass on SQL Server (`RouteOne_Test`). Production cutover pending - see MIGRATION_STATUS.md for the runbook.
+
+---
+
 ## 2026-07-26: Churn-risk calculated from app orders + SYSPRO invoice history
 
 **Decision:** `last_order_at` (used in churn risk calculations) checks both app-captured orders AND SYSPRO invoices, not just app orders.
