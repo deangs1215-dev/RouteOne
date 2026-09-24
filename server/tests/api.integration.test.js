@@ -682,3 +682,27 @@ test('small route files still work after the async migration (tasks, documents, 
   ok(await request('/api/drafts', o(repCookie)), 'list drafts');
   ok(await request(`/api/drafts/${draft.body.id}`, o(repCookie, 'DELETE')), 'delete draft');
 });
+
+// Only in shadow-validation mode (DBX_SHADOW_LOG set, see server/dbxShadow.js):
+// hit every GET route as admin and as a rep so their SQL is bound against the
+// SQL Server schema. Responses are not asserted - only that the server survives.
+test('shadow crawl: visit every GET route', { skip: !process.env.DBX_SHADOW_LOG }, async () => {
+  const routesDir = path.join(projectRoot, 'server', 'routes');
+  const paths = new Set();
+  for (const f of fs.readdirSync(routesDir)) {
+    for (const m of fs.readFileSync(path.join(routesDir, f), 'utf8').matchAll(/router\.get\(\s*'([^']+)'/g)) {
+      paths.add(m[1].replace(/:\w+/g, '1'));
+    }
+  }
+  const adminCookie = await login(fixture.admin.email);
+  const repCookie = await login(fixture.reps[0].email);
+  let visited = 0;
+  for (const p of paths) {
+    for (const cookie of [adminCookie, repCookie]) {
+      await request(`/api${p}`, { cookie, origin: allowedOrigin }).catch(() => {});
+      visited += 1;
+    }
+  }
+  console.log(`shadow crawl: ${paths.size} paths, ${visited} requests`);
+  assert.equal((await request('/api/health')).response.status, 200);
+});

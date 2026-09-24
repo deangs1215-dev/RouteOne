@@ -247,7 +247,7 @@ router.get('/visits/:id/summary', (req, res) => {
 // Core of the rep home screen: today's route (with per-customer open/overdue
 // task counts and Sales AI alerts) plus quick stats. Exported so the daily
 // digest email can reuse it directly without an HTTP round-trip.
-export function buildDaySummary(repId, date) {
+export async function buildDaySummary(repId, date) {
   const visits = db.prepare(`
     SELECT v.*, c.name AS customer_name, c.code AS customer_code, c.address, c.city, c.lat AS customer_lat, c.lng AS customer_lng,
       (SELECT COUNT(*) FROM orders o WHERE o.visit_id = v.id) AS order_count,
@@ -264,7 +264,7 @@ export function buildDaySummary(repId, date) {
   // surfaced on the day's route like the task indicators are.
   if (visits.length) {
     const alertsByCustomer = {};
-    for (const a of buildActions(customerIntel(repId), { repId })) {
+    for (const a of await buildActions(await customerIntel(repId), { repId })) {
       (alertsByCustomer[a.customer_id] ||= []).push(a);
     }
     for (const v of visits) {
@@ -288,11 +288,11 @@ export function buildDaySummary(repId, date) {
 }
 
 // Rep home screen: today's route plus quick stats (or a selected date).
-router.get('/my-day', (req, res) => {
+router.get('/my-day', async (req, res) => {
   const repId = req.user.id;
   // Parameterised, never interpolated: the date comes straight from the query string.
   const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : getTodayISO();
-  res.json(buildDaySummary(repId, date));
+  res.json(await buildDaySummary(repId, date));
 });
 
 // Edit a planned visit (change date, purpose, notes)

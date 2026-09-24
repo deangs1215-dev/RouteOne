@@ -9,7 +9,7 @@ import { buildRepDigestEmail, sendEmail } from './email.js';
 
 async function sendDigestFor(rep) {
   const today = getTodayISO();
-  const daySummary = buildDaySummary(rep.id, today);
+  const daySummary = await buildDaySummary(rep.id, today);
   const yesterdayOrders = db.prepare(`
     SELECT o.number, o.total, c.name AS customer_name
     FROM orders o JOIN customers c ON c.id = o.customer_id

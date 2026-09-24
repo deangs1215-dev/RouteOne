@@ -20,6 +20,7 @@
 // the SQLite-only forms to T-SQL - see sqlDialect.js.
 
 import { sqliteToTsql } from './sqlDialect.js';
+import { shadowValidate } from './dbxShadow.js';
 
 // Rewrites `?` to @pN outside single-quoted string literals.
 export function toNamedParams(sql) {
@@ -120,12 +121,15 @@ export function createSqliteDbx(db) {
   // statements are cached by text. Bounded so dynamically built SQL cannot
   // grow it forever.
   const stmtCache = new Map();
-  const stmtFor = (sql) => {
+  // `shadow` is false for SQL dbx generated itself in SQLite-only form (upsert),
+  // which SQL Server is not meant to parse - see dbxShadow.js.
+  const stmtFor = (sql, shadow = true) => {
     let stmt = stmtCache.get(sql);
     if (!stmt) {
       if (stmtCache.size >= 500) stmtCache.clear();
       stmt = db.prepare(sql);
       stmtCache.set(sql, stmt);
+      if (shadow) shadowValidate(sql);
     }
     return stmt;
   };
@@ -145,7 +149,7 @@ export function createSqliteDbx(db) {
       exec: async (sql) => { db.exec(sql); },
       async upsert(table, spec) {
         const { sql, params } = buildUpsert('sqlite', table, spec);
-        await stmtFor(sql).run(...params);
+        await stmtFor(sql, false).run(...params);
       }
     };
     return self;

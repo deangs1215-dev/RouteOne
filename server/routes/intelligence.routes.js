@@ -3,7 +3,7 @@
 // rules, no black box: RFM segmentation, churn risk scores, next actions,
 // and product suggestions per customer.
 import { Router } from 'express';
-import { db } from '../db.js';
+import { dbx } from '../db.js';
 import { requireRole, scopeForUser } from '../auth.js';
 
 const router = Router();
@@ -13,8 +13,8 @@ const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
 // --- Core: per-customer intelligence rows -------------------------------------
 
-export function customerIntel(repId = null) {
-  const customers = db.prepare(`
+export async function customerIntel(repId = null) {
+  const customers = await dbx.prepare(`
     SELECT c.id, c.name, c.city, c.classification, c.visit_frequency, c.status,
       c.rep_id, u.name AS rep_name,
       -- R1-057: recency is the most recent actual SYSPRO invoice, not a
@@ -97,7 +97,7 @@ export function customerIntel(repId = null) {
 
 // Prioritised action list for a set of intel rows, plus stale-quote follow-ups.
 // Shared by the Sales AI page (whole book) and the per-customer mobile view.
-export function buildActions(intel, { repId = null, customerId = null } = {}) {
+export async function buildActions(intel, { repId = null, customerId = null } = {}) {
   const actions = [];
 
   for (const c of intel) {
@@ -118,14 +118,15 @@ export function buildActions(intel, { repId = null, customerId = null } = {}) {
   const params = [];
   if (repId) { where.push('q.rep_id = ?'); params.push(repId); }
   if (customerId) { where.push('q.customer_id = ?'); params.push(customerId); }
-  const staleQuotes = db.prepare(`
+  const staleQuotes = await dbx.prepare(`
     SELECT q.id, q.number, q.total, q.customer_id, c.name AS customer_name, u.name AS rep_name,
-      CAST(julianday('now') - julianday(q.quote_date) AS INTEGER) AS age_days
+      q.quote_date
     FROM quotes q JOIN customers c ON c.id = q.customer_id
     LEFT JOIN users u ON u.id = q.rep_id
     WHERE ${where.join(' AND ')}
   `).all(...params);
   for (const q of staleQuotes) {
+    q.age_days = Math.trunc((Date.now() - new Date(q.quote_date).getTime()) / 86400000);
     actions.push({ customer_id: q.customer_id, customer_name: q.customer_name, rep_name: q.rep_name, priority: 60, type: 'quote', action: `Quote ${q.number} (R ${q.total.toFixed(2)}) unanswered for ${q.age_days} days — follow up`, quote_id: q.id });
   }
 
@@ -135,23 +136,23 @@ export function buildActions(intel, { repId = null, customerId = null } = {}) {
 // --- Endpoints -----------------------------------------------------------------
 
 // Segments + risk for every customer (managers see all; reps their own book).
-router.get('/intel/customers', (req, res) => {
+router.get('/intel/customers', async (req, res) => {
   const scope = scopeForUser(req.user);
-  res.json(customerIntel(scope.isRep ? req.user.id : null).sort((a, b) => b.risk_score - a.risk_score));
+  res.json((await customerIntel(scope.isRep ? req.user.id : null)).sort((a, b) => b.risk_score - a.risk_score));
 });
 
 // One customer's intel + product suggestions + its AI actions - used on customer pages.
-router.get('/intel/customer/:id', (req, res) => {
+router.get('/intel/customer/:id', async (req, res) => {
   const scope = scopeForUser(req.user);
   // Reps only get intel on their own customers (quintiles also stay within their book).
-  const intel = customerIntel(scope.isRep ? req.user.id : null).find((c) => c.id === Number(req.params.id));
+  const intel = (await customerIntel(scope.isRep ? req.user.id : null)).find((c) => c.id === Number(req.params.id));
   if (!intel) return res.status(404).json({ error: 'Customer not found' });
 
   // This customer's slice of the Sales AI recommended actions.
-  intel.actions = buildActions([intel], { customerId: intel.id });
+  intel.actions = await buildActions([intel], { customerId: intel.id });
 
   // "Others buy, you don't": top sellers (180d) this customer hasn't bought.
-  intel.suggested_products = db.prepare(`
+  intel.suggested_products = await dbx.prepare(`
     SELECT p.id, p.code, p.name, SUM(i.line_total) AS revenue
     FROM order_items i
     JOIN orders o ON o.id = i.order_id AND o.status != 'cancelled' AND o.order_date >= date('now', '-180 days')
@@ -160,17 +161,17 @@ router.get('/intel/customer/:id', (req, res) => {
       SELECT i2.product_id FROM order_items i2
       JOIN orders o2 ON o2.id = i2.order_id AND o2.customer_id = ? AND o2.order_date >= date('now', '-180 days')
     )
-    GROUP BY p.id ORDER BY revenue DESC LIMIT 5
+    GROUP BY p.id, p.code, p.name ORDER BY revenue DESC LIMIT 5
   `).all(intel.id);
 
   // Lapsed: bought before, nothing in the last 60 days.
-  intel.lapsed_products = db.prepare(`
+  intel.lapsed_products = await dbx.prepare(`
     SELECT p.id, p.code, p.name, MAX(o.order_date) AS last_bought
     FROM order_items i
     JOIN orders o ON o.id = i.order_id AND o.customer_id = ? AND o.status != 'cancelled'
     JOIN products p ON p.id = i.product_id AND p.active = 1
-    GROUP BY p.id
-    HAVING last_bought < date('now', '-60 days')
+    GROUP BY p.id, p.code, p.name
+    HAVING MAX(o.order_date) < date('now', '-60 days')
     ORDER BY last_bought DESC LIMIT 5
   `).all(intel.id);
 
@@ -178,20 +179,22 @@ router.get('/intel/customer/:id', (req, res) => {
 });
 
 // Prioritised next actions for the sales team.
-router.get('/intel/actions', (req, res) => {
+router.get('/intel/actions', async (req, res) => {
   const scope = scopeForUser(req.user);
   const repId = scope.isRep ? req.user.id : null;
-  res.json(buildActions(customerIntel(repId), { repId }).slice(0, 25));
+  res.json((await buildActions(await customerIntel(repId), { repId })).slice(0, 25));
 });
 
 // --- Analytics ------------------------------------------------------------------
 
-router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), (req, res) => {
+router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), async (req, res) => {
   const scope = scopeForUser(req.user);
   const repFilter = scope.isRep ? 'AND o.rep_id = ?' : '';
   const repParam = scope.isRep ? [req.user.id] : [];
   const days = clamp(parseInt(req.query.days || '90', 10), 7, 365);
-  const window = `-${days} days`;
+  // Cutoff computed here (UTC, like SQLite's date('now', '-N days')) rather than
+  // bound as a date modifier, which T-SQL has no equivalent for.
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
 
   // "sales" is SYSPRO's actual invoiced total (rep_monthly_sales, synced from
   // vw_FS_RepSalesByMonth) - same source as Rep KPIs. "orders" stays
@@ -203,16 +206,16 @@ router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), (req,
   // 365-day window - the chart is meant to read as "this year's months", so
   // it should reset to just January at the start of a new year rather than
   // keep showing last December.
-  const salesByMonth = db.prepare(`
+  const salesByMonth = await dbx.prepare(`
     SELECT month, COALESCE(SUM(sales_value), 0) AS sales
     FROM rep_monthly_sales
     WHERE month >= strftime('%Y-01', 'now') ${scope.isRep ? 'AND rep_id = ?' : ''}
     GROUP BY month
   `).all(...repParam);
-  const ordersByMonth = db.prepare(`
+  const ordersByMonth = await dbx.prepare(`
     SELECT strftime('%Y-%m', order_date) AS month, COUNT(*) AS orders
     FROM orders o WHERE status != 'cancelled' AND order_date >= date('now', 'start of year') ${repFilter}
-    GROUP BY month
+    GROUP BY strftime('%Y-%m', order_date)
   `).all(...repParam);
   const salesMap = Object.fromEntries(salesByMonth.map((r) => [r.month, r.sales]));
   const ordersMap = Object.fromEntries(ordersByMonth.map((r) => [r.month, r.orders]));
@@ -220,42 +223,42 @@ router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), (req,
     .sort()
     .map((month) => ({ month, sales: salesMap[month] || 0, orders: ordersMap[month] || 0 }));
 
-  const topProducts = db.prepare(`
+  const topProducts = await dbx.prepare(`
     SELECT p.code, p.name, SUM(i.qty) AS units, SUM(i.line_total) AS revenue,
       SUM(i.line_total) - SUM(i.qty * p.cost_price) AS margin
     FROM order_items i
-    JOIN orders o ON o.id = i.order_id AND o.status != 'cancelled' AND o.order_date >= date('now', ?) ${repFilter}
+    JOIN orders o ON o.id = i.order_id AND o.status != 'cancelled' AND o.order_date >= ? ${repFilter}
     JOIN products p ON p.id = i.product_id
-    GROUP BY p.id ORDER BY revenue DESC LIMIT 15
-  `).all(window, ...repParam);
+    GROUP BY p.id, p.code, p.name ORDER BY revenue DESC LIMIT 15
+  `).all(since, ...repParam);
 
-  const quoteFunnel = db.prepare(`
+  const quoteFunnel = await dbx.prepare(`
     SELECT COUNT(*) AS total,
       COUNT(CASE WHEN status = 'accepted' THEN 1 END) AS accepted,
       COUNT(CASE WHEN status = 'rejected' THEN 1 END) AS rejected,
-      COUNT(CASE WHEN status = 'sent' THEN 1 END) AS open,
+      COUNT(CASE WHEN status = 'sent' THEN 1 END) AS [open],
       COALESCE(SUM(CASE WHEN status = 'accepted' THEN total END), 0) AS accepted_value
-    FROM quotes WHERE quote_date >= date('now', ?) ${scope.isRep ? 'AND rep_id = ?' : ''}
-  `).get(window, ...repParam);
+    FROM quotes WHERE quote_date >= ? ${scope.isRep ? 'AND rep_id = ?' : ''}
+  `).get(since, ...repParam);
 
   // Orders/AOV/buying-customers and the margin % basis stay period-based
   // (order_date within the selected day window) - period_revenue here is
   // only the denominator for margin_pct, not shown to the user directly.
-  const orderStats = db.prepare(`
+  const orderStats = await dbx.prepare(`
     SELECT COUNT(o.id) AS orders, COUNT(DISTINCT o.customer_id) AS active_customers,
       COALESCE(AVG(o.total), 0) AS aov, COALESCE(SUM(o.total), 0) AS period_revenue
-    FROM orders o WHERE o.status != 'cancelled' AND o.order_date >= date('now', ?) ${repFilter}
-  `).get(window, ...repParam);
-  const margin = db.prepare(`
+    FROM orders o WHERE o.status != 'cancelled' AND o.order_date >= ? ${repFilter}
+  `).get(since, ...repParam);
+  const margin = await dbx.prepare(`
     SELECT COALESCE(SUM(i.line_total) - SUM(i.qty * p.cost_price), 0) AS margin
     FROM order_items i
-    JOIN orders o ON o.id = i.order_id AND o.status != 'cancelled' AND o.order_date >= date('now', ?) ${repFilter}
+    JOIN orders o ON o.id = i.order_id AND o.status != 'cancelled' AND o.order_date >= ? ${repFilter}
     JOIN products p ON p.id = i.product_id
-  `).get(window, ...repParam);
+  `).get(since, ...repParam);
 
   // "Revenue" is a fixed month-to-date figure (SYSPRO's actual invoiced
   // sales, same source as Rep KPIs) - not tied to the day-period selector.
-  const revenueMtd = db.prepare(`
+  const revenueMtd = await dbx.prepare(`
     SELECT COALESCE(SUM(sales_value), 0) AS revenue
     FROM rep_monthly_sales WHERE month = strftime('%Y-%m', 'now') ${scope.isRep ? 'AND rep_id = ?' : ''}
   `).get(...repParam);
