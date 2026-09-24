@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { createSqliteDbx, createMssqlDbx } from './dbx.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const configuredPath = process.env.DATABASE_PATH
@@ -152,6 +153,31 @@ try {
     WHERE (total IS NULL OR total = 0) AND (subtotal + vat_amount) > 0
   `);
 } catch { /* invoices table may not exist yet on a fresh db */ }
+
+// Async facade over the database - see dbx.js. New/migrated code should use
+// `await dbx.prepare(...)` instead of the synchronous `db` above, so the backend
+// can move from SQLite to SQL Server (DB_BACKEND=mssql) one caller at a time.
+// `dbx` is a live binding: initDb() swaps it to the SQL Server backend.
+export let dbx = createSqliteDbx(db);
+
+// Call once at startup, before serving requests. A no-op on SQLite. On SQL
+// Server it opens the connection pool. NOTE: do not enable DB_BACKEND=mssql
+// until every caller of the synchronous `db` (including the helpers below)
+// has moved to dbx - they still read the SQLite file.
+export async function initDb() {
+  if ((process.env.DB_BACKEND || 'sqlite').toLowerCase() !== 'mssql') return;
+  const { default: sql } = await import('mssql');
+  const pool = await new sql.ConnectionPool({
+    server: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT) || 1433,
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    pool: { max: Number(process.env.DB_POOL_MAX) || 10, min: 0, idleTimeoutMillis: 30000 },
+    options: { encrypt: process.env.DB_ENCRYPT === '1', trustServerCertificate: true }
+  }).connect();
+  dbx = createMssqlDbx(pool, sql);
+}
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
