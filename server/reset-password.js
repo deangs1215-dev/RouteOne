@@ -18,7 +18,7 @@ import 'dotenv/config'; // must run first - loads SECRET_KEY like the other scri
 // omit it when resetting your own.
 import bcrypt from 'bcryptjs';
 import readline from 'readline';
-import { db } from './db.js';
+import { dbx } from './db.js';
 import { passwordIsStrong } from './auth.js';
 
 const email = process.argv[2];
@@ -44,7 +44,7 @@ function promptHidden(question) {
   });
 }
 
-const user = db.prepare(`
+const user = await dbx.prepare(`
   SELECT u.id, u.name, u.email, u.active, r.name AS role_name
   FROM users u JOIN roles r ON r.id = u.role_id
   WHERE u.email = ?
@@ -72,7 +72,7 @@ if (!passwordIsStrong(password)) {
   process.exit(1);
 }
 
-db.prepare('UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?')
+await dbx.prepare('UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?')
   .run(bcrypt.hashSync(password, 12), FORCE_CHANGE ? 1 : 0, user.id);
 
 console.log(`\nPassword updated for ${user.email}.`);

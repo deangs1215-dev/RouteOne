@@ -28,7 +28,7 @@
 // in as the old one or locks the old one out; and the user id owns the rep's
 // customers, visits, orders and quotes, so whether to rename or create anew
 // depends on if the territory was genuinely handed over. Per-rep judgement.
-import { db } from './db.js';
+import { dbx } from './db.js';
 import { REP_CODES, fetchReps } from './import-reps.js';
 
 const pad = (s, n) => String(s ?? '').padEnd(n);
@@ -59,20 +59,20 @@ for (const s of syspro.values()) {
   branchesForCode.get(s.code).push(s);
 }
 
-const users = db.prepare(`
+const users = await dbx.prepare(`
   SELECT u.id, u.name, u.email, TRIM(u.rep_code) AS rep_code, u.active, w.code AS branch
   FROM users u
   JOIN roles r ON r.id = u.role_id
   LEFT JOIN warehouses w ON w.id = u.warehouse_id
   WHERE r.name = 'rep' AND u.rep_code IS NOT NULL AND TRIM(u.rep_code) <> ''
 `).all();
-const custCount = db.prepare('SELECT COUNT(*) AS n FROM customers WHERE rep_id = ?');
+const custCount = dbx.prepare('SELECT COUNT(*) AS n FROM customers WHERE rep_id = ?');
 
 const nameMismatch = [], cosmetic = [], pairNotInSyspro = [], noBranch = [], missingInRouteOne = [];
 const seen = new Set();
 
 for (const u of users) {
-  const customers = custCount.get(u.id).n;
+  const customers = (await custCount.get(u.id)).n;
   if (!u.branch) { noBranch.push({ ...u, customers }); continue; }
   const k = key(u.rep_code, u.branch);
   seen.add(k);

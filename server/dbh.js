@@ -38,6 +38,48 @@ export async function repTargetLookup(upToMonth, conn = dbx) {
   };
 }
 
+// Empties `tables` and restarts their ids at 1, with foreign-key checking off
+// while it happens. For seed/cleanup scripts only. On SQL Server the data
+// outlives the process, so every table that references a wiped table (found
+// from the schema, transitively) is emptied too - otherwise those rows would
+// dangle, and the constraint re-check at the end would fail. `skipMissing`
+// tolerates a table that does not exist. Returns the tables actually emptied.
+export async function wipeTables(tables, { skipMissing = false } = {}) {
+  const list = [...tables];
+  if (dbx.dialect === 'mssql') {
+    const fks = await dbx.prepare('SELECT OBJECT_NAME(parent_object_id) AS child, OBJECT_NAME(referenced_object_id) AS parent FROM sys.foreign_keys').all();
+    const wipe = new Set(list);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const { child, parent } of fks) {
+        if (wipe.has(parent) && !wipe.has(child)) { wipe.add(child); list.push(child); grew = true; }
+      }
+    }
+    for (const t of list) await dbx.exec(`ALTER TABLE ${t} NOCHECK CONSTRAINT ALL`);
+  } else {
+    await dbx.exec('PRAGMA foreign_keys = OFF');
+  }
+  const cleared = [];
+  await dbx.transaction(async (tx) => {
+    for (const t of list) {
+      try {
+        await tx.prepare(`DELETE FROM ${t}`).run();
+        if (tx.dialect === 'mssql') await tx.exec(`IF OBJECTPROPERTY(OBJECT_ID('${t}'), 'TableHasIdentity') = 1 DBCC CHECKIDENT ('${t}', RESEED, 0)`);
+        else await tx.prepare('DELETE FROM sqlite_sequence WHERE name = ?').run(t);
+        cleared.push(t);
+      } catch (err) {
+        if (!skipMissing) throw err;
+      }
+    }
+  });
+  if (dbx.dialect === 'mssql') {
+    for (const t of list) await dbx.exec(`ALTER TABLE ${t} WITH CHECK CHECK CONSTRAINT ALL`);
+  } else {
+    await dbx.exec('PRAGMA foreign_keys = ON');
+  }
+  return cleared;
+}
+
 export async function getSetting(key, fallback = null, conn = dbx) {
   const row = await conn.prepare('SELECT [value] FROM settings WHERE [key] = ?').get(key);
   return row ? row.value : fallback;

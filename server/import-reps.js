@@ -21,7 +21,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import path from 'path';
 import { pathToFileURL } from 'url';
-import { db } from './db.js';
+import { dbx } from './db.js';
 import { sysproConfig } from './integration/providers.js';
 
 const EMAIL_DOMAIN = 'sbakels.co.za';
@@ -143,8 +143,8 @@ export async function fetchReps() {
 // Exported alongside EXCLUDE_CODES/fetchReps so the collapse, exclusion and
 // --only filtering can be exercised against synthetic rows without a live
 // SYSPRO connection.
-export function run(reps) {
-  const repRole = db.prepare("SELECT id FROM roles WHERE name = 'rep'").get();
+export async function run(reps) {
+  const repRole = await dbx.prepare("SELECT id FROM roles WHERE name = 'rep'").get();
   if (!repRole) throw new Error("No 'rep' role found - is the database seeded?");
 
   // Collapse to one entry per rep_code, keeping the branch with the most
@@ -170,20 +170,19 @@ export function run(reps) {
     }
   }
 
-  const findWarehouse = db.prepare('SELECT id FROM warehouses WHERE code = ?');
-  const existsByRepCode = db.prepare('SELECT id FROM users WHERE rep_code = ?');
-  const existsByEmail = db.prepare('SELECT id FROM users WHERE email = ?');
-  const insertUser = db.prepare(`
-    INSERT INTO users (name, email, password_hash, role_id, rep_code, warehouse_id, active)
-    VALUES (?, ?, ?, ?, ?, ?, 1)
-  `);
-
   const created = [];
   const skipped = [];
 
-  const tx = db.transaction(() => {
+  await dbx.transaction(async (tx) => {
+    const findWarehouse = tx.prepare('SELECT id FROM warehouses WHERE code = ?');
+    const existsByRepCode = tx.prepare('SELECT id FROM users WHERE rep_code = ?');
+    const existsByEmail = tx.prepare('SELECT id FROM users WHERE email = ?');
+    const insertUser = tx.prepare(`
+      INSERT INTO users (name, email, password_hash, role_id, rep_code, warehouse_id, active)
+      VALUES (?, ?, ?, ?, ?, ?, 1)
+    `);
     for (const rep of byRep.values()) {
-      if (existsByRepCode.get(rep.rep_code)) {
+      if (await existsByRepCode.get(rep.rep_code)) {
         skipped.push({ ...rep, reason: 'rep_code already has a user' });
         continue;
       }
@@ -191,20 +190,20 @@ export function run(reps) {
       // Email: firstname@domain, else firstname.repcode@domain on a clash.
       const slug = firstNameSlug(rep.rep_name, rep.rep_code);
       let email = `${slug}@${EMAIL_DOMAIN}`;
-      if (existsByEmail.get(email)) {
+      if (await existsByEmail.get(email)) {
         email = `${slug}.${rep.rep_code.toLowerCase()}@${EMAIL_DOMAIN}`;
       }
-      if (existsByEmail.get(email)) {
+      if (await existsByEmail.get(email)) {
         skipped.push({ ...rep, reason: `email ${email} already taken` });
         continue;
       }
 
-      const warehouse = rep.branch ? findWarehouse.get(rep.branch) : null;
+      const warehouse = rep.branch ? await findWarehouse.get(rep.branch) : null;
       const name = rep.rep_name || `Rep ${rep.rep_code}`;
 
       const temporaryPassword = `${crypto.randomBytes(12).toString('base64url')}aA1!`;
       if (!DRY_RUN) {
-        insertUser.run(name, email, bcrypt.hashSync(temporaryPassword, 12), repRole.id, rep.rep_code, warehouse?.id ?? null);
+        await insertUser.run(name, email, bcrypt.hashSync(temporaryPassword, 12), repRole.id, rep.rep_code, warehouse?.id ?? null);
       }
       created.push({
         name, email, rep_code: rep.rep_code, branch: rep.branch,
@@ -214,7 +213,6 @@ export function run(reps) {
       });
     }
   });
-  tx();
 
   return { created, skipped };
 }
@@ -229,7 +227,7 @@ if (isMain) (async () => {
   console.log(ONLY_CODES ? `Limited to rep code(s): ${[...ONLY_CODES].join(', ')}\n` : '');
   const reps = await fetchReps();
   console.log(`Fetched ${reps.length} rep/branch rows from SYSPRO.`);
-  const { created, skipped } = run(reps);
+  const { created, skipped } = await run(reps);
 
   console.log(`\n${DRY_RUN ? 'Would create' : 'Created'} ${created.length} rep account(s):`);
   console.table(created);

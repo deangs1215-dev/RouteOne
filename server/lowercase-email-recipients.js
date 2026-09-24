@@ -12,11 +12,11 @@
 // script, all of which had SBakels.co.za mixed-case in the domain).
 //
 // Idempotent: an already-lowercase email is simply skipped.
-import { db } from './db.js';
+import { dbx } from './db.js';
 
 const DRY = process.argv.includes('--dry');
 
-const rows = db.prepare('SELECT id, name, email FROM email_recipients').all();
+const rows = await dbx.prepare('SELECT id, name, email FROM email_recipients').all();
 const changed = rows.filter((r) => r.email !== r.email.toLowerCase());
 
 console.log(`\n${DRY ? '[DRY RUN] ' : ''}${changed.length} of ${rows.length} email_recipients need lower-casing\n`);
@@ -31,10 +31,9 @@ if (DRY) {
   process.exit(0);
 }
 
-const apply = db.transaction(() => {
-  const update = db.prepare('UPDATE email_recipients SET email = ? WHERE id = ?');
-  for (const r of changed) update.run(r.email.toLowerCase(), r.id);
+await dbx.transaction(async (tx) => {
+  const update = tx.prepare('UPDATE email_recipients SET email = ? WHERE id = ?');
+  for (const r of changed) await update.run(r.email.toLowerCase(), r.id);
 });
-apply();
 
 console.log('\nDone.\n');

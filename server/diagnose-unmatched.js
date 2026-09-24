@@ -14,14 +14,14 @@ import 'dotenv/config'; // must run first - loads SECRET_KEY so the saved SYSPRO
 //
 // Writes nothing. Usage:  node server/diagnose-unmatched.js
 
-import { db } from './db.js';
+import { dbx } from './db.js';
 import { getProvider } from './integration/providers.js';
 
 const rows = await (await getProvider()).fetch('customers');
 console.log(`Fetched ${rows.length} customer rows from the configured source.\n`);
 
-const findCustomer = db.prepare('SELECT id, rep_id FROM customers WHERE code = ?');
-const repsByCode = db.prepare(`
+const findCustomer = dbx.prepare('SELECT id, rep_id FROM customers WHERE code = ?');
+const repsByCode = await dbx.prepare(`
   SELECT u.rep_code, w.code AS branch
   FROM users u
   JOIN roles r ON r.id = u.role_id
@@ -41,7 +41,7 @@ const branchMismatch = new Map(); // "repcode: customerBranch -> repBranch" -> c
 let notInDb = 0, alreadyAssigned = 0;
 
 for (const row of rows) {
-  const customer = findCustomer.get(row.code);
+  const customer = await findCustomer.get(row.code);
   if (!customer) { notInDb++; continue; }
   if (customer.rep_id) { alreadyAssigned++; continue; }
 

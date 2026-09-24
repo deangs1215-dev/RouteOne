@@ -16,7 +16,7 @@ import 'dotenv/config'; // must run first - loads SECRET_KEY so the saved SYSPRO
 //
 // Writes nothing. Usage:  node server/list-orphan-reps.js
 
-import { db } from './db.js';
+import { dbx } from './db.js';
 import { getProvider } from './integration/providers.js';
 import { REP_CODES, fetchReps } from './import-reps.js';
 
@@ -34,13 +34,13 @@ for (const r of repRows) {
   if (code && !viewByCode.has(code)) viewByCode.set(code, String(r.rep_name || '').trim());
 }
 
-const usersByCode = new Set(db.prepare(`
+const usersByCode = new Set((await dbx.prepare(`
   SELECT u.rep_code FROM users u
   JOIN roles r ON r.id = u.role_id
   WHERE r.name = 'rep' AND u.active = 1 AND u.rep_code IS NOT NULL
-`).all().map((u) => u.rep_code));
+`).all()).map((u) => u.rep_code));
 
-const findCustomer = db.prepare('SELECT id, rep_id, status FROM customers WHERE code = ?');
+const findCustomer = dbx.prepare('SELECT id, rep_id, status FROM customers WHERE code = ?');
 
 // RouteOne only models active / on_hold / closed, and 'closed' is set by hand in
 // the app - it never arrives from SYSPRO. So if the view carries its own
@@ -56,7 +56,7 @@ const orphans = new Map();
 const statusTotals = {};
 
 for (const row of customers) {
-  const local = findCustomer.get(row.code);
+  const local = await findCustomer.get(row.code);
   if (!local || local.rep_id) continue;              // only currently-unassigned
 
   const repCode = String(row.rep_code || '').trim();

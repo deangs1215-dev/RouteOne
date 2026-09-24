@@ -29,7 +29,12 @@ DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test
                                            # full API suite on SQL Server - 16 pass, 1 skipped (SQLite file backup)
 ```
 
-`server/tests/async-lint.test.js` fails on any un-awaited `dbx` query. Only the integration suite runs on SQL Server; the `sync`, `email`, `dbh` and `dbx` test files are SQLite-only.
+```
+DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test-concurrency=1 server/tests/scripts.test.js
+                                           # the admin/seed scripts on SQL Server - 9 pass (refuses any DB but RouteOne_Test)
+```
+
+`server/tests/async-lint.test.js` fails on any un-awaited `dbx` query. On SQL Server only the integration and scripts suites run; the `sync`, `email`, `dbh` and `dbx` test files are SQLite-only.
 
 ## Verified on SQL Server (RouteOne_Test)
 
@@ -41,8 +46,9 @@ DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test
 ## Not yet verified / not done
 
 - **Production-volume behaviour** and the real SYSPRO sync on SQL Server (only a 500k-row scratch test).
-- **Scripts still on SQLite** (need `dbx`): `handover-rep`, `import-reps`, `reconcile-reps`, `reset-password`, `cleanup-demo-data`, `diagnose-unmatched`, `list-orphan-reps`, `lowercase-email-recipients`, `seed-invoices`, `seed-jhb-order-recipients`.
-- **`routes/monitoring.routes.js`** reports the SQLite file size (`DB_PATH`); needs a SQL Server equivalent.
+- **Two throwaway scripts stay SQLite-only:** `set-lizl-budgets.cjs` and `set-rep-budgets.cjs` open the SQLite file directly (their own headers say "delete when done").
+- **`reset-password.js`:** the password prompt needs a real terminal, so only its lookup path is tested; it does not bump `token_version`, so an existing session survives a reset (the admin UI reset does invalidate sessions).
+- **`cleanup-demo-data.js`** was already broken before this migration (it re-created roles it never deleted); it now clears `roles` and `territories` too.
 - **Schedulers, digests, email sending** have unit coverage for building emails only; they have not run against SQL Server.
 - **Backups:** on SQL Server the app backs up `uploads` only. The database must be backed up by SQL Server (scheduled `BACKUP DATABASE`). Restore in the app is refused on SQL Server.
 - **Live `RouteOne` database** was built from an older schema script (REAL columns, GETDATE defaults, missing `users.documents_last_viewed_at`). Rebuild it from the current `docs/sql/routeone-schema-mssql.sql` before loading data.
@@ -59,6 +65,7 @@ DB_BACKEND=mssql DB_NAME=RouteOne_Test node --env-file=server/.env --test --test
    It skips `syspro_customer_pricing` (rebuilt by the sync); use `--include-pricing` to copy it anyway.
 6. **Check the output**: every table `✔`, and no "unvalidated foreign keys" line.
 7. **Deploy** this branch with `DB_BACKEND=mssql` and `DB_*` set in the server's `.env` (quote any password containing `#`).
+   **Keep `SECRET_KEY` unchanged.** SMTP and SYSPRO passwords in the `settings` table are encrypted with it; a different key leaves them undecryptable ("Failed to decrypt secret").
 8. **Start the app**, log in, load customers/orders/quotes.
 9. **Run the SYSPRO syncs** from Integration settings; confirm `customer_pricing` completes (expect minutes, not hours).
 10. **Re-enable schedulers**; watch logs for 24 hours.

@@ -182,7 +182,10 @@ export async function initDb() {
     database: process.env.DB_NAME,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
-    pool: { max: Number(process.env.DB_POOL_MAX) || 10, min: 0, idleTimeoutMillis: 30000 },
+    // The API server keeps idle connections for 30s; anything else (admin scripts,
+    // tests) lets them go after 1s so the process exits when its work is done
+    // instead of hanging on the pool for half a minute.
+    pool: { max: Number(process.env.DB_POOL_MAX) || 10, min: 0, idleTimeoutMillis: /(^|[\/])index\.js$/.test(process.argv[1] || '') ? 30000 : 1000 },
     options: { encrypt: process.env.DB_ENCRYPT === '1', trustServerCertificate: true }
   }).connect();
   dbx = createMssqlDbx(pool, sql);

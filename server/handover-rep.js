@@ -36,7 +36,7 @@
 // - single transaction: either the whole handover applies, or none of it
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { db } from './db.js';
+import { dbx } from './db.js';
 
 const arg = (flag) => {
   const i = process.argv.indexOf(flag);
@@ -60,13 +60,13 @@ if (!code || !branch || !newName || !newEmail) {
 // the (branch, code) pair, so the handover is scoped to that pair. An earlier
 // version guarded on the code alone and would have refused to touch any
 // multi-branch code, or worse, picked the wrong person's record.
-const warehouse = db.prepare('SELECT id, code, name FROM warehouses WHERE code = ?').get(branch);
+const warehouse = await dbx.prepare('SELECT id, code, name FROM warehouses WHERE code = ?').get(branch);
 if (!warehouse) {
   console.error(`\nNo warehouse with branch code ${branch}. Run the warehouse sync first.\n`);
   process.exit(1);
 }
 
-const holders = db.prepare(`
+const holders = await dbx.prepare(`
   SELECT u.id, u.name, u.email, TRIM(u.rep_code) AS rep_code, u.active,
          u.warehouse_id, w.code AS branch, w.name AS branch_name, u.role_id, u.sales_target
   FROM users u
@@ -78,7 +78,7 @@ if (holders.length !== 1) {
   console.error(`\nExpected exactly one user on rep code ${code} at branch ${branch}, found ${holders.length}.`);
   holders.forEach((h) => console.error(`  id ${h.id}  ${h.name}  active=${h.active}`));
   if (!holders.length) {
-    const elsewhere = db.prepare(`
+    const elsewhere = await dbx.prepare(`
       SELECT u.name, w.code AS branch FROM users u LEFT JOIN warehouses w ON w.id = u.warehouse_id
       WHERE TRIM(u.rep_code) = ?
     `).all(code);
@@ -93,15 +93,16 @@ if (holders.length !== 1) {
 }
 const outgoing = holders[0];
 
-if (db.prepare('SELECT id FROM users WHERE lower(email) = ?').get(newEmail)) {
+if (await dbx.prepare('SELECT id FROM users WHERE lower(email) = ?').get(newEmail)) {
   console.error(`\nEmail ${newEmail} is already in use. Pick another.\n`);
   process.exit(1);
 }
 
-const customers = db.prepare('SELECT COUNT(*) AS n FROM customers WHERE rep_id = ?').get(outgoing.id).n;
-const owned = ['orders', 'visits', 'quotes'].map((t) => ({
-  table: t, n: db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE rep_id = ?`).get(outgoing.id).n
-}));
+const customers = (await dbx.prepare('SELECT COUNT(*) AS n FROM customers WHERE rep_id = ?').get(outgoing.id)).n;
+const owned = [];
+for (const t of ['orders', 'visits', 'quotes']) {
+  owned.push({ table: t, n: (await dbx.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE rep_id = ?`).get(outgoing.id)).n });
+}
 
 console.log(`\n${DRY ? '[DRY RUN] ' : ''}Handover of rep code ${code} (branch ${outgoing.branch} - ${outgoing.branch_name})\n`);
 console.log(`  OUT  ${outgoing.name}  <${outgoing.email}>  (user id ${outgoing.id})`);
@@ -117,16 +118,15 @@ if (DRY) {
 }
 
 const tempPassword = `${crypto.randomBytes(12).toString('base64url')}aA1!`;
-const apply = db.transaction(() => {
+const newId = await dbx.transaction(async (tx) => {
   // Clear the code BEFORE inserting, so the two never coexist on one code.
-  db.prepare('UPDATE users SET rep_code = NULL, active = 0 WHERE id = ?').run(outgoing.id);
-  const info = db.prepare(`
+  await tx.prepare('UPDATE users SET rep_code = NULL, active = 0 WHERE id = ?').run(outgoing.id);
+  const info = await tx.prepare(`
     INSERT INTO users (name, email, password_hash, role_id, rep_code, warehouse_id, sales_target, active, must_change_password)
     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)
   `).run(newName, newEmail, bcrypt.hashSync(tempPassword, 12), outgoing.role_id, code, outgoing.warehouse_id, outgoing.sales_target || 0);
   return info.lastInsertRowid;
 });
-const newId = apply();
 
 console.log('Done.\n');
 console.log(`  ${newName} created as user id ${newId}`);

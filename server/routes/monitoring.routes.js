@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { requireRole } from '../auth.js';
-import { DB_PATH } from '../db.js';
+import { DB_PATH, dbx } from '../db.js';
 import { listBackups } from '../backup.js';
 
 const router = Router();
@@ -69,7 +69,14 @@ function writeAlertRecipients(value) {
 router.get('/monitoring/status', requireRole('admin'), async (req, res) => {
   const disk = await getDiskSpace(DB_PATH);
   let dbSizeBytes = null;
-  try { dbSizeBytes = fs.statSync(DB_PATH).size; } catch { /* db not found - unexpected but don't crash the page */ }
+  try {
+    if (dbx.dialect === 'mssql') {
+      // Data files only (type 0); size is counted in 8 KB pages.
+      dbSizeBytes = Number((await dbx.prepare('SELECT SUM(CAST(size AS BIGINT)) * 8192 AS bytes FROM sys.database_files WHERE type = 0').get())?.bytes) || null;
+    } else {
+      dbSizeBytes = fs.statSync(DB_PATH).size;
+    }
+  } catch { /* db not found - unexpected but don't crash the page */ }
 
   const backups = listBackups();
   const latest = backups[0] || null;

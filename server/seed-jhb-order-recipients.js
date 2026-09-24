@@ -32,13 +32,13 @@
 // left untouched and reported, not duplicated (email_recipients.email is
 // UNIQUE, so a duplicate INSERT would fail anyway - this just makes re-runs
 // clean instead of erroring out).
-import { db } from './db.js';
+import { dbx } from './db.js';
 
 const DRY = process.argv.includes('--dry');
 const JHB_BRANCH_CODE = '01'; // JOHANNESBURG DESPATCH - looked up by code, not a hardcoded id,
                                // since warehouse ids are not guaranteed identical across environments
 
-const jhb = db.prepare('SELECT id, code, name FROM warehouses WHERE code = ?').get(JHB_BRANCH_CODE);
+const jhb = await dbx.prepare('SELECT id, code, name FROM warehouses WHERE code = ?').get(JHB_BRANCH_CODE);
 if (!jhb) {
   console.error(`\nNo warehouse with branch code ${JHB_BRANCH_CODE} found. Run the warehouse sync first.\n`);
   process.exit(1);
@@ -59,7 +59,7 @@ const NEW_RECIPIENTS = [
 
 console.log(`\n${DRY ? '[DRY RUN] ' : ''}Configuring Johannesburg (branch ${jhb.code} - ${jhb.name}) order-email recipients\n`);
 
-const charmaine = db.prepare('SELECT id, name, email, warehouse_id FROM email_recipients WHERE lower(email) = lower(?)').get(CHARMAINE_EMAIL);
+const charmaine = await dbx.prepare('SELECT id, name, email, warehouse_id FROM email_recipients WHERE lower(email) = lower(?)').get(CHARMAINE_EMAIL);
 if (charmaine) {
   if (charmaine.warehouse_id === jhb.id) {
     console.log(`  Charmaine Le Vey is already scoped to Johannesburg - nothing to change.`);
@@ -72,7 +72,7 @@ if (charmaine) {
 
 const toInsert = [];
 for (const r of NEW_RECIPIENTS) {
-  const existing = db.prepare('SELECT id, name, warehouse_id FROM email_recipients WHERE lower(email) = lower(?)').get(r.email);
+  const existing = await dbx.prepare('SELECT id, name, warehouse_id FROM email_recipients WHERE lower(email) = lower(?)').get(r.email);
   if (existing) {
     console.log(`  SKIP   ${r.name.padEnd(20)} ${r.email}  (already exists as "${existing.name}", id ${existing.id})`);
   } else {
@@ -88,16 +88,15 @@ if (DRY) {
   process.exit(0);
 }
 
-const apply = db.transaction(() => {
+await dbx.transaction(async (tx) => {
   if (charmaine && charmaine.warehouse_id !== jhb.id) {
-    db.prepare('UPDATE email_recipients SET warehouse_id = ? WHERE id = ?').run(jhb.id, charmaine.id);
+    await tx.prepare('UPDATE email_recipients SET warehouse_id = ? WHERE id = ?').run(jhb.id, charmaine.id);
   }
-  const insert = db.prepare(
+  const insert = tx.prepare(
     'INSERT INTO email_recipients (name, email, description, category, warehouse_id) VALUES (?, ?, NULL, ?, ?)'
   );
-  for (const r of toInsert) insert.run(r.name, r.email, 'orders', jhb.id);
+  for (const r of toInsert) await insert.run(r.name, r.email, 'orders', jhb.id);
 });
-apply();
 
 console.log('Done.\n');
 console.log('Check Settings -> Email Settings -> Orders Email to confirm the Johannesburg group.\n');

@@ -1,7 +1,7 @@
 // Loads demo data for a bakery-ingredient distributor. Safe to re-run: wipes and reloads.
 import bcrypt from 'bcryptjs';
 import { dbx, getTodayISO } from './db.js';
-import { setSetting } from './dbh.js';
+import { setSetting, wipeTables } from './dbh.js';
 
 if (process.env.NODE_ENV === 'production') {
   throw new Error('Demo seeding is disabled when NODE_ENV=production.');
@@ -11,41 +11,7 @@ const WIPE_TABLES = ['rep_locations', 'form_submissions', 'form_templates', 'vis
   'invoices', 'order_items', 'orders', 'visits', 'customer_prices', 'customer_contacts',
   'customers', 'warehouses', 'products', 'product_categories', 'users', 'territories', 'roles', 'activity_log'];
 
-// On SQL Server the data outlives the process, unlike the throwaway SQLite file
-// this was written for, so tables that reference a wiped table (tasks, tickets,
-// drafts, ...) must be emptied too or their rows would dangle - and block the
-// DELETE. Found from the schema's foreign keys, transitively.
-if (dbx.dialect === 'mssql') {
-  const fks = await dbx.prepare('SELECT OBJECT_NAME(parent_object_id) AS child, OBJECT_NAME(referenced_object_id) AS parent FROM sys.foreign_keys').all();
-  const wipe = new Set(WIPE_TABLES);
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const { child, parent } of fks) {
-      if (wipe.has(parent) && !wipe.has(child)) { wipe.add(child); WIPE_TABLES.push(child); grew = true; }
-    }
-  }
-}
-
-// Foreign keys are switched off while the tables are emptied in any order, then
-// back on. PRAGMA on SQLite (outside a transaction); NOCHECK/CHECK on SQL Server.
-if (dbx.dialect === 'mssql') {
-  for (const t of WIPE_TABLES) await dbx.exec(`ALTER TABLE ${t} NOCHECK CONSTRAINT ALL`);
-} else {
-  await dbx.exec('PRAGMA foreign_keys = OFF');
-}
-await dbx.transaction(async (tx) => {
-  for (const t of WIPE_TABLES) {
-    await tx.prepare(`DELETE FROM ${t}`).run();
-    // Restart ids at 1, as on a fresh database.
-    if (tx.dialect === 'mssql') await tx.exec(`IF OBJECTPROPERTY(OBJECT_ID('${t}'), 'TableHasIdentity') = 1 DBCC CHECKIDENT ('${t}', RESEED, 0)`);
-    else await tx.prepare('DELETE FROM sqlite_sequence WHERE name = ?').run(t);
-  }
-});
-if (dbx.dialect === 'mssql') {
-  for (const t of WIPE_TABLES) await dbx.exec(`ALTER TABLE ${t} WITH CHECK CHECK CONSTRAINT ALL`);
-} else {
-  await dbx.exec('PRAGMA foreign_keys = ON');
-}
+await wipeTables(WIPE_TABLES);
 await setSetting('counter_ORD', '0');
 await setSetting('counter_CUS', '0');
 
