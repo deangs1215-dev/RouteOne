@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { db, dbx } from './db.js';
+import { dbx } from './db.js';
 import { getSetting, setSetting } from './dbh.js';
 import crypto from 'crypto';
 
@@ -135,15 +135,7 @@ export function withoutCostFields(user, row) {
   return rest;
 }
 
-export function userCanAccessCustomer(user, customerId) {
-  if (!scopeForUser(user).isRep) return true;
-  const customer = db.prepare('SELECT rep_id FROM customers WHERE id = ?').get(customerId);
-  return !!customer && customer.rep_id === user.id;
-}
-
-// Async twin for migrated callers; the synchronous version above goes once
-// every caller has moved.
-export async function userCanAccessCustomerAsync(user, customerId) {
+export async function userCanAccessCustomer(user, customerId) {
   if (!scopeForUser(user).isRep) return true;
   const customer = await dbx.prepare('SELECT rep_id FROM customers WHERE id = ?').get(customerId);
   return !!customer && customer.rep_id === user.id;

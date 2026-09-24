@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { dbx, saveDataUrl } from '../db.js';
 import { logActivity } from '../dbh.js';
-import { requireRole, scopeForUser, userCanAccessCustomerAsync } from '../auth.js';
+import { requireRole, scopeForUser, userCanAccessCustomer } from '../auth.js';
 import { buildFormEmail, sendEmail } from '../integration/email.js';
 
 const router = Router();
@@ -98,7 +98,7 @@ router.post('/form-submissions', async (req, res) => {
   if (b.customer_id && !await dbx.prepare('SELECT 1 FROM customers WHERE id = ?').get(b.customer_id)) {
     return res.status(404).json({ error: 'Customer not found' });
   }
-  if (b.customer_id && !await userCanAccessCustomerAsync(req.user, b.customer_id)) {
+  if (b.customer_id && !await userCanAccessCustomer(req.user, b.customer_id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
   if (b.visit_id) {

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { dbx, PRICE_SOURCES, VAT_RATE, round2 } from '../db.js';
 import { nextNumber, logActivity, effectivePrice, effectivePriceSource, adjustOrderStock, getSetting } from '../dbh.js';
-import { scopeForUser, requireRole, userCanAccessCustomerAsync } from '../auth.js';
+import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
 import { buildOrderEmail, buildOrderConfirmationEmail, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
 import { loadDoc } from '../integration/docData.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
@@ -94,7 +94,7 @@ async function createOrder(user, b, res) {
 
   const customer = await dbx.prepare('SELECT * FROM customers WHERE id = ?').get(b.customer_id);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (!await userCanAccessCustomerAsync(user, customer.id)) {
+  if (!await userCanAccessCustomer(user, customer.id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
   if (customer.status === 'on_hold') return res.status(400).json({ error: 'Customer account is on hold - order blocked' });

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { dbx, priceBreaks, getTodayISO } from '../db.js';
 import { logActivity, activeRules } from '../dbh.js';
-import { requireRole, userCanAccessCustomerAsync, withoutCostFields } from '../auth.js';
+import { requireRole, userCanAccessCustomer, withoutCostFields } from '../auth.js';
 
 const router = Router();
 
@@ -88,7 +88,7 @@ router.get('/products/for-customer/:customerId', async (req, res) => {
   // Get customer code for SYSPRO pricing lookup
   const customer = await dbx.prepare('SELECT code FROM customers WHERE id = ?').get(cid);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (!await userCanAccessCustomerAsync(req.user, cid)) {
+  if (!await userCanAccessCustomer(req.user, cid)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 
@@ -276,7 +276,7 @@ router.get('/products/:productId/purchase-history', async (req, res) => {
   const productId = req.params.productId;
   const customerId = req.query.customer_id;
   if (!customerId) return res.status(400).json({ error: 'customer_id is required' });
-  if (!await userCanAccessCustomerAsync(req.user, customerId)) {
+  if (!await userCanAccessCustomer(req.user, customerId)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 
@@ -417,7 +417,7 @@ router.get('/customer-pricing', async (req, res) => {
   // every other customer-scoped route uses.
   const customer = await dbx.prepare('SELECT id FROM customers WHERE code = ?').get(customer_code);
   if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  if (!await userCanAccessCustomerAsync(req.user, customer.id)) {
+  if (!await userCanAccessCustomer(req.user, customer.id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 

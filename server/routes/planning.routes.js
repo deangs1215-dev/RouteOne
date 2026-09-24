@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import { dbx, distanceM, getTodayISO } from '../db.js';
 import { logActivity, repMonthTarget } from '../dbh.js';
-import { requireRole, scopeForUser, userCanAccessCustomerAsync } from '../auth.js';
+import { requireRole, scopeForUser, userCanAccessCustomer } from '../auth.js';
 
 const router = Router();
 
@@ -39,7 +39,7 @@ router.post('/routes/stops', async (req, res) => {
   if (!await dbx.prepare('SELECT 1 FROM users WHERE id = ? AND active = 1').get(repId)) {
     return res.status(404).json({ error: 'Rep not found' });
   }
-  if (!await userCanAccessCustomerAsync(req.user, b.customer_id)) {
+  if (!await userCanAccessCustomer(req.user, b.customer_id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
   const date = b.date || getTodayISO();

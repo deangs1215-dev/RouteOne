@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { dbx, saveDataUrl, deleteUploadedFile, distanceM, getTodayISO } from '../db.js';
 import { logActivity, repMonthTarget } from '../dbh.js';
-import { scopeForUser, userCanAccessCustomerAsync } from '../auth.js';
+import { scopeForUser, userCanAccessCustomer } from '../auth.js';
 import { customerIntel, buildActions } from './intelligence.routes.js';
 
 const router = Router();
@@ -39,7 +39,7 @@ router.post('/visits', async (req, res) => {
   if (!await dbx.prepare('SELECT 1 FROM customers WHERE id = ?').get(b.customer_id)) {
     return res.status(404).json({ error: 'Customer not found' });
   }
-  if (!await userCanAccessCustomerAsync(req.user, b.customer_id)) {
+  if (!await userCanAccessCustomer(req.user, b.customer_id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
   const repId = scope.isRep ? req.user.id : (b.rep_id || req.user.id);
@@ -84,7 +84,7 @@ router.post('/visits/check-in', async (req, res) => {
     if (!await dbx.prepare('SELECT 1 FROM customers WHERE id = ?').get(b.customer_id)) {
       return res.status(404).json({ error: 'Customer not found' });
     }
-    if (!await userCanAccessCustomerAsync(req.user, b.customer_id)) {
+    if (!await userCanAccessCustomer(req.user, b.customer_id)) {
       return res.status(403).json({ error: 'Not your customer' });
     }
     visitId = (await dbx.prepare(`
@@ -139,7 +139,7 @@ router.post('/visits/log-offline', async (req, res) => {
   if (!await dbx.prepare('SELECT 1 FROM customers WHERE id = ?').get(b.customer_id)) {
     return res.status(404).json({ error: 'Customer not found' });
   }
-  if (!await userCanAccessCustomerAsync(req.user, b.customer_id)) {
+  if (!await userCanAccessCustomer(req.user, b.customer_id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
   const checkInType = ['onsite', 'onsite_manual', 'offsite'].includes(b.check_in_type) ? b.check_in_type : 'onsite';
@@ -305,7 +305,7 @@ router.put('/visits/:id', async (req, res) => {
   if (scope.isRep && visit.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your visit' });
   }
-  if (!await userCanAccessCustomerAsync(req.user, visit.customer_id)) {
+  if (!await userCanAccessCustomer(req.user, visit.customer_id)) {
     return res.status(403).json({ error: 'Not your customer' });
   }
 
