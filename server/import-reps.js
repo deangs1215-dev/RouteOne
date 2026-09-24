@@ -120,7 +120,7 @@ function firstNameSlug(name, repCode) {
 
 export async function fetchReps() {
   const sql = (await import('mssql')).default;
-  const cfg = sysproConfig();
+  const cfg = await sysproConfig();
   if (!cfg.host || !cfg.database || !cfg.user) {
     throw new Error('SYSPRO connection is not configured (Settings -> Integration).');
   }

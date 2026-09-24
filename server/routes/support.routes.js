@@ -112,7 +112,7 @@ router.put('/support-tickets/:id', requireRole('admin'), async (req, res) => {
 
   // Notify the rep who logged it, best-effort, whenever the status actually changed.
   if (b.status && b.status !== ticket.status) {
-    sendEmail(buildSupportTicketEmail(ticket.id)).catch((e) => console.error('Support ticket notification email failed:', e.message));
+    sendEmail(await buildSupportTicketEmail(ticket.id)).catch((e) => console.error('Support ticket notification email failed:', e.message));
   }
 
   res.json({ ok: true });

@@ -258,7 +258,7 @@ router.post('/users/:id/send-login-details', requireRole('admin', 'manager'), as
 
     // Send welcome email. sendEmail logs the outcome instead of throwing, so
     // check the result - the password has already been reset at this point.
-    const sent = await sendEmail(buildLoginDetailsEmail(user, tempPassword));
+    const sent = await sendEmail(await buildLoginDetailsEmail(user, tempPassword));
     if (sent.status !== 'sent') {
       console.error('Login details email not sent:', sent.error);
       return res.status(502).json({ error: `Password was reset but the email was not sent (${sent.error || 'unknown error'}). Use Send login details again once email is working.` });

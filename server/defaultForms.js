@@ -16,7 +16,8 @@
 //
 // Seeding is version-gated: bump SEED_VERSION to wipe the old templates and
 // reinstall this set on the next boot (see ensureDefaultForms below).
-import { db, getSetting, setSetting } from './db.js';
+import { dbx } from './db.js';
+import { getSetting, setSetting } from './dbh.js';
 
 const SEED_VERSION = '2026-07-bakels-forms-1';
 
@@ -260,21 +261,25 @@ const DEFAULT_FORMS = [
 // existing template (and their submissions, so the FK stays valid) and install
 // the set above. Runs once per version, so admin edits made afterwards survive
 // restarts until the version is bumped again.
-export function ensureDefaultForms() {
-  if (getSetting('forms_seed_version') === SEED_VERSION) return;
+export async function ensureDefaultForms() {
+  if (await getSetting('forms_seed_version') === SEED_VERSION) return;
 
-  const insert = db.prepare(
-    'INSERT INTO form_templates (name, description, fields, category, active) VALUES (?, ?, ?, ?, 1)'
-  );
-  const reseed = db.transaction(() => {
-    db.prepare('DELETE FROM form_submissions').run();
-    db.prepare('DELETE FROM form_templates').run();
-    db.prepare("DELETE FROM sqlite_sequence WHERE name IN ('form_templates', 'form_submissions')").run();
-    for (const f of DEFAULT_FORMS) {
-      insert.run(f.name, f.description || null, JSON.stringify(f.fields), f.category === 'technical' ? 'technical' : 'general');
+  await dbx.transaction(async (tx) => {
+    await tx.prepare('DELETE FROM form_submissions').run();
+    await tx.prepare('DELETE FROM form_templates').run();
+    // Restart ids at 1, as a fresh database would.
+    if (tx.dialect === 'mssql') {
+      await tx.exec("DBCC CHECKIDENT ('form_templates', RESEED, 0); DBCC CHECKIDENT ('form_submissions', RESEED, 0)");
+    } else {
+      await tx.prepare("DELETE FROM sqlite_sequence WHERE name IN ('form_templates', 'form_submissions')").run();
     }
-    setSetting('forms_seed_version', SEED_VERSION);
+    const insert = tx.prepare(
+      'INSERT INTO form_templates (name, description, fields, category, active) VALUES (?, ?, ?, ?, 1)'
+    );
+    for (const f of DEFAULT_FORMS) {
+      await insert.run(f.name, f.description || null, JSON.stringify(f.fields), f.category === 'technical' ? 'technical' : 'general');
+    }
+    await setSetting('forms_seed_version', SEED_VERSION, tx);
   });
-  reseed();
   console.log(`[forms] reseeded ${DEFAULT_FORMS.length} field form(s) (version ${SEED_VERSION})`);
 }

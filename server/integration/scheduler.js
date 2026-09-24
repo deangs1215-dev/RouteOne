@@ -1,7 +1,8 @@
 // In-app scheduled SYSPRO sync. No external cron/Task Scheduler needed - a
 // once-a-minute tick checks whether an auto-sync is due and runs all entities.
 // Configured from the Integration page (sync_schedule + sync_daily_time).
-import { getSetting, setSetting, db, getTodayISO } from '../db.js';
+import { dbx, getTodayISO } from '../db.js';
+import { getSetting, setSetting } from '../dbh.js';
 import { runSync, SYNC_ENTITIES, matchRep } from './sync.js';
 import { getProvider } from './providers.js';
 
@@ -21,7 +22,7 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
   running = true;
   const results = [];
   try {
-    const entitiesToSync = onlyDue && trigger !== 'manual' ? getEntitiesDueNow() : SYNC_ENTITIES;
+    const entitiesToSync = onlyDue && trigger !== 'manual' ? await getEntitiesDueNow() : SYNC_ENTITIES;
     if (entitiesToSync.length === 0) {
       running = false;
       return [];
@@ -31,7 +32,7 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
       try {
         const result = await runSync(entity);
         results.push(result);
-        setSetting(`last_${entity}_sync_at`, new Date().toISOString());
+        await setSetting(`last_${entity}_sync_at`, new Date().toISOString());
       } catch (e) {
         results.push({ entity, error: e.message });
       }
@@ -40,8 +41,8 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
     const summary = results
       .map((r) => (r.error ? `${r.entity}:ERR` : `${r.entity} ${r.rows_upserted}/${r.rows_read}`))
       .join(' · ');
-    setSetting('last_auto_sync_at', new Date().toISOString());
-    setSetting('last_auto_sync_result', summary);
+    await setSetting('last_auto_sync_at', new Date().toISOString());
+    await setSetting('last_auto_sync_result', summary);
     console.log(`[scheduler] ${trigger} sync complete — ${summary}`);
   } finally {
     running = false;
@@ -50,19 +51,19 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
 }
 
 // Check if a specific entity's sync is due
-function isEntitySyncDue(entity) {
-  const schedule = getSetting(`${entity}_sync_schedule`, 'off');
+async function isEntitySyncDue(entity) {
+  const schedule = await getSetting(`${entity}_sync_schedule`, 'off');
   if (schedule === 'off') return false;
 
   const lastKey = `last_${entity}_sync_at`;
-  const last = getSetting(lastKey, null);
+  const last = await getSetting(lastKey, null);
   const minsSince = last ? (Date.now() - new Date(last).getTime()) / 60000 : Infinity;
 
   if (schedule === 'hourly') return minsSince >= 60;
   if (schedule === '4hours') return minsSince >= 240;
   if (schedule === 'daily') {
     const timeKey = `${entity}_sync_daily_time`;
-    const [h, m] = getSetting(timeKey, '02:00').split(':').map(Number);
+    const [h, m] = (await getSetting(timeKey, '02:00')).split(':').map(Number);
     const now = new Date();
     // Fires once the scheduled time has passed today, not only in the exact
     // minute it lands on - an exact-minute match silently skips the whole day
@@ -82,48 +83,52 @@ function isEntitySyncDue(entity) {
 }
 
 // Get all entities that need syncing right now
-function getEntitiesDueNow() {
-  return SYNC_ENTITIES.filter(entity => isEntitySyncDue(entity));
+async function getEntitiesDueNow() {
+  const due = [];
+  for (const entity of SYNC_ENTITIES) {
+    if (await isEntitySyncDue(entity)) due.push(entity);
+  }
+  return due;
 }
 
 // Is an auto-sync due right now, given the schedule and the last run time?
-function dueNow() {
-  return getEntitiesDueNow().length > 0;
+async function dueNow() {
+  return (await getEntitiesDueNow()).length > 0;
 }
 
 // Rep sync: match customers to their sales reps based on warehouse + rep code.
 async function runRepSync(trigger = 'schedule') {
-  const rows = await getProvider().fetch('customers');
+  const rows = await (await getProvider()).fetch('customers');
   let matched = 0, alreadyAssigned = 0, noMatch = 0, notFound = 0;
   for (const row of rows) {
-    const customer = db.prepare('SELECT id, rep_id FROM customers WHERE code = ?').get(row.code);
+    const customer = await dbx.prepare('SELECT id, rep_id FROM customers WHERE code = ?').get(row.code);
     if (!customer) { notFound++; continue; }
     if (customer.rep_id) { alreadyAssigned++; continue; }
     const repId = await matchRep(row.warehouse_code, row.rep_code);
     if (repId) {
-      db.prepare('UPDATE customers SET rep_id = ? WHERE id = ?').run(repId, customer.id);
+      await dbx.prepare('UPDATE customers SET rep_id = ? WHERE id = ?').run(repId, customer.id);
       matched++;
     } else {
       noMatch++;
     }
   }
   const summary = `${matched} matched, ${alreadyAssigned} already assigned, ${noMatch} no match, ${notFound} not found`;
-  setSetting('last_rep_sync_at', new Date().toISOString());
-  setSetting('last_rep_sync_result', summary);
+  await setSetting('last_rep_sync_at', new Date().toISOString());
+  await setSetting('last_rep_sync_result', summary);
   console.log(`[scheduler] ${trigger} rep sync complete — ${summary}`);
   return { matched, alreadyAssigned, noMatch, notFound };
 }
 
 // Is a rep sync due right now, given the schedule and the last run time?
-function repSyncDueNow() {
-  const schedule = getSetting('rep_sync_schedule', 'off');
+async function repSyncDueNow() {
+  const schedule = await getSetting('rep_sync_schedule', 'off');
   if (schedule === 'off') return false;
 
-  const last = getSetting('last_rep_sync_at', null);
+  const last = await getSetting('last_rep_sync_at', null);
   const minsSince = last ? (Date.now() - new Date(last).getTime()) / 60000 : Infinity;
 
   if (schedule === 'daily') {
-    const [h, m] = getSetting('rep_sync_daily_time', '03:00').split(':').map(Number);
+    const [h, m] = (await getSetting('rep_sync_daily_time', '03:00')).split(':').map(Number);
     const now = new Date();
     // Same catch-up fix as isEntitySyncDue above - fire once the scheduled
     // time has passed today (23h floor, not an exact-minute match), so a
@@ -137,14 +142,14 @@ function repSyncDueNow() {
 }
 
 export function startScheduler() {
-  setInterval(() => {
+  setInterval(async () => {
     try {
       // Both are async: a synchronous try/catch never sees their rejections, so
       // each needs its own .catch(). A SYSPRO connectivity blip inside
       // runRepSync's fetch would otherwise surface as an unhandled rejection,
       // which Node treats as fatal - taking the whole API down with it.
-      if (dueNow()) runAll('scheduled').catch((e) => console.error('[scheduler] sync failed:', e.message));
-      if (repSyncDueNow()) runRepSync('scheduled').catch((e) => console.error('[scheduler] rep sync failed:', e.message));
+      if (await dueNow()) runAll('scheduled').catch((e) => console.error('[scheduler] sync failed:', e.message));
+      if (await repSyncDueNow()) runRepSync('scheduled').catch((e) => console.error('[scheduler] rep sync failed:', e.message));
     } catch (e) {
       console.error('[scheduler] tick error:', e.message);
     }

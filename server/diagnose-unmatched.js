@@ -17,7 +17,7 @@ import 'dotenv/config'; // must run first - loads SECRET_KEY so the saved SYSPRO
 import { db } from './db.js';
 import { getProvider } from './integration/providers.js';
 
-const rows = await getProvider().fetch('customers');
+const rows = await (await getProvider()).fetch('customers');
 console.log(`Fetched ${rows.length} customer rows from the configured source.\n`);
 
 const findCustomer = db.prepare('SELECT id, rep_id FROM customers WHERE code = ?');

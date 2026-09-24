@@ -20,7 +20,7 @@ import { db } from './db.js';
 import { getProvider } from './integration/providers.js';
 import { REP_CODES, fetchReps } from './import-reps.js';
 
-const customers = await getProvider().fetch('customers');
+const customers = await (await getProvider()).fetch('customers');
 
 let repRows = [];
 try {

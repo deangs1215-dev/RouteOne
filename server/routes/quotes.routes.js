@@ -57,7 +57,7 @@ router.get('/quotes/:id', async (req, res) => {
 
 // Downloadable quotation PDF - same layout as the email attachment.
 router.get('/quotes/:id/pdf', async (req, res) => {
-  const quote = loadDoc('quote', req.params.id);
+  const quote = await loadDoc('quote', req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
   if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your quote' });
@@ -67,7 +67,7 @@ router.get('/quotes/:id/pdf', async (req, res) => {
     LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
   `).all(quote.id);
   try {
-    const pdf = await buildDocumentPdf({ type: 'quote', doc: quote, items, company: companyDetails() });
+    const pdf = await buildDocumentPdf({ type: 'quote', doc: quote, items, company: await companyDetails() });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Quotation-${quote.number}.pdf"`);
     res.send(pdf);
@@ -170,21 +170,21 @@ router.post('/quotes', async (req, res) => {
         // Opt-in - nothing sends to the customer unless the rep explicitly
         // ticks the box on the capture screen.
         if (customer.email && b.send_to_customer === true) {
-          const draft = buildQuoteEmail(quoteId);
+          const draft = await buildQuoteEmail(quoteId);
           if (b.send_to_rep !== true) draft.cc_addr = null;
           sendEmail(draft).catch((e) => console.error('Quote email failed:', e.message));
         } else if (b.send_to_rep === true) {
           // See the matching fix in orders.routes.js - "Send a copy to me" was
           // only ever honoured as a CC on the customer email, so it silently
           // did nothing whenever the customer wasn't also being emailed.
-          const repDraft = buildQuoteEmail(quoteId);
+          const repDraft = await buildQuoteEmail(quoteId);
           if (repDraft.cc_addr) {
             sendEmail({ ...repDraft, cc_addr: null, to_addr: repDraft.cc_addr })
               .catch((e) => console.error('Rep copy email failed:', e.message));
           }
         }
         if (isEmail(b.extra_email)) {
-          sendEmail({ ...buildQuoteEmail(quoteId), cc_addr: null, to_addr: b.extra_email.trim() })
+          sendEmail({ ...(await buildQuoteEmail(quoteId)), cc_addr: null, to_addr: b.extra_email.trim() })
             .catch((e) => console.error('Extra recipient email failed:', e.message));
         }
         // Configured recipients the rep ticked on the capture screen (unticked by
@@ -201,7 +201,7 @@ router.post('/quotes', async (req, res) => {
               AND (warehouse_id = ? OR warehouse_id IS NULL)
           `).all(...recipientIds, customer.warehouse_id);
           for (const r of recipients) {
-            sendEmail({ ...buildQuoteEmail(quoteId), cc_addr: null, to_addr: r.email })
+            sendEmail({ ...(await buildQuoteEmail(quoteId)), cc_addr: null, to_addr: r.email })
               .catch((e) => console.error('Recipient email failed:', e.message));
           }
         }
@@ -216,7 +216,7 @@ router.post('/quotes', async (req, res) => {
             WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
           `).all(...personalIds, req.user.id);
           for (const c of contacts) {
-            sendEmail({ ...buildQuoteEmail(quoteId), cc_addr: null, to_addr: c.email })
+            sendEmail({ ...(await buildQuoteEmail(quoteId)), cc_addr: null, to_addr: c.email })
               .catch((e) => console.error('Personal contact email failed:', e.message));
           }
         }
@@ -309,7 +309,7 @@ router.post('/quotes/:id/convert', async (req, res) => {
 // Send a quote to selected recipients (admin/manager only).
 router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (req, res) => {
   const { recipients = [], send_to_rep, send_to_customer } = req.body || {};
-  const quote = loadDoc('quote', req.params.id);
+  const quote = await loadDoc('quote', req.params.id);
   if (!quote) return res.status(404).json({ error: 'Quote not found' });
 
   const items = await dbx.prepare(`
@@ -345,7 +345,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
       to_addr: recip.email,
       cc_addr: null,
       subject: `Quotation ${quote.number} — ${quote.customer_name} — ${fmtR(quote.total)}`,
-      body_html: wrap(`Quote ${quote.number}`, inner)
+      body_html: await wrap(`Quote ${quote.number}`, inner)
     });
   }
 
@@ -357,13 +357,13 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
       to_addr: quote.rep_email,
       cc_addr: null,
       subject: `Quote confirmation: ${quote.number} — ${quote.customer_name}`,
-      body_html: wrap('Quote confirmation', `<p>Your quote <b>${quote.number}</b> for <b>${esc(quote.customer_name)}</b> has been sent.</p>${docTable(items, quote, 'quote')}`)
+      body_html: await wrap('Quote confirmation', `<p>Your quote <b>${quote.number}</b> for <b>${esc(quote.customer_name)}</b> has been sent.</p>${docTable(items, quote, 'quote')}`)
     });
   }
 
   // Send to customer
   if (send_to_customer && quote.customer_email) {
-    emailsToSend.push(buildQuoteEmail(quote.id));
+    emailsToSend.push(await buildQuoteEmail(quote.id));
   }
 
   // Send all emails in parallel

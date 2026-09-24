@@ -1,7 +1,7 @@
 // Shared customer/rep/warehouse data for order and quote documents, so every
 // email and PDF prints the same "To / Customer Code / Contact / Phone / Cell /
 // E-mail / VAT / Address / Placed By / Warehouse" block from one place.
-import { db } from '../db.js';
+import { dbx } from '../db.js';
 
 const COLS = `
   c.name AS customer_name, c.code AS customer_code, c.contact_name, c.phone AS customer_phone,
@@ -13,9 +13,9 @@ const COLS = `
 
 // One order or quote with its customer, rep and warehouse. Orders carry their
 // own warehouse snapshot; quotes use the customer's warehouse.
-export function loadDoc(kind, id) {
+export async function loadDoc(kind, id) {
   if (kind === 'quote') {
-    return db.prepare(`
+    return await dbx.prepare(`
       SELECT q.*, ${COLS}
       FROM quotes q JOIN customers c ON c.id = q.customer_id
       LEFT JOIN users u ON u.id = q.rep_id
@@ -23,7 +23,7 @@ export function loadDoc(kind, id) {
       WHERE q.id = ?
     `).get(id);
   }
-  return db.prepare(`
+  return await dbx.prepare(`
     SELECT o.*, ${COLS}
     FROM orders o JOIN customers c ON c.id = o.customer_id
     LEFT JOIN users u ON u.id = o.rep_id

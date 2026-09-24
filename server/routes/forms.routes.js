@@ -135,7 +135,7 @@ router.post('/form-submissions', async (req, res) => {
   `).run(b.template_id, b.visit_id || null, b.customer_id || null, req.user.id, JSON.stringify(data));
   await logActivity(req.user.id, 'submit', 'form', info.lastInsertRowid, { template: template.name });
   // Send form notification to the rep who submitted it. Best-effort, never blocks the submission response.
-  sendEmail(buildFormEmail(info.lastInsertRowid, req.user.email)).catch((e) => console.error('Form notification email failed:', e.message));
+  sendEmail(await buildFormEmail(info.lastInsertRowid, req.user.email)).catch((e) => console.error('Form notification email failed:', e.message));
   res.json({ id: info.lastInsertRowid });
 });
 

@@ -65,7 +65,7 @@ router.get('/orders/:id', async (req, res) => {
 
 // Downloadable order confirmation PDF - same layout as the email attachment.
 router.get('/orders/:id/pdf', async (req, res) => {
-  const order = loadDoc('order', req.params.id);
+  const order = await loadDoc('order', req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (scopeForUser(req.user).isRep && order.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your order' });
@@ -75,7 +75,7 @@ router.get('/orders/:id/pdf', async (req, res) => {
     LEFT JOIN products p ON p.id = i.product_id WHERE i.order_id = ?
   `).all(order.id);
   try {
-    const pdf = await buildDocumentPdf({ type: 'order', doc: order, items, company: companyDetails() });
+    const pdf = await buildDocumentPdf({ type: 'order', doc: order, items, company: await companyDetails() });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Order-${order.number}.pdf"`);
     res.send(pdf);
@@ -185,7 +185,7 @@ async function createOrder(user, b, res) {
         // Customer confirmation is opt-in - nothing sends unless the rep
         // explicitly ticks the box on the capture screen.
         if (b.send_to_customer === true && await getSetting('email_confirm_customer', '1') === '1') {
-          const confirmDraft = buildOrderConfirmationEmail(orderId);
+          const confirmDraft = await buildOrderConfirmationEmail(orderId);
           if (b.send_to_rep !== true) confirmDraft.cc_addr = null;
           sendEmail(confirmDraft).catch((e) => console.error('Confirmation email failed:', e.message));
         } else if (b.send_to_rep === true) {
@@ -194,7 +194,7 @@ async function createOrder(user, b, res) {
           // the customer has no email, or customer confirmations are switched
           // off), ticking this box silently did nothing. Send the rep their
           // own copy directly in that case, not as a CC.
-          const repDraft = buildOrderConfirmationEmail(orderId);
+          const repDraft = await buildOrderConfirmationEmail(orderId);
           if (repDraft.cc_addr) {
             sendEmail({ ...repDraft, cc_addr: null, to_addr: repDraft.cc_addr })
               .catch((e) => console.error('Rep copy email failed:', e.message));
@@ -202,7 +202,7 @@ async function createOrder(user, b, res) {
         }
         // Extra ad-hoc recipient the rep typed in on the capture screen.
         if (isEmail(b.extra_email)) {
-          sendEmail({ ...buildOrderEmail(orderId), cc_addr: null, to_addr: b.extra_email.trim() })
+          sendEmail({ ...(await buildOrderEmail(orderId)), cc_addr: null, to_addr: b.extra_email.trim() })
             .catch((e) => console.error('Extra recipient email failed:', e.message));
         }
         // Configured recipients the rep ticked on the capture screen (unticked by
@@ -220,7 +220,7 @@ async function createOrder(user, b, res) {
               AND (warehouse_id = ? OR warehouse_id IS NULL)
           `).all(...recipientIds, order.warehouse_id);
           for (const r of recipients) {
-            sendEmail({ ...buildOrderEmail(orderId), cc_addr: null, to_addr: r.email })
+            sendEmail({ ...(await buildOrderEmail(orderId)), cc_addr: null, to_addr: r.email })
               .catch((e) => console.error('Recipient email failed:', e.message));
           }
         }
@@ -235,7 +235,7 @@ async function createOrder(user, b, res) {
             WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
           `).all(...personalIds, user.id);
           for (const c of contacts) {
-            sendEmail({ ...buildOrderEmail(orderId), cc_addr: null, to_addr: c.email })
+            sendEmail({ ...(await buildOrderEmail(orderId)), cc_addr: null, to_addr: c.email })
               .catch((e) => console.error('Personal contact email failed:', e.message));
           }
         }
@@ -283,7 +283,7 @@ router.post('/orders/:id/repeat', async (req, res) => {
 // Send an order to selected recipients (admin/manager only).
 router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (req, res) => {
   const { recipients = [], send_to_rep, send_to_customer } = req.body || {};
-  const order = loadDoc('order', req.params.id);
+  const order = await loadDoc('order', req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
   const items = await dbx.prepare(`
@@ -319,7 +319,7 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
       to_addr: recip.email,
       cc_addr: null,
       subject: `Sales order ${order.number} — ${order.customer_name} — ${fmtR(order.total)}`,
-      body_html: wrap(`Order ${order.number}`, inner)
+      body_html: await wrap(`Order ${order.number}`, inner)
     });
   }
 
@@ -331,13 +331,13 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
       to_addr: order.rep_email,
       cc_addr: null,
       subject: `Order confirmation: ${order.number} — ${order.customer_name}`,
-      body_html: wrap('Order confirmation', `<p>Your order <b>${order.number}</b> for <b>${esc(order.customer_name)}</b> has been confirmed.</p>${docTable(items, order)}`)
+      body_html: await wrap('Order confirmation', `<p>Your order <b>${order.number}</b> for <b>${esc(order.customer_name)}</b> has been confirmed.</p>${docTable(items, order)}`)
     });
   }
 
   // Send to customer
   if (send_to_customer && order.customer_email) {
-    emailsToSend.push(buildOrderConfirmationEmail(order.id));
+    emailsToSend.push(await buildOrderConfirmationEmail(order.id));
   }
 
   // Send all emails in parallel

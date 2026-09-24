@@ -14,38 +14,38 @@
 //  invoice_lines: { invoice_number, product_code, qty, unit_price, line_total } - one row per invoice line, last 30 days only
 //  rep_sales: { TrnYear, TrnMonth, TrnBranch, CustomerBranch, 'Customer SalesPerson', 'Customer SP name', NSV } - one row per rep per month per branch
 //  customer_sales: { customer_code, trn_year, trn_month, nsv } - one row per customer per month, ex-VAT, last 13 months
-import { getSetting } from '../db.js';
+import { getSetting } from '../dbh.js';
 import { decryptSecret } from '../crypto.js';
 
 // overrides lets "Test connection" check the values currently typed in the
 // form (not yet saved) instead of only ever testing the last-saved settings.
 // A blank overridden password means "keep using the saved one", matching the
 // "type to replace" pattern the field already shows.
-export function sysproConfig(overrides = {}) {
-  const port = parseInt(overrides.syspro_port ?? getSetting('syspro_port', '1433'), 10);
+export async function sysproConfig(overrides = {}) {
+  const port = parseInt(overrides.syspro_port ?? await getSetting('syspro_port', '1433'), 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid SYSPRO SQL port');
   return {
-    host: overrides.syspro_host ?? getSetting('syspro_host', ''),
+    host: overrides.syspro_host ?? await getSetting('syspro_host', ''),
     port,
-    database: overrides.syspro_db ?? getSetting('syspro_db', ''),
-    user: overrides.syspro_user ?? getSetting('syspro_user', ''),
-    password: overrides.syspro_password ? overrides.syspro_password : decryptSecret(getSetting('syspro_password', '')),
-    encrypt: (overrides.syspro_encrypt ?? getSetting('syspro_encrypt', '1')) !== '0',
-    trustServerCertificate: (overrides.syspro_trust_server_certificate ?? getSetting('syspro_trust_server_certificate', '0')) === '1',
+    database: overrides.syspro_db ?? await getSetting('syspro_db', ''),
+    user: overrides.syspro_user ?? await getSetting('syspro_user', ''),
+    password: overrides.syspro_password ? overrides.syspro_password : decryptSecret(await getSetting('syspro_password', '')),
+    encrypt: (overrides.syspro_encrypt ?? await getSetting('syspro_encrypt', '1')) !== '0',
+    trustServerCertificate: (overrides.syspro_trust_server_certificate ?? await getSetting('syspro_trust_server_certificate', '0')) === '1',
     // '|| default' (not just getSetting's own fallback) because saving the
     // settings form always writes an explicit '' for every view field, even
     // ones left blank - getSetting's fallback only fires when no row exists
     // at all, so a saved-but-empty value would otherwise shadow the default.
     views: {
-      warehouses: getSetting('syspro_view_warehouses', '') || 'vw_FS_Warehouses',
-      customers: getSetting('syspro_view_customers', '') || 'vw_FS_Customers',
-      products: getSetting('syspro_view_products', '') || 'vw_FS_Products',
-      stock: getSetting('syspro_view_stock', '') || 'vw_FS_Stock',
-      customer_pricing: getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
-      invoices: getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices',
-      invoice_lines: getSetting('syspro_view_invoice_lines', '') || 'vw_FS_InvoiceLines',
-      rep_sales: getSetting('syspro_view_rep_sales', '') || 'vw_FS_RepSalesByMonth',
-      customer_sales: getSetting('syspro_view_customer_sales', '') || 'vw_FS_CustomerSalesByMonth'
+      warehouses: await getSetting('syspro_view_warehouses', '') || 'vw_FS_Warehouses',
+      customers: await getSetting('syspro_view_customers', '') || 'vw_FS_Customers',
+      products: await getSetting('syspro_view_products', '') || 'vw_FS_Products',
+      stock: await getSetting('syspro_view_stock', '') || 'vw_FS_Stock',
+      customer_pricing: await getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
+      invoices: await getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices',
+      invoice_lines: await getSetting('syspro_view_invoice_lines', '') || 'vw_FS_InvoiceLines',
+      rep_sales: await getSetting('syspro_view_rep_sales', '') || 'vw_FS_RepSalesByMonth',
+      customer_sales: await getSetting('syspro_view_customer_sales', '') || 'vw_FS_CustomerSalesByMonth'
     }
   };
 }
@@ -56,7 +56,7 @@ export function sysproConfig(overrides = {}) {
 // stuck connection on a small view, so callers pass what that entity needs.
 async function sysproPool(overrides, requestTimeout = 60000) {
   const sql = (await import('mssql')).default;
-  const cfg = sysproConfig(overrides);
+  const cfg = await sysproConfig(overrides);
   if (!cfg.host || !cfg.database || !cfg.user) {
     throw new Error('SYSPRO connection is not configured (host, database, user are required)');
   }
@@ -88,7 +88,7 @@ const sysproProvider = {
     return result.recordset[0].ok === 1;
   },
   async fetch(entity) {
-    const cfg = sysproConfig();
+    const cfg = await sysproConfig();
     const view = cfg.views[entity];
     const parts = String(view || '').split('.');
     if (!parts.length || parts.length > 2 ||
@@ -201,8 +201,8 @@ const demoProvider = {
   }
 };
 
-export function getProvider() {
-  return getSetting('intg_source', 'demo') === 'syspro' ? sysproProvider : demoProvider;
+export async function getProvider() {
+  return await getSetting('intg_source', 'demo') === 'syspro' ? sysproProvider : demoProvider;
 }
 
 // Exposed so "Test connection" can test SYSPRO specifically, with overrides

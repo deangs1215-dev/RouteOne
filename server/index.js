@@ -5,7 +5,7 @@ import compression from 'compression';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { db, UPLOAD_DIR } from './db.js';
+import { dbx, UPLOAD_DIR } from './db.js';
 import { requireAuth, customerGuard, passwordGuard, scopeForUser } from './auth.js';
 import authRoutes from './routes/auth.routes.js';
 import customerRoutes from './routes/customers.routes.js';
@@ -97,34 +97,39 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/api/health', (req, res) => {
-  const ok = db.prepare('SELECT 1 AS ok').get()?.ok === 1;
+app.get('/api/health', async (req, res) => {
+  let ok = false;
+  try {
+    ok = (await dbx.prepare('SELECT 1 AS ok').get())?.ok === 1;
+  } catch { /* database unreachable: report unhealthy rather than erroring */ }
   res.status(ok ? 200 : 503).json({ ok });
 });
 app.use('/api/auth', authRoutes);
 
-function canReadUpload(user, relativePath) {
+async function canReadUpload(user, relativePath) {
   if (scopeForUser(user).isOffice) return true;
   if (user.role_name !== 'rep') return false;
-  if (db.prepare('SELECT 1 FROM documents WHERE file_path = ?').get(relativePath)) return true;
-  if (db.prepare(`
+  if (await dbx.prepare('SELECT 1 FROM documents WHERE file_path = ?').get(relativePath)) return true;
+  if (await dbx.prepare(`
     SELECT 1 FROM visit_photos p
     JOIN visits v ON v.id = p.visit_id
     WHERE p.path = ? AND v.rep_id = ?
   `).get(relativePath, user.id)) return true;
-  return !!db.prepare(`
+  // Exact substring match (not LIKE, where '_' in a filename would be a wildcard).
+  const contains = dbx.dialect === 'mssql' ? 'CHARINDEX(?, data) > 0' : 'instr(data, ?) > 0';
+  return !!await dbx.prepare(`
     SELECT 1 FROM form_submissions
-    WHERE user_id = ? AND instr(data, ?) > 0
+    WHERE user_id = ? AND ${contains}
   `).get(user.id, relativePath);
 }
 
-app.get('/uploads/:filename', requireAuth, customerGuard, passwordGuard, (req, res, next) => {
+app.get('/uploads/:filename', requireAuth, customerGuard, passwordGuard, async (req, res, next) => {
   const filename = req.params.filename;
   if (!/^[A-Za-z0-9_-]+\.(png|jpe?g|webp|pdf)$/i.test(filename)) {
     return res.status(404).end();
   }
   const relativePath = `/uploads/${filename}`;
-  if (!canReadUpload(req.user, relativePath)) {
+  if (!await canReadUpload(req.user, relativePath)) {
     return res.status(403).json({ error: 'File access denied' });
   }
   res.setHeader('Cache-Control', 'private, no-store');
@@ -190,10 +195,10 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled promise rejection (server kept running):', reason);
 });
 
-export function startServer(port = process.env.API_PORT || 4200) {
-  const seeded = db.prepare('SELECT COUNT(*) AS n FROM roles').get().n > 0;
+export async function startServer(port = process.env.API_PORT || 4200) {
+  const seeded = (await dbx.prepare('SELECT COUNT(*) AS n FROM roles').get()).n > 0;
   if (!seeded) console.log('! Database is empty - run "npm run seed" to load demo data.');
-  else ensureDefaultForms(); // add the standard customer-visit forms if missing
+  else await ensureDefaultForms(); // add the standard customer-visit forms if missing
 
   return app.listen(port, () => {
     console.log(`RouteOne API running on http://localhost:${port}`);
@@ -208,4 +213,4 @@ export function startServer(port = process.env.API_PORT || 4200) {
 
 const isMain = process.argv[1] &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (isMain) startServer();
+if (isMain) await startServer();

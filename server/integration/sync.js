@@ -406,7 +406,7 @@ export async function runSync(entity, { provider = null } = {}) {
   syncsInFlight.add(entity);
   try {
     const fetchStart = Date.now();
-    const rows = await (provider ?? getProvider()).fetch(entity);
+    const rows = await (provider ?? await getProvider()).fetch(entity);
     const fetchMs = Date.now() - fetchStart;
     // customer_pricing arrives in SYSPRO view order, which has no relation to
     // its (customer_code, product_code) primary key - upserting 4.47M rows in

@@ -76,7 +76,7 @@ router.post('/integration/test-connection', requireRole('admin'), async (req, re
   const source = b.intg_source || await getSetting('intg_source', 'demo');
   try {
     if (source === 'syspro') await testSyspro(b);
-    else await getProvider().test();
+    else await (await getProvider()).test();
     res.json({ ok: true, source });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -120,7 +120,7 @@ router.post('/integration/sync/:entity', requireRole('admin', 'manager', 'office
 // nulls only, so re-running it is always safe.
 router.post('/integration/match-reps', requireRole('admin'), async (req, res) => {
   try {
-    const rows = await getProvider().fetch('customers');
+    const rows = await (await getProvider()).fetch('customers');
     let matched = 0, alreadyAssigned = 0, noMatch = 0, notFound = 0;
     for (const row of rows) {
       const customer = await dbx.prepare('SELECT id, rep_id FROM customers WHERE code = ?').get(row.code);
@@ -196,7 +196,7 @@ async function canEmailDoc(user, table, id) {
 router.post('/orders/:id/email-customer', async (req, res) => {
   if (!(await canEmailDoc(req.user, 'orders', req.params.id))) return res.status(403).json({ error: 'Not your order' });
   try {
-    const result = await sendEmail(buildOrderConfirmationEmail(req.params.id));
+    const result = await sendEmail(await buildOrderConfirmationEmail(req.params.id));
     await logActivity(req.user.id, 'email', 'order', req.params.id, { status: result.status, to: 'customer' });
     res.json(result);
   } catch (e) {
@@ -207,7 +207,7 @@ router.post('/orders/:id/email-customer', async (req, res) => {
 router.post('/quotes/:id/email', async (req, res) => {
   if (!(await canEmailDoc(req.user, 'quotes', req.params.id))) return res.status(403).json({ error: 'Not your quote' });
   try {
-    const result = await sendEmail(buildQuoteEmail(req.params.id));
+    const result = await sendEmail(await buildQuoteEmail(req.params.id));
     await logActivity(req.user.id, 'email', 'quote', req.params.id, { status: result.status });
     res.json(result);
   } catch (e) {

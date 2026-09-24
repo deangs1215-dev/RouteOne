@@ -112,7 +112,7 @@ router.post('/forgot-password', async (req, res) => {
   // using the whole string here would build a broken reset URL.
   const appOrigin = (process.env.APP_ORIGIN || '').split(',')[0].trim() || 'http://localhost:5190';
   const resetLink = `${appOrigin}/reset-password?token=${token}`;
-  sendEmail(buildPasswordResetEmail(user, resetLink))
+  sendEmail(await buildPasswordResetEmail(user, resetLink))
     .catch((e) => console.error('Password reset email failed:', e.message));
 
   res.json(genericResponse);
