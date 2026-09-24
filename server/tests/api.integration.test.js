@@ -589,3 +589,32 @@ test('40 simultaneous reps can authenticate and perform mixed read/write traffic
   assert.equal(failures.length, 0);
   assert.ok(percentile(0.95) < 5000, JSON.stringify(loadResult));
 });
+
+test('settings routes: rep contacts are private, recipients are admin-only, duplicates are rejected', async () => {
+  const adminCookie = await login(fixture.admin.email);
+  const repCookie = await login(fixture.reps[0].email);
+  const otherRepCookie = await login(fixture.reps[1].email);
+  const opts = (cookie, extra = {}) => ({ cookie, origin: allowedOrigin, ...extra });
+
+  const added = await request('/api/my-email-contacts', opts(repCookie, { method: 'POST', body: { name: 'Buyer', email: 'Buyer@Example.com' } }));
+  assert.equal(added.response.status, 200, JSON.stringify(added.body));
+  assert.equal(added.body.email, 'buyer@example.com');
+  const list = await request('/api/my-email-contacts', opts(repCookie));
+  assert.equal(list.body.length, 1);
+  assert.equal((await request('/api/my-email-contacts', opts(otherRepCookie))).body.length, 0);
+  // Another rep cannot delete it, the owner can.
+  assert.equal((await request(`/api/my-email-contacts/${added.body.id}`, opts(otherRepCookie, { method: 'DELETE' }))).response.status, 404);
+  assert.equal((await request(`/api/my-email-contacts/${added.body.id}`, opts(repCookie, { method: 'DELETE' }))).response.status, 200);
+
+  assert.equal((await request('/api/email-recipients', opts(repCookie))).response.status, 403);
+  const create = { name: 'Orders Desk', email: 'Desk@Example.com', category: 'orders' };
+  const made = await request('/api/email-recipients', opts(adminCookie, { method: 'POST', body: create }));
+  assert.equal(made.response.status, 200, JSON.stringify(made.body));
+  assert.equal(made.body.email, 'desk@example.com');
+  const dupe = await request('/api/email-recipients', opts(adminCookie, { method: 'POST', body: create }));
+  assert.equal(dupe.response.status, 400);
+  assert.equal(dupe.body.error, 'Email already exists');
+  const all = await request('/api/email-recipients', opts(adminCookie));
+  assert.ok(all.body.some((r) => r.id === made.body.id));
+  assert.equal((await request(`/api/email-recipients/${made.body.id}`, opts(adminCookie, { method: 'DELETE' }))).response.status, 200);
+});

@@ -34,6 +34,16 @@ export function toNamedParams(sql) {
   return { sql: out, count: n };
 }
 
+// True when `err` is a duplicate-key violation on either backend. SQLite
+// reports SQLITE_CONSTRAINT_UNIQUE / _PRIMARYKEY; SQL Server error numbers 2627
+// (constraint) and 2601 (unique index). Route code should use this instead of
+// matching 'UNIQUE' in the message, which only one backend's wording contains.
+export function isUniqueViolation(err) {
+  const n = err?.number ?? err?.originalError?.info?.number;
+  return err?.code === 'SQLITE_CONSTRAINT_UNIQUE' || err?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' ||
+    n === 2627 || n === 2601;
+}
+
 // --- SQLite backend ---------------------------------------------------------
 // better-sqlite3 is synchronous and has one connection, so a transaction that
 // awaits mid-way would interleave with other requests. Transactions are

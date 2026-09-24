@@ -164,7 +164,10 @@ export let dbx = createSqliteDbx(db);
 // Server it opens the connection pool. NOTE: do not enable DB_BACKEND=mssql
 // until every caller of the synchronous `db` (including the helpers below)
 // has moved to dbx - they still read the SQLite file.
+let initialised = false;
 export async function initDb() {
+  if (initialised) return;
+  initialised = true;
   if ((process.env.DB_BACKEND || 'sqlite').toLowerCase() !== 'mssql') return;
   const { default: sql } = await import('mssql');
   const pool = await new sql.ConnectionPool({
@@ -501,3 +504,6 @@ export function adjustOrderStock(orderId, direction) {
     if (order.warehouse_id) updateWarehouse.run(delta, item.product_id, order.warehouse_id);
   }
 }
+
+// Connect before any importer runs - modules like auth.js read settings at load.
+await initDb();

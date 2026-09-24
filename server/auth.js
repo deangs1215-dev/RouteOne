@@ -1,14 +1,15 @@
 import jwt from 'jsonwebtoken';
-import { db, getSetting, setSetting } from './db.js';
+import { db, dbx } from './db.js';
+import { getSetting, setSetting } from './dbh.js';
 import crypto from 'crypto';
 
 export const SESSION_COOKIE = 'routeone_session';
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
-let secret = getSetting('jwt_secret');
+let secret = await getSetting('jwt_secret');
 if (!secret) {
   secret = crypto.randomBytes(32).toString('hex');
-  setSetting('jwt_secret', secret);
+  await setSetting('jwt_secret', secret);
 }
 export const JWT_SECRET = secret;
 
@@ -62,37 +63,40 @@ export function clearSessionCookie(res) {
   });
 }
 
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const bearer = header.startsWith('Bearer ') ? header.slice(7) : null;
   const token = bearer || cookieValue(req, SESSION_COOKIE);
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
+  let payload;
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    const user = db.prepare(`
-      SELECT u.*, r.name AS role_name
-      FROM users u JOIN roles r ON r.id = u.role_id
-      WHERE u.id = ? AND u.active = 1
-    `).get(payload.id);
-    if (!user) return res.status(401).json({ error: 'User not found or deactivated' });
-    // Tokens issued before the account's password last changed are dead. A token
-    // predating the column has no `v` and reads as 0, matching the default, so
-    // existing sessions survive the migration until they expire on their own.
-    if ((payload.v ?? 0) !== (user.token_version ?? 0)) {
-      return res.status(401).json({ error: 'Session ended - please sign in again' });
-    }
-    // Deny-by-default on role: scopeForUser can only scope a role it recognises,
-    // so an unrecognised one is refused here rather than reaching a handler.
-    if (!KNOWN_ROLES.includes(user.role_name)) {
-      return res.status(403).json({ error: 'Your account role is not recognised - contact an administrator' });
-    }
-    user.role = user.role_name; // alias: several handlers check req.user.role
-    req.user = user;
-    req.authSource = bearer ? 'bearer' : 'cookie';
-    next();
+    payload = jwt.verify(token, JWT_SECRET);
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+  // Outside the verify try/catch: a database failure is a 500 (Express 5 routes
+  // a rejected async middleware to the error handler), not "invalid token".
+  const user = await dbx.prepare(`
+    SELECT u.*, r.name AS role_name
+    FROM users u JOIN roles r ON r.id = u.role_id
+    WHERE u.id = ? AND u.active = 1
+  `).get(payload.id);
+  if (!user) return res.status(401).json({ error: 'User not found or deactivated' });
+  // Tokens issued before the account's password last changed are dead. A token
+  // predating the column has no `v` and reads as 0, matching the default, so
+  // existing sessions survive the migration until they expire on their own.
+  if ((payload.v ?? 0) !== (user.token_version ?? 0)) {
+    return res.status(401).json({ error: 'Session ended - please sign in again' });
+  }
+  // Deny-by-default on role: scopeForUser can only scope a role it recognises,
+  // so an unrecognised one is refused here rather than reaching a handler.
+  if (!KNOWN_ROLES.includes(user.role_name)) {
+    return res.status(403).json({ error: 'Your account role is not recognised - contact an administrator' });
+  }
+  user.role = user.role_name; // alias: several handlers check req.user.role
+  req.user = user;
+  req.authSource = bearer ? 'bearer' : 'cookie';
+  next();
 }
 
 export function requireRole(...roles) {
@@ -134,6 +138,14 @@ export function withoutCostFields(user, row) {
 export function userCanAccessCustomer(user, customerId) {
   if (!scopeForUser(user).isRep) return true;
   const customer = db.prepare('SELECT rep_id FROM customers WHERE id = ?').get(customerId);
+  return !!customer && customer.rep_id === user.id;
+}
+
+// Async twin for migrated callers; the synchronous version above goes once
+// every caller has moved.
+export async function userCanAccessCustomerAsync(user, customerId) {
+  if (!scopeForUser(user).isRep) return true;
+  const customer = await dbx.prepare('SELECT rep_id FROM customers WHERE id = ?').get(customerId);
   return !!customer && customer.rep_id === user.id;
 }
 
