@@ -99,7 +99,7 @@ async function runRepSync(trigger = 'schedule') {
     const customer = db.prepare('SELECT id, rep_id FROM customers WHERE code = ?').get(row.code);
     if (!customer) { notFound++; continue; }
     if (customer.rep_id) { alreadyAssigned++; continue; }
-    const repId = matchRep(row.warehouse_code, row.rep_code);
+    const repId = await matchRep(row.warehouse_code, row.rep_code);
     if (repId) {
       db.prepare('UPDATE customers SET rep_id = ? WHERE id = ?').run(repId, customer.id);
       matched++;
