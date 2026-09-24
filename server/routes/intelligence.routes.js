@@ -31,7 +31,7 @@ export async function customerIntel(repId = null) {
         UNION ALL
         SELECT MAX(i2.invoice_date) AS d FROM invoice_items ii2 JOIN invoices i2 ON i2.id = ii2.invoice_id
           WHERE ii2.delivery_customer_id = c.id
-      )) AS last_invoice_at,
+      ) latest) AS last_invoice_at,
       (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled'
         AND o.order_date >= date('now', '-180 days')) AS freq_180,
       (SELECT COALESCE(SUM(total), 0) FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled'

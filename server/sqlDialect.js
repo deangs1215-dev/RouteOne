@@ -23,6 +23,21 @@
 // CONVERT(VARCHAR(n), x, 23) also truncates a text column ('2026-03-01 10:00')
 // to its date part, matching SQLite's date(text).
 
+// If a comment (-- to end of line, or /* ... */) starts at s[i], the index just
+// past it; otherwise -1. Comments can contain apostrophes and '?' that must not
+// be read as string literals or parameters.
+export function skipComment(s, i) {
+  if (s[i] === '-' && s[i + 1] === '-') {
+    const eol = s.indexOf('\n', i);
+    return eol === -1 ? s.length : eol;
+  }
+  if (s[i] === '/' && s[i + 1] === '*') {
+    const end = s.indexOf('*/', i + 2);
+    return end === -1 ? s.length : end + 2;
+  }
+  return -1;
+}
+
 // Index just past the string literal starting at s[i] === "'" ('' escapes a quote).
 function skipLiteral(s, i) {
   i += 1;
@@ -45,6 +60,8 @@ function splitArgs(inner) {
   let start = 0;
   for (let i = 0; i < inner.length; i++) {
     const c = inner[i];
+    const cEnd = skipComment(inner, i);
+    if (cEnd !== -1) { i = cEnd - 1; continue; }
     if (c === "'") { i = skipLiteral(inner, i) - 1; continue; }
     if (c === '(') depth += 1;
     else if (c === ')') depth -= 1;
@@ -103,6 +120,12 @@ function translateFunctions(sql) {
   let i = 0;
   while (i < sql.length) {
     const c = sql[i];
+    const cEnd = skipComment(sql, i);
+    if (cEnd !== -1) {
+      out += sql.slice(i, cEnd);
+      i = cEnd;
+      continue;
+    }
     if (c === "'") {
       const end = skipLiteral(sql, i);
       out += sql.slice(i, end);
@@ -120,6 +143,8 @@ function translateFunctions(sql) {
         let depth = 0;
         let end = k;
         for (; end < sql.length; end++) {
+          const ce = skipComment(sql, end);
+          if (ce !== -1) { end = ce - 1; continue; }
           if (sql[end] === "'") { end = skipLiteral(sql, end) - 1; continue; }
           if (sql[end] === '(') depth += 1;
           else if (sql[end] === ')') { depth -= 1; if (depth === 0) break; }
@@ -150,6 +175,8 @@ function translateLimit(sql) {
   let i = 0;
   while (i < sql.length) {
     const c = sql[i];
+    const cEnd = skipComment(sql, i);
+    if (cEnd !== -1) { i = cEnd; continue; }
     if (c === "'") { i = skipLiteral(sql, i); continue; }
     if (c === '(') { stack.push(i); i += 1; continue; }
     if (c === ')') { stack.pop(); i += 1; continue; }

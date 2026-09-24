@@ -58,7 +58,7 @@ router.get('/support-tickets', async (req, res) => {
     LEFT JOIN orders o ON o.id = t.order_id
     LEFT JOIN users r ON r.id = t.resolved_by
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-    ORDER BY t.status = 'resolved' ASC, t.created_at DESC
+    ORDER BY CASE WHEN t.status = 'resolved' THEN 1 ELSE 0 END ASC, t.created_at DESC
   `).all(...params);
   res.json(rows);
 });

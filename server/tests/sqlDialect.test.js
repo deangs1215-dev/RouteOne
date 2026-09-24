@@ -45,3 +45,11 @@ test('sqliteToTsql refuses forms it cannot translate faithfully', () => {
   assert.throws(() => sqliteToTsql("SELECT a FROM t UNION SELECT b FROM u LIMIT 3"), /UNION/);
   assert.throws(() => sqliteToTsql("SELECT datetime(x)"), /datetime\('now'/);
 });
+
+test('SQL comments with apostrophes and ? are left alone', () => {
+  const sql = "SELECT a, -- it's a note about date('now') and ?\n  b FROM t /* don't 'touch' */ WHERE d >= date('now', '-1 day') LIMIT 3";
+  assert.equal(
+    sqliteToTsql(sql),
+    "SELECT TOP (3) a, -- it's a note about date('now') and ?\n  b FROM t /* don't 'touch' */ WHERE d >= CONVERT(VARCHAR(10), DATEADD(day, -1, SYSUTCDATETIME()), 23)"
+  );
+});

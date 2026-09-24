@@ -38,3 +38,9 @@ test('sqlite dbx: transaction commits, rolls back on throw, and serializes', asy
   const rows = await dbx.prepare('SELECT v FROM t ORDER BY v').all();
   assert.deepEqual(rows.map((r) => r.v), [1, 11, 12, 13]);
 });
+
+test('toNamedParams ignores ? and quotes inside comments', () => {
+  const r = toNamedParams("SELECT a -- what's this? \n FROM t /* still ? 'open */ WHERE x = ? AND y = ?");
+  assert.equal(r.count, 2);
+  assert.equal(r.sql, "SELECT a -- what's this? \n FROM t /* still ? 'open */ WHERE x = @p0 AND y = @p1");
+});

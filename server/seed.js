@@ -11,6 +11,21 @@ const WIPE_TABLES = ['rep_locations', 'form_submissions', 'form_templates', 'vis
   'invoices', 'order_items', 'orders', 'visits', 'customer_prices', 'customer_contacts',
   'customers', 'warehouses', 'products', 'product_categories', 'users', 'territories', 'roles', 'activity_log'];
 
+// On SQL Server the data outlives the process, unlike the throwaway SQLite file
+// this was written for, so tables that reference a wiped table (tasks, tickets,
+// drafts, ...) must be emptied too or their rows would dangle - and block the
+// DELETE. Found from the schema's foreign keys, transitively.
+if (dbx.dialect === 'mssql') {
+  const fks = await dbx.prepare('SELECT OBJECT_NAME(parent_object_id) AS child, OBJECT_NAME(referenced_object_id) AS parent FROM sys.foreign_keys').all();
+  const wipe = new Set(WIPE_TABLES);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const { child, parent } of fks) {
+      if (wipe.has(parent) && !wipe.has(child)) { wipe.add(child); WIPE_TABLES.push(child); grew = true; }
+    }
+  }
+}
+
 // Foreign keys are switched off while the tables are emptied in any order, then
 // back on. PRAGMA on SQLite (outside a transaction); NOCHECK/CHECK on SQL Server.
 if (dbx.dialect === 'mssql') {

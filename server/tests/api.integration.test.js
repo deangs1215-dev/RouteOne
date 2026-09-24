@@ -666,10 +666,11 @@ test('small route files still work after the async migration (tasks, documents, 
   ok(await request(`/api/drafts/${draft.body.id}`, o(repCookie, 'DELETE')), 'delete draft');
 });
 
-// Only in shadow-validation mode (DBX_SHADOW_LOG set, see server/dbxShadow.js):
-// hit every GET route as admin and as a rep so their SQL is bound against the
-// SQL Server schema. Responses are not asserted - only that the server survives.
-test('shadow crawl: visit every GET route', { skip: !process.env.DBX_SHADOW_LOG }, async () => {
+// Runs in shadow-validation mode (DBX_SHADOW_LOG set, see server/dbxShadow.js) and
+// against SQL Server: hits every GET route as admin and as a rep. Their SQL is
+// bound against the SQL Server schema (shadow mode) or executed for real
+// (mssql mode). Any 5xx fails the test - the routes' data is not asserted.
+test('crawl: every GET route answers without a server error', { skip: !(process.env.DBX_SHADOW_LOG || useMssql) }, async () => {
   const routesDir = path.join(projectRoot, 'server', 'routes');
   const paths = new Set();
   for (const f of fs.readdirSync(routesDir)) {
@@ -679,13 +680,16 @@ test('shadow crawl: visit every GET route', { skip: !process.env.DBX_SHADOW_LOG 
   }
   const adminCookie = await login(fixture.admin.email);
   const repCookie = await login(fixture.reps[0].email);
+  const failures = [];
   let visited = 0;
   for (const p of paths) {
-    for (const cookie of [adminCookie, repCookie]) {
-      await request(`/api${p}`, { cookie, origin: allowedOrigin }).catch(() => {});
+    for (const [who, cookie] of [['admin', adminCookie], ['rep', repCookie]]) {
+      const r = await request(`/api${p}`, { cookie, origin: allowedOrigin }).catch((e) => ({ response: { status: 599 }, body: { error: e.message } }));
       visited += 1;
+      if (r.response.status >= 500) failures.push(`${who} GET ${p} -> ${r.response.status}`);
     }
   }
-  console.log(`shadow crawl: ${paths.size} paths, ${visited} requests`);
-  assert.equal((await request('/api/health')).response.status, 200);
+  if (process.env.DBX_SHADOW_LOG) await request('/api/__shadow/flush'); // wait for the SQL Server checks to finish
+  console.log(`crawl: ${paths.size} paths, ${visited} requests, ${failures.length} server errors`);
+  assert.deepEqual(failures, []);
 });

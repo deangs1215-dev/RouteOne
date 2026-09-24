@@ -19,7 +19,7 @@
 // backend rewrites `?` to @p0, @p1... (skipping string literals) and translates
 // the SQLite-only forms to T-SQL - see sqlDialect.js.
 
-import { sqliteToTsql } from './sqlDialect.js';
+import { sqliteToTsql, skipComment } from './sqlDialect.js';
 import { shadowValidate } from './dbxShadow.js';
 
 // Rewrites `?` to @pN outside single-quoted string literals.
@@ -29,6 +29,12 @@ export function toNamedParams(sql) {
   let inString = false;
   for (let i = 0; i < sql.length; i++) {
     const c = sql[i];
+    const cEnd = skipComment(sql, i);
+    if (cEnd !== -1) {
+      out += sql.slice(i, cEnd);
+      i = cEnd - 1;
+      continue;
+    }
     if (c === "'") {
       // '' inside a literal is an escaped quote, so toggling twice is correct.
       inString = !inString;

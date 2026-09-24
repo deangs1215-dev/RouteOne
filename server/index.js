@@ -104,6 +104,12 @@ app.get('/api/health', async (req, res) => {
   } catch { /* database unreachable: report unhealthy rather than erroring */ }
   res.status(ok ? 200 : 503).json({ ok });
 });
+// Shadow-validation mode only (see dbxShadow.js): lets a test wait for the
+// background SQL Server checks to finish before it kills this process.
+if (process.env.DBX_SHADOW_LOG) {
+  const { shadowIdle } = await import('./dbxShadow.js');
+  app.get('/api/__shadow/flush', async (req, res) => { await shadowIdle(); res.json({ ok: true }); });
+}
 app.use('/api/auth', authRoutes);
 
 async function canReadUpload(user, relativePath) {
