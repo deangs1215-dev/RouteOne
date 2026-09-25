@@ -6,6 +6,12 @@ import { useAuth } from '../auth';
 
 const STATUS_COLORS = { completed: '#16a34a', failed: '#dc2626', running: '#f59e0b', sent: '#16a34a', pending: '#f59e0b' };
 
+// Keep in step with SYNC_ENTITIES in server/integration/sync.js. Both the
+// "sync now" buttons and the schedule rows below are driven off this one list -
+// they were previously two separate hardcoded arrays, so adding an entity to
+// the server left it invisible in the UI.
+const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'customer_pricing', 'invoices', 'invoice_lines', 'rep_sales', 'customer_sales'];
+
 export default function Integration() {
   const { user } = useAuth();
   const isAdmin = user.role === 'admin';
@@ -82,7 +88,7 @@ export default function Integration() {
     setNotice('');
     try {
       const r = await api.post(`/integration/sync/${entity}`);
-      const parts = (r.results || [r]).map((x) => `${x.entity}: ${x.rows_upserted}/${x.rows_read}${x.row_errors ? ` (${x.row_errors} errors)` : ''}`);
+      const parts = (r.results || [r]).map((x) => `${x.entity}: ${x.rows_upserted}/${x.rows_read}${x.rows_skipped ? ` (${x.rows_skipped} skipped, no match)` : ''}${x.row_errors ? ` (${x.row_errors} errors)` : ''}`);
       setNotice(`Sync done — ${parts.join(', ')}`);
       load();
     } catch (e) { setError(e.message); }
@@ -196,6 +202,9 @@ export default function Integration() {
               <Field label="Stock view"><input className="input" value={settings.syspro_view_stock || ''} onChange={set('syspro_view_stock')} placeholder="vw_FS_Stock" /></Field>
               <Field label="Customer pricing view"><input className="input" value={settings.syspro_view_customer_pricing || ''} onChange={set('syspro_view_customer_pricing')} placeholder="vw_FS_CustomerPricing_ContractBuyingGroup" /></Field>
               <Field label="Invoices view"><input className="input" value={settings.syspro_view_invoices || ''} onChange={set('syspro_view_invoices')} placeholder="vw_FS_Invoices" /></Field>
+              <Field label="Invoice lines view"><input className="input" value={settings.syspro_view_invoice_lines || ''} onChange={set('syspro_view_invoice_lines')} placeholder="vw_FS_InvoiceLines" /></Field>
+              <Field label="Rep sales view"><input className="input" value={settings.syspro_view_rep_sales || ''} onChange={set('syspro_view_rep_sales')} placeholder="vw_FS_RepSalesByMonth" /></Field>
+              <Field label="Customer sales view"><input className="input" value={settings.syspro_view_customer_sales || ''} onChange={set('syspro_view_customer_sales')} placeholder="vw_FS_CustomerSalesByMonth" /></Field>
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <button className="btn-primary" onClick={save} disabled={busy === 'save'}>{busy === 'save' ? 'Saving…' : 'Save settings'}</button>
@@ -215,7 +224,7 @@ export default function Integration() {
 
       <Card title="Data sync" actions={
         <div className="flex flex-wrap items-center gap-2">
-          {['warehouses', 'customers', 'products', 'stock', 'customer_pricing', 'invoices'].map((e) => (
+          {SYNC_ENTITIES.map((e) => (
             <button key={e} className="btn-secondary text-xs capitalize" onClick={() => sync(e)} disabled={!!busy}>
               {busy === e ? 'Syncing…' : e.replace('_', ' ')}
             </button>
@@ -239,7 +248,7 @@ export default function Integration() {
           <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
             <h3 className="font-medium text-sm mb-3">Automatic data sync</h3>
             <div className="space-y-3">
-              {['warehouses', 'customers', 'products', 'stock', 'customer_pricing', 'invoices'].map((entity) => (
+              {SYNC_ENTITIES.map((entity) => (
                 <div key={entity} className="flex flex-wrap items-end gap-3 pb-3 border-b border-slate-200 last:border-b-0 last:pb-0">
                   <Field label={`${entity.replace('_', ' ').replace(/^./, (c) => c.toUpperCase())} schedule`}>
                     <select className="input" value={settings[`${entity}_sync_schedule`] || 'off'} onChange={set(`${entity}_sync_schedule`)}>
@@ -293,7 +302,7 @@ export default function Integration() {
           </div>
           </>
         )}
-        <Table headers={['#', 'Source', 'Entity', 'Read', 'Upserted', 'Status', 'Started', 'Errors']}
+        <Table headers={['#', 'Source', 'Entity', 'Read', 'Upserted', 'Skipped', 'Status', 'Started', 'Errors']}
           empty={runs.length === 0 && 'No syncs yet — hit "Sync all".'}>
           {runs.map((r) => (
             <tr key={r.id}>
@@ -302,6 +311,7 @@ export default function Integration() {
               <td className="td capitalize font-medium">{r.entity}</td>
               <td className="td">{r.rows_read}</td>
               <td className="td">{r.rows_upserted}</td>
+              <td className={`td ${r.rows_skipped > 0 ? 'text-amber-600 font-medium' : 'text-slate-400'}`}>{r.rows_skipped || 0}</td>
               <td className="td"><Badge color={STATUS_COLORS[r.status]}>{r.status}</Badge></td>
               <td className="td text-slate-500">{fmtDateTime(r.started_at)}</td>
               <td className="td text-xs text-red-600 max-w-[280px] truncate" title={r.error || ''}>{r.error || '—'}</td>

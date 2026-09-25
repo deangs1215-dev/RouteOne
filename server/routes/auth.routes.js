@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { db, logActivity } from '../db.js';
+import { dbx } from '../db.js';
+import { logActivity } from '../dbh.js';
 import {
   signToken, requireAuth, setSessionCookie, clearSessionCookie, passwordIsStrong
 } from '../auth.js';
@@ -56,7 +57,7 @@ router.post('/login', async (req, res) => {
   if (keys.some(loginBlocked)) {
     return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
   }
-  const user = db.prepare(`
+  const user = await dbx.prepare(`
     SELECT u.*, r.name AS role_name FROM users u
     JOIN roles r ON r.id = u.role_id
     WHERE lower(u.email) = lower(?) AND u.active = 1
@@ -70,21 +71,21 @@ router.post('/login', async (req, res) => {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
   if (!passwordIsStrong(password) && !user.must_change_password) {
-    db.prepare('UPDATE users SET must_change_password = 1 WHERE id = ?').run(user.id);
+    await dbx.prepare('UPDATE users SET must_change_password = 1 WHERE id = ?').run(user.id);
     user.must_change_password = 1;
   }
   keys.forEach((key) => failedLogins.delete(key));
-  logActivity(user.id, 'login', 'user', user.id);
+  await logActivity(user.id, 'login', 'user', user.id);
   const token = signToken(user);
   setSessionCookie(res, token);
   res.json({ user: publicUser(user) });
 });
 
-router.get('/me', requireAuth, (req, res) => {
+router.get('/me', requireAuth, async (req, res) => {
   res.json(publicUser(req.user));
 });
 
-router.post('/logout', (req, res) => {
+router.post('/logout', async (req, res) => {
   clearSessionCookie(res);
   res.json({ ok: true });
 });
@@ -96,19 +97,22 @@ router.post('/forgot-password', async (req, res) => {
   const genericResponse = { ok: true, message: "If that email is on file, we've sent a reset link." };
   if (!normalizedEmail) return res.json(genericResponse);
 
-  const user = db.prepare(`
+  const user = await dbx.prepare(`
     SELECT u.* FROM users u WHERE lower(u.email) = lower(?) AND u.active = 1
   `).get(normalizedEmail);
   if (!user) return res.json(genericResponse);
 
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + RESET_TOKEN_TTL_MS).toISOString();
-  db.prepare('UPDATE users SET reset_token_hash = ?, reset_token_expires = ? WHERE id = ?')
+  await dbx.prepare('UPDATE users SET reset_token_hash = ?, reset_token_expires = ? WHERE id = ?')
     .run(hashToken(token), expires, user.id);
 
-  const appOrigin = process.env.APP_ORIGIN || 'http://localhost:5190';
+  // APP_ORIGIN may list several allowed origins (comma-separated) when the app
+  // is reachable by both hostname and IP. Only the first is the canonical one -
+  // using the whole string here would build a broken reset URL.
+  const appOrigin = (process.env.APP_ORIGIN || '').split(',')[0].trim() || 'http://localhost:5190';
   const resetLink = `${appOrigin}/reset-password?token=${token}`;
-  sendEmail(buildPasswordResetEmail(user, resetLink))
+  sendEmail(await buildPasswordResetEmail(user, resetLink))
     .catch((e) => console.error('Password reset email failed:', e.message));
 
   res.json(genericResponse);
@@ -119,7 +123,7 @@ router.post('/reset-password', async (req, res) => {
   if (typeof token !== 'string' || !token) {
     return res.status(400).json({ error: 'Invalid or expired reset link' });
   }
-  const user = db.prepare(`
+  const user = await dbx.prepare(`
     SELECT * FROM users WHERE reset_token_hash = ? AND reset_token_expires > datetime('now') AND active = 1
   `).get(hashToken(token));
   if (!user) return res.status(400).json({ error: 'Invalid or expired reset link' });
@@ -127,9 +131,16 @@ router.post('/reset-password', async (req, res) => {
   if (!passwordIsStrong(newPassword)) {
     return res.status(400).json({ error: 'Use at least 12 characters and avoid common passwords' });
   }
-  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, reset_token_hash = NULL, reset_token_expires = NULL WHERE id = ?')
-    .run(await bcrypt.hash(newPassword, 12), user.id);
-  logActivity(user.id, 'password_reset', 'user', user.id);
+  // token_version + 1 ends every existing session for this account. A reset is
+  // the one moment where that is the whole point: whoever prompted it may be
+  // holding a stolen token, and it must stop working now, not in 12 hours.
+  await dbx.prepare(`
+    UPDATE users SET password_hash = ?, must_change_password = 0,
+      reset_token_hash = NULL, reset_token_expires = NULL,
+      token_version = token_version + 1
+    WHERE id = ?
+  `).run(await bcrypt.hash(newPassword, 12), user.id);
+  await logActivity(user.id, 'password_reset', 'user', user.id);
   res.json({ ok: true });
 });
 
@@ -144,10 +155,13 @@ router.post('/change-password', requireAuth, async (req, res) => {
   if (await bcrypt.compare(newPassword, req.user.password_hash)) {
     return res.status(400).json({ error: 'New password must be different' });
   }
-  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')
-    .run(await bcrypt.hash(newPassword, 12), req.user.id);
-  logActivity(req.user.id, 'password_change', 'user', req.user.id);
-  const user = { ...req.user, must_change_password: 0 };
+  // Ends the user's other sessions, then re-issues a token at the new version
+  // so the browser doing the change stays signed in.
+  const nextVersion = (req.user.token_version ?? 0) + 1;
+  await dbx.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, token_version = ? WHERE id = ?')
+    .run(await bcrypt.hash(newPassword, 12), nextVersion, req.user.id);
+  await logActivity(req.user.id, 'password_change', 'user', req.user.id);
+  const user = { ...req.user, must_change_password: 0, token_version: nextVersion };
   const token = signToken(user);
   setSessionCookie(res, token);
   res.json({ user: publicUser(user) });

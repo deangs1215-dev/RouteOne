@@ -32,6 +32,8 @@ const QuoteDetail = lazy(() => import('./pages/QuoteDetail'));
 const FormsAdmin = lazy(() => import('./pages/FormsAdmin'));
 const Documents = lazy(() => import('./pages/Documents'));
 const EmailSettings = lazy(() => import('./pages/EmailSettings'));
+const SalesPush = lazy(() => import('./pages/SalesPush'));
+const Monitoring = lazy(() => import('./pages/Monitoring'));
 const Visits = lazy(() => import('./pages/Visits'));
 const RoutesPage = lazy(() => import('./pages/Routes'));
 const LiveMap = lazy(() => import('./pages/LiveMap'));
@@ -44,7 +46,9 @@ const Users = lazy(() => import('./pages/Users'));
 const Team = lazy(() => import('./pages/Team'));
 const RepDetail = lazy(() => import('./pages/RepDetail'));
 const Tasks = lazy(() => import('./pages/Tasks'));
+const SupportTickets = lazy(() => import('./pages/SupportTickets'));
 const Invoices = lazy(() => import('./pages/Invoices'));
+const InvoiceDetail = lazy(() => import('./pages/InvoiceDetail'));
 const MobileApp = lazy(() => import('./mobile/MobileApp'));
 
 export default function App() {
@@ -81,6 +85,7 @@ export default function App() {
           <Route path="/orders" element={<Orders />} />
           <Route path="/orders/:id" element={<OrderDetail />} />
           <Route path="/invoices" element={<Invoices />} />
+          <Route path="/invoices/:id" element={<InvoiceDetail />} />
           <Route path="/quotes" element={<Quotes />} />
           <Route path="/quotes/:id" element={<QuoteDetail />} />
           <Route path="/forms" element={<FormsAdmin />} />
@@ -88,6 +93,7 @@ export default function App() {
           <Route path="/visits" element={<Visits />} />
           <Route path="/routes" element={<RoutesPage />} />
           <Route path="/tasks" element={<Tasks />} />
+          <Route path="/support" element={<SupportTickets />} />
           <Route path="/kpis" element={<Kpis />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/ai" element={<SalesAI />} />
@@ -97,8 +103,10 @@ export default function App() {
           {!isRep && <Route path="/team" element={<Team />} />}
           {!isRep && <Route path="/team/:id" element={<RepDetail />} />}
           {!isRep && <Route path="/email" element={<EmailSettings />} />}
+          {['admin', 'manager'].includes(user.role) && <Route path="/sales-push" element={<SalesPush />} />}
           {!isRep && <Route path="/integration" element={<Integration />} />}
           {!isRep && <Route path="/backups" element={<Backups />} />}
+          {!isRep && <Route path="/monitoring" element={<Monitoring />} />}
           {!isRep && <Route path="/users" element={<Users />} />}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

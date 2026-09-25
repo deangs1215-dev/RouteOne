@@ -1,18 +1,14 @@
-// Analytics: trends, product performance, margin, quote funnel.
+// Analytics: current month trends, product performance, margin, quote funnel.
 import { useEffect, useState } from 'react';
 import { api, fmtR } from '../api';
 import { Card, Stat, Table, Spinner } from '../components/ui';
 
-const PERIODS = [[30, '30 days'], [90, '90 days'], [180, '6 months'], [365, '12 months']];
-
 export default function Analytics() {
-  const [days, setDays] = useState(90);
   const [data, setData] = useState(null);
 
   useEffect(() => {
-    setData(null);
-    api.get(`/analytics?days=${days}`).then(setData).catch(console.error);
-  }, [days]);
+    api.get(`/analytics?days=30`).then(setData).catch(console.error);
+  }, []);
 
   const exportCsv = () => {
     if (!data) return;
@@ -21,40 +17,37 @@ export default function Analytics() {
     const csv = lines.map((l) => l.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = `product-performance-${days}d.csv`;
+    a.download = 'product-performance.csv';
     a.click();
   };
 
   if (!data) return <Spinner />;
   const { totals, monthly, topProducts, quoteFunnel } = data;
   const maxMonthly = Math.max(...monthly.map((m) => m.sales), 1);
+  const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const monthLabel = (m) => MONTH_NAMES[parseInt(m.slice(5, 7), 10) - 1];
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-bold">Analytics</h1>
-        <div className="flex gap-2">
-          {PERIODS.map(([d, label]) => (
-            <button key={d} className={days === d ? 'btn-primary text-xs' : 'btn-secondary text-xs'} onClick={() => setDays(d)}>{label}</button>
-          ))}
-          <button className="btn-secondary text-xs" onClick={exportCsv}>⬇ CSV</button>
-        </div>
+        <button className="btn-secondary text-xs" onClick={exportCsv}>⬇ CSV</button>
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <Stat label="Revenue" value={fmtR(totals.revenue)} accent="text-brand-600" sub={`last ${days} days`} />
-        <Stat label="Gross margin" value={fmtR(totals.margin)} sub={`${totals.margin_pct}% of revenue`} />
+        <Stat label="Revenue" value={fmtR(totals.revenue)} accent="text-brand-600" sub="month to date" />
+        <Stat label="Gross margin" value={fmtR(totals.margin)} sub={`${totals.margin_pct}% · month to date`} />
         <Stat label="Orders" value={totals.orders} />
         <Stat label="Avg order value" value={fmtR(totals.aov)} />
         <Stat label="Buying customers" value={totals.active_customers} />
       </div>
 
-      <Card title="Monthly sales (last 12 months)">
+      <Card title="Monthly sales (YTD)">
         <div className="flex h-44 items-end gap-2">
           {monthly.map((m) => (
             <div key={m.month} className="group relative flex-1 text-center">
               <div className="mx-auto rounded-t bg-brand-500/80 group-hover:bg-brand-600" style={{ height: `${(m.sales / maxMonthly) * 150 + 4}px` }} />
-              <div className="mt-1 text-[10px] text-slate-400">{m.month.slice(2).replace('-', '/')}</div>
+              <div className="mt-1 text-[10px] text-slate-400">{monthLabel(m.month)}</div>
               <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 hidden -translate-x-1/2 whitespace-nowrap rounded bg-slate-800 px-2 py-1 text-xs text-white group-hover:block">
                 {m.month}: {fmtR(m.sales)} · {m.orders} orders
               </div>

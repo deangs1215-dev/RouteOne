@@ -2,7 +2,7 @@
 // field forms, quick order and quote. Visits captured with no signal are
 // stored locally and logged to the server in one call when back online.
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime, getPosition, todayISO, toLocalDateTime } from '../api';
 import { Spinner, ErrorNote, GradeBadge, OrderStatusBadge, Modal, Field, EmptyState } from '../components/ui';
 import VisitSummary from '../components/VisitSummary';
@@ -10,6 +10,8 @@ import VisitTimer, { visitDuration } from '../components/VisitTimer';
 import DatePicker from '../components/DatePicker';
 import TaskCreateModal from '../components/TaskCreateModal';
 import TaskRescheduleModal from '../components/TaskRescheduleModal';
+import CustomerNotes from '../components/CustomerNotes';
+import { useAuth } from '../auth';
 import { queueWrite } from '../offline';
 import { MobileHeader } from './MobileApp';
 
@@ -106,6 +108,10 @@ function distanceM(lat1, lng1, lat2, lng2) {
 
 export default function RepCustomer({ base = '/mobile' }) {
   const { id } = useParams();
+  const { user } = useAuth();
+  const [params] = useSearchParams();
+  const formDraftId = params.get('formDraft');
+  const [fillingFormDraft, setFillingFormDraft] = useState(null); // the draft record being resumed, if any
   const [c, setC] = useState(null);
   const [activeVisit, setActiveVisit] = useState(null);
   const [offlineVisit, setOfflineVisit] = useState(null); // { check_in_at, lat, lng }
@@ -118,6 +124,7 @@ export default function RepCustomer({ base = '/mobile' }) {
   const [fillingForm, setFillingForm] = useState(null);
   const [formsDone, setFormsDone] = useState([]);
   const [intel, setIntel] = useState(null);
+  const [salesPushes, setSalesPushes] = useState([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [checkInMenuOpen, setCheckInMenuOpen] = useState(false);
   const [checkInAddressPrompt, setCheckInAddressPrompt] = useState(null); // 'onsite_manual' | 'offsite'
@@ -135,6 +142,8 @@ export default function RepCustomer({ base = '/mobile' }) {
   const [timelineVisit, setTimelineVisit] = useState(null); // visit id shown in the summary modal
   const [timelineTask, setTimelineTask] = useState(null); // task item shown in the detail modal
   const [timelineInvoice, setTimelineInvoice] = useState(null); // invoice item shown in the detail modal
+  const visitDraftId = useRef(null); // draft backing the in-progress visit's notes, once created
+  const visitDraftSaveTimer = useRef(null);
 
   const loadTasks = () => api.get(`/customers/${id}/tasks`).then(setTasks).catch(() => {});
   const loadTimeline = () => api.get(`/customers/${id}/timeline`).then(setTimeline).catch(() => {});
@@ -161,15 +170,65 @@ export default function RepCustomer({ base = '/mobile' }) {
     // Load existing photos for today's visit (whether checked-in or just planned).
     if (av?.id) api.get(`/visits/${av.id}/photos`).then(setPhotos).catch(() => setPhotos([]));
     else setPhotos([]);
+    // Resume a visit-notes draft if this visit is already in progress (e.g. the
+    // rep got interrupted and reopened the app) - otherwise start clean.
+    if (av?.status === 'in_progress') {
+      try {
+        const drafts = await api.get('/drafts');
+        const draft = drafts.find((d) => d.kind === 'visit' && d.visit_id === av.id);
+        if (draft) {
+          visitDraftId.current = draft.id;
+          setNotes(draft.data.notes || '');
+          setOutcome(draft.data.outcome || 'order');
+        } else {
+          visitDraftId.current = null;
+        }
+      } catch { /* best-effort - notes typed this session still work without a draft */ }
+    } else {
+      visitDraftId.current = null;
+    }
     try { setOfflineVisit(JSON.parse(localStorage.getItem(offlineVisitKey(id)))); } catch { setOfflineVisit(null); }
   };
   useEffect(() => {
     load().catch(console.error);
     api.get('/form-templates').then((ts) => setTemplates(ts.filter((t) => t.active))).catch(() => {});
     api.get(`/intel/customer/${id}`).then(setIntel).catch(() => {});
+    api.get('/sales-pushes/active').then(setSalesPushes).catch(() => {});
     api.get('/visits/open').then(setOpenVisit).catch(() => {});
     loadTasks();
   }, [id]);
+
+  // Autosave visit notes/outcome as a draft while checked in, so an interrupted
+  // visit (app closed, phone dies, tab lost) doesn't lose what was typed - only
+  // check-out itself submits the real visit record. Debounced, online-only:
+  // there's no offline queue for this, since it's a convenience save, not the
+  // check-out write the offline outbox already protects.
+  useEffect(() => {
+    if (activeVisit?.status !== 'in_progress') return;
+    clearTimeout(visitDraftSaveTimer.current);
+    visitDraftSaveTimer.current = setTimeout(() => {
+      const data = { notes, outcome };
+      const label = `${c?.name || 'Visit'} - in progress`;
+      const save = visitDraftId.current
+        ? api.put(`/drafts/${visitDraftId.current}`, { label, data })
+        : api.post('/drafts', { kind: 'visit', customer_id: c?.id, visit_id: activeVisit.id, label, data })
+            .then((r) => { visitDraftId.current = r.id; });
+      save.catch(() => {}); // best-effort - a failed autosave shouldn't interrupt the rep
+    }, 1000);
+    return () => clearTimeout(visitDraftSaveTimer.current);
+  }, [notes, outcome, activeVisit?.id, activeVisit?.status]);
+
+  // Arrived here from the Drafts screen to resume an in-progress form -
+  // reopen the fill modal pre-loaded with the saved answers.
+  useEffect(() => {
+    if (!formDraftId || templates.length === 0) return;
+    api.get(`/drafts/${formDraftId}`).then((draft) => {
+      const template = templates.find((t) => t.id === draft.template_id);
+      if (!template) return;
+      setFillingFormDraft(draft);
+      setFillingForm(template);
+    }).catch(() => {});
+  }, [formDraftId, templates]);
 
   if (!c) return <><MobileHeader title="Customer" back={`${base}/customers`} /><Spinner /></>;
 
@@ -225,6 +284,16 @@ export default function RepCustomer({ base = '/mobile' }) {
     setBusy(false);
   };
 
+  // The visit is over one way or another - drop its notes draft. Best-effort:
+  // a leftover draft is harmless (it'd just show as a stale "in progress" entry
+  // in Drafts), so a failed delete here isn't worth surfacing to the rep.
+  const discardVisitDraft = () => {
+    clearTimeout(visitDraftSaveTimer.current);
+    const draftId = visitDraftId.current;
+    visitDraftId.current = null;
+    if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
+  };
+
   const checkOut = async () => {
     setBusy(true);
     setError('');
@@ -242,12 +311,14 @@ export default function RepCustomer({ base = '/mobile' }) {
       localStorage.removeItem(offlineVisitKey(id));
       setOfflineVisit(null);
       setNotes('');
+      discardVisitDraft();
       setBusy(false);
       return;
     }
     try {
       await api.post(`/visits/${activeVisit.id}/check-out`, { ...pos, notes: notes || null, outcome });
       setNotes('');
+      discardVisitDraft();
       await load();
     } catch (e) {
       if (e.isNetworkError) {
@@ -255,6 +326,7 @@ export default function RepCustomer({ base = '/mobile' }) {
         queueWrite('POST', `/visits/${activeVisit.id}/check-out`, { ...pos, notes: notes || null, outcome });
         setActiveVisit(null);
         setNotes('');
+        discardVisitDraft();
       } else setError(e.message);
     }
     setBusy(false);
@@ -405,11 +477,11 @@ export default function RepCustomer({ base = '/mobile' }) {
           </button>
           {menuOpen && (
             <div className="card mt-2 max-h-96 divide-y divide-slate-100 overflow-y-auto p-0">
-              <Link to={`${base}/customers/${c.id}/order${visitParam}`} className="block px-4 py-3 text-sm hover:bg-slate-50">🧾 New order</Link>
-              <Link to={`${base}/customers/${c.id}/order${visitParam ? visitParam + '&' : '?'}kind=quote`} className="block px-4 py-3 text-sm hover:bg-slate-50">📄 New quote</Link>
+              <Link to={`${base}/customers/${c.id}/order${visitParam}`} className="block px-4 py-3 text-sm hover:bg-slate-50 hover:text-slate-900">🧾 New order</Link>
+              <Link to={`${base}/customers/${c.id}/order${visitParam ? visitParam + '&' : '?'}kind=quote`} className="block px-4 py-3 text-sm hover:bg-slate-50 hover:text-slate-900">📄 New quote</Link>
               {templates.length > 0 && <div className="px-4 pt-2 pb-1 text-[10px] font-semibold uppercase text-slate-400">Forms</div>}
               {templates.map((t) => (
-                <button key={t.id} className="flex w-full items-center justify-between px-4 py-3 text-left text-sm hover:bg-slate-50"
+                <button key={t.id} className="flex w-full items-center justify-between px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                   onClick={() => { setFillingForm(t); setMenuOpen(false); }}>
                   <span>{t.name}</span>
                   <span className="text-xs">{formsDone.includes(t.id) ? '✅' : '›'}</span>
@@ -438,17 +510,17 @@ export default function RepCustomer({ base = '/mobile' }) {
               </button>
               {checkInMenuOpen && !busy && (
                 <div className="card mt-2 divide-y divide-slate-100 p-0">
-                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50"
+                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                     onClick={() => { setCheckInMenuOpen(false); checkIn('onsite'); }}>
                     <div className="font-medium">📍 Onsite</div>
                     <div className="text-xs text-slate-400">Using {c.name}'s address on record</div>
                   </button>
-                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50"
+                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                     onClick={() => { setCheckInMenuOpen(false); setCheckInAddressPrompt('onsite_manual'); }}>
                     <div className="font-medium">📍 Onsite (manual address)</div>
                     <div className="text-xs text-slate-400">SYSPRO's address is wrong — enter the correct one</div>
                   </button>
-                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50"
+                  <button type="button" className="block w-full px-4 py-3 text-left text-sm hover:bg-slate-50 hover:text-slate-900"
                     onClick={() => { setCheckInMenuOpen(false); setCheckInAddressPrompt('offsite'); }}>
                     <div className="font-medium">☕ Offsite</div>
                     <div className="text-xs text-slate-400">Meeting them elsewhere — coffee shop, etc.</div>
@@ -545,24 +617,31 @@ export default function RepCustomer({ base = '/mobile' }) {
           </div>
         )}
 
-        {/* Selling tips from the intelligence engine */}
-        {c.status !== 'prospect' && intel && (intel.suggested_products.length > 0 || intel.lapsed_products.length > 0 || intel.risk_score >= 40) && (
+        {/* Selling tips from the intelligence engine, plus any manager-broadcast
+            sales push (not customer-specific — see sales-pushes.routes.js).
+            Shows once either has loaded, so a push doesn't wait on intel. */}
+        {c.status !== 'prospect' && (salesPushes.length > 0 || (intel && (intel.suggested_products.length > 0 || intel.lapsed_products.length > 0 || intel.risk_score >= 40))) && (
           <div className="card p-4">
             <h2 className="mb-2 text-sm font-semibold text-slate-600">Selling tips</h2>
+            {salesPushes.map((p) => (
+              <div key={p.id} className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-bold text-red-700">
+                📢 {p.message}
+              </div>
+            ))}
             {/* Risk banner for the 40-69 band; at 70+ the AI alerts card below carries it. */}
-            {intel.risk_score >= 40 && !intel.actions?.some((a) => a.type === 'churn') && (
+            {intel && intel.risk_score >= 40 && !intel.actions?.some((a) => a.type === 'churn') && (
               <div className={`mb-2 rounded-lg px-3 py-2 text-xs ${intel.risk_score >= 70 ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
-                Churn risk {intel.risk_score}/100 — last order {intel.last_order_at ? `${intel.recency_days} days ago` : 'never'}
+                Churn risk {intel.risk_score}/100 — last invoice {intel.last_invoice_at ? `${intel.recency_days} days ago` : 'never'}
                 {intel.decline_pct > 0 && `, spend down ${intel.decline_pct}%`}
               </div>
             )}
-            {intel.lapsed_products.length > 0 && (
+            {intel && intel.lapsed_products.length > 0 && (
               <div className="mb-2">
                 <div className="text-[10px] font-semibold uppercase text-slate-400">Stopped buying — win back</div>
                 {intel.lapsed_products.map((p) => <div key={p.id} className="text-sm">• {p.name}</div>)}
               </div>
             )}
-            {intel.suggested_products.length > 0 && (
+            {intel && intel.suggested_products.length > 0 && (
               <div>
                 <div className="text-[10px] font-semibold uppercase text-slate-400">Others buy, they don't — pitch</div>
                 {intel.suggested_products.map((p) => <div key={p.id} className="text-sm">• {p.name}</div>)}
@@ -617,12 +696,26 @@ export default function RepCustomer({ base = '/mobile' }) {
                 </div>
               ))}
               {photos.length < 10 && (
-                <label className={`flex h-20 w-20 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 hover:border-brand-500 ${busy ? 'opacity-50' : ''}`}>
-                  <span className="text-2xl">📷</span>
-                  <span className="text-[10px] font-medium">{busy ? 'Saving…' : 'Take photo'}</span>
-                  <input type="file" accept="image/*" capture="environment" className="hidden" disabled={busy}
-                    onChange={(e) => e.target.files[0] && addPhoto(e.target.files[0])} />
-                </label>
+                <>
+                  <label className={`flex h-20 w-20 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 hover:border-brand-500 ${busy ? 'opacity-50' : ''}`}>
+                    <span className="text-2xl">📷</span>
+                    <span className="text-[10px] font-medium">{busy ? 'Saving…' : 'Take photo'}</span>
+                    {/* capture="environment" forces the camera directly, rather
+                        than the OS picker's photo-library/camera choice. */}
+                    <input type="file" accept="image/*" capture="environment" className="hidden" disabled={busy}
+                      onChange={(e) => { e.target.files[0] && addPhoto(e.target.files[0]); e.target.value = ''; }} />
+                  </label>
+                  {/* R1-047: same upload path as the camera tile (addPhoto) -
+                      just without `capture`, so the OS opens its normal file
+                      picker (gallery/library) instead of jumping straight to
+                      the camera. Works the same on phones and tablets. */}
+                  <label className={`flex h-20 w-20 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 hover:border-brand-500 ${busy ? 'opacity-50' : ''}`}>
+                    <span className="text-2xl">🖼️</span>
+                    <span className="text-[10px] font-medium text-center leading-tight">{busy ? 'Saving…' : 'Choose from gallery'}</span>
+                    <input type="file" accept="image/*" className="hidden" disabled={busy}
+                      onChange={(e) => { e.target.files[0] && addPhoto(e.target.files[0]); e.target.value = ''; }} />
+                  </label>
+                </>
               )}
             </div>
           ) : (
@@ -710,10 +803,22 @@ export default function RepCustomer({ base = '/mobile' }) {
             const quotes = (c.recent_quotes || []).filter((q) => upTo(q.quote_date));
             const forms = (c.recent_forms || []).filter((f) => upTo(f.created_at));
             const invoices = (c.recent_invoices || []).filter((iv) => upTo(iv.invoice_date));
-            const nothing = visits.length === 0 && orders.length === 0 && quotes.length === 0 && forms.length === 0 && invoices.length === 0;
+            const notes = (c.notes || []).filter((n) => upTo(n.created_at));
+            const nothing = visits.length === 0 && orders.length === 0 && quotes.length === 0 && forms.length === 0 && invoices.length === 0 && notes.length === 0;
 
             return (
               <div className="space-y-4">
+                {/* Not a CollapsibleSection: that renders nothing when count is 0,
+                    which would hide the "log a note" button on exactly the
+                    customers with no contact history - the ones a rep most needs
+                    to log a call against. */}
+                <div>
+                  <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                    Notes &amp; activity {notes.length > 0 && <span className="font-semibold normal-case text-slate-400">({notes.length})</span>}
+                  </div>
+                  <CustomerNotes customerId={c.id} notes={notes} currentUserId={user?.id} onChanged={load} compact />
+                </div>
+
                 <CollapsibleSection title="Visits" count={visits.length}>
                   {visits.map((v) => {
                     const dur = visitDuration(v.check_in_at, v.check_out_at);
@@ -730,6 +835,7 @@ export default function RepCustomer({ base = '/mobile' }) {
                         {v.outcome && <div className="mt-0.5 text-xs text-slate-400">Outcome: {v.outcome.replace('_', ' ')}{v.rep_name ? ` · ${v.rep_name}` : ''}</div>}
                         {v.check_in_type === 'offsite' && <div className="mt-0.5 text-xs text-slate-400">☕ Offsite{v.check_in_address ? ` — ${v.check_in_address}` : ''}</div>}
                         {v.check_in_type === 'onsite_manual' && <div className="mt-0.5 text-xs text-slate-400">📍 Manual address{v.check_in_address ? ` — ${v.check_in_address}` : ''}</div>}
+                        <VisitPhotosTimeline visitId={v.id} />
                       </div>
                     );
                   })}
@@ -926,8 +1032,10 @@ export default function RepCustomer({ base = '/mobile' }) {
       {fillingForm && (
         <FormFillModal template={fillingForm} customerId={Number(id)}
           visitId={activeVisit?.status === 'in_progress' ? activeVisit.id : null}
-          onClose={() => setFillingForm(null)}
-          onDone={() => { setFormsDone((d) => [...d, fillingForm.id]); setFillingForm(null); }} />
+          draftId={fillingFormDraft?.id || null}
+          initialData={fillingFormDraft?.data?.data || null}
+          onClose={() => { setFillingForm(null); setFillingFormDraft(null); }}
+          onDone={() => { setFormsDone((d) => [...d, fillingForm.id]); setFillingForm(null); setFillingFormDraft(null); }} />
       )}
 
       {showFieldNotes && (
@@ -1224,12 +1332,29 @@ function OnsiteDetailsModal({ customerId, customer, onClose, onSaved }) {
 // the server stores them as files. Offline submissions queue in the outbox.
 // Field types: heading | text | email | number | date | select | checkbox |
 // photo | signature | product.
-function FormFillModal({ template, customerId, visitId, onClose, onDone }) {
-  const [data, setData] = useState({});
+function FormFillModal({ template, customerId, visitId, draftId, initialData, onClose, onDone }) {
+  const [data, setData] = useState(initialData || {});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
   const [products, setProducts] = useState(null);
   const set = (key, value) => setData((d) => ({ ...d, [key]: value }));
+
+  // Saved server-side so a rep can resume it later, even from another phone.
+  const saveDraft = async () => {
+    setSavingDraft(true);
+    setError('');
+    const payload = { kind: 'form', customer_id: customerId, template_id: template.id, visit_id: visitId, label: template.name, data: { data } };
+    try {
+      if (draftId) await api.put(`/drafts/${draftId}`, payload);
+      else await api.post('/drafts', payload);
+      onClose();
+    } catch (err) {
+      setError(err.message || 'Could not save draft - check your connection.');
+    } finally {
+      setSavingDraft(false);
+    }
+  };
 
   // Load the catalogue once if this form has any product-picker field.
   const hasProductField = (template.fields || []).some((f) => f.type === 'product');
@@ -1250,10 +1375,12 @@ function FormFillModal({ template, customerId, visitId, onClose, onDone }) {
     const payload = { template_id: template.id, customer_id: customerId, visit_id: visitId, data };
     try {
       await api.post('/form-submissions', payload);
+      if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
       onDone();
     } catch (err) {
       if (err.isNetworkError) {
         queueWrite('POST', '/form-submissions', payload);
+        if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
         onDone();
       } else {
         setError(err.message);
@@ -1311,8 +1438,11 @@ function FormFillModal({ template, customerId, visitId, onClose, onDone }) {
           );
         })}
         <div className="flex justify-end gap-2">
-          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" disabled={busy}>{busy ? 'Submitting…' : 'Submit form'}</button>
+          <button type="button" className="btn-secondary" onClick={onClose} disabled={busy || savingDraft}>Cancel</button>
+          <button type="button" className="btn-secondary" onClick={saveDraft} disabled={busy || savingDraft}>
+            {savingDraft ? 'Saving…' : '💾 Save draft'}
+          </button>
+          <button className="btn-primary" disabled={busy || savingDraft}>{busy ? 'Submitting…' : 'Submit form'}</button>
         </div>
       </form>
     </Modal>
@@ -1325,9 +1455,17 @@ function FormSignatureField({ value, onChange }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const ctxRef = useRef(null);
+  // A signature pad must set touch-action:none or a finger stroke scrolls the
+  // page instead of drawing - but that also makes it a 128px dead zone the rep
+  // cannot scroll over. Once the signature is done we swap the canvas for a
+  // plain image, which scrolls normally. Start in preview when resuming a draft
+  // that already has one.
+  const [signing, setSigning] = useState(!value);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
+  // Callback ref, not useEffect([]): the canvas unmounts when we switch to the
+  // preview, so setup has to run again each time it comes back for Re-sign.
+  const initCanvas = (canvas) => {
+    canvasRef.current = canvas;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     canvas.width = rect.width;
@@ -1338,7 +1476,7 @@ function FormSignatureField({ value, onChange }) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctxRef.current = ctx;
-  }, []);
+  };
 
   const pos = (e) => {
     const rect = canvasRef.current.getBoundingClientRect();
@@ -1350,14 +1488,37 @@ function FormSignatureField({ value, onChange }) {
   const end = () => { if (!drawing.current) return; drawing.current = false; ctxRef.current.closePath(); onChange(canvasRef.current.toDataURL('image/png')); };
   const clear = () => { const c = canvasRef.current; ctxRef.current.clearRect(0, 0, c.width, c.height); onChange(''); };
 
+  if (!signing && value) {
+    return (
+      <div>
+        <div className="rounded-lg border border-slate-200 bg-white p-2">
+          <img src={value} alt="Signature" className="h-32 w-full object-contain" />
+        </div>
+        <button type="button" className="mt-1 text-xs text-brand-600 underline"
+          onClick={() => { onChange(''); setSigning(true); }}>
+          Re-sign
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="rounded-lg border-2 border-dashed border-slate-300 bg-white overflow-hidden">
-        <canvas ref={canvasRef} className="h-32 w-full bg-white" style={{ touchAction: 'none' }}
+        <canvas ref={initCanvas} className="h-32 w-full bg-white" style={{ touchAction: 'none' }}
           onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
           onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
       </div>
-      <button type="button" className="mt-1 text-xs text-slate-400 underline" onClick={clear}>Clear</button>
+      <div className="mt-1 flex items-center gap-3">
+        <button type="button" className="text-xs text-slate-400 underline" onClick={clear}>Clear</button>
+        {/* Ends the dead zone as soon as the customer has signed, so the rep can
+            scroll straight down to Submit. */}
+        <button type="button" className="text-xs font-medium text-brand-600 underline"
+          disabled={!value}
+          onClick={() => setSigning(false)}>
+          Done signing
+        </button>
+      </div>
     </div>
   );
 }
@@ -1398,6 +1559,49 @@ function FormProductField({ value, products, onChange }) {
             </button>
           ))}
           {matches.length === 0 && <div className="py-3 text-center text-xs text-slate-400">No products match.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VisitPhotosTimeline({ visitId }) {
+  const [photos, setPhotos] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!expanded || !visitId) return;
+    api.get(`/visits/${visitId}/photos`)
+      .then(setPhotos)
+      .catch(() => setPhotos([]));
+  }, [visitId, expanded]);
+
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-2 text-xs font-semibold text-slate-500 hover:text-slate-700"
+      >
+        <span>{expanded ? '▼' : '▶'}</span>
+        📸 Photos
+      </button>
+      {expanded && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {photos === null ? (
+            <div className="text-xs text-slate-400">Loading…</div>
+          ) : photos.length === 0 ? (
+            <div className="text-xs text-slate-400">No photos</div>
+          ) : (
+            photos.map((p) => (
+              <img
+                key={p.id}
+                src={p.path}
+                alt="Visit photo"
+                className="h-16 w-16 rounded-lg object-cover border border-slate-200"
+              />
+            ))
+          )}
         </div>
       )}
     </div>

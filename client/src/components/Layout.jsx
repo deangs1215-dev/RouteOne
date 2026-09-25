@@ -15,9 +15,11 @@ const NAV = [
   { to: '/map', label: 'Live map', icon: 'map', repHidden: true },
   { to: '/team', label: 'Team', icon: 'kpis', roles: ['admin'] },
   { to: '/tasks', label: 'Tasks', icon: 'tasks' },
+  { to: '/support', label: 'Support Tickets', icon: 'support' },
   { to: '/kpis', label: 'Rep KPIs', icon: 'kpis' },
   { to: '/analytics', label: 'Analytics', icon: 'analytics' },
   { to: '/ai', label: 'Sales AI', icon: 'ai' },
+  { to: '/sales-push', label: 'Sales Push', icon: 'ai', adminOnly: true },
   { to: '/forms', label: 'Forms', icon: 'forms' },
   { to: '/documents', label: 'Documents', icon: 'documents' },
   {
@@ -28,7 +30,8 @@ const NAV = [
       { to: '/email', label: 'Email Settings' },
       { to: '/users', label: 'Users' },
       { to: '/integration', label: 'Integration' },
-      { to: '/backups', label: 'Backups' }
+      { to: '/backups', label: 'Backups' },
+      { to: '/monitoring', label: 'Monitoring' }
     ]
   }
 ];
@@ -143,9 +146,6 @@ export default function Layout() {
         <main className="p-4 lg:p-6">
           <Outlet />
         </main>
-        <footer className="flex flex-col items-center gap-1 py-6">
-          <img src="/navex-africa-logo.svg" alt="NAVEX Africa" className="h-8 opacity-80" />
-        </footer>
       </div>
     </div>
   );

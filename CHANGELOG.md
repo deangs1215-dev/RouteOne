@@ -6,7 +6,31 @@ working tree.
 
 ## Unreleased
 
-Not yet committed — see TODO.md's "commit the backlog" item.
+Not yet committed — see TODO.md's "commit the backlog" item. Includes Documents, Tasks module phase 2/3, invoices, email/backup/settings admin, and the integration test harness.
+
+## 2026-07-31
+
+- `8284944` Production hardening: require SECRET_KEY unconditionally, set up NSSM Windows service, add deployment tooling
+- `server/crypto.js`: `SECRET_KEY` now unconditionally required (app throws at startup if missing). No more insecure fallback key that masked encrypted-password failures.
+- `server/routes/auth.routes.js`: fix password-reset links on multi-origin configs (extracts first origin from comma-separated `APP_ORIGIN`).
+- `server/routes/integration.routes.js`: clarify in comments that rep ownership is SYSPRO-master (not app-managed).
+- `server/import-reps.js`: export `EXCLUDE_CODES` and `fetchReps` for reuse; add `isMain` guard so file can be imported without triggering auto-import.
+- New: `DEPLOYMENT.md` §8 with full NSSM walkthrough (service registration, restart, log rotation, logoff/reboot survival test). §9 documents HTTP-only test-server gotchas (COOKIE_SECURE, APP_ORIGIN exactness).
+- New: `QUICK_REFERENCE.md` — day-to-day Windows RDP workflow with actual commands (deploy.bat, nssm restart, backup, diagnostics). Added verified `Set-EnvValue` PowerShell helper to replace unsafe Notepad editing.
+- New: `status.ps1` — health check script for laptop (tests API, client build, login origin acceptance, database/backup freshness, .env keys including SECRET_KEY).
+- New: `backup-db.ps1` — pull backups from server over Z: drive to laptop.
+- New: `deploy.bat` — updated messaging to point to NSSM service restart instead of manual npm.
+- New: `deploy.ps1` — PowerShell variant with same robocopy exclusions (database, backups, uploads, .env, .db files).
+- New: `server/diagnose-unmatched.js` — read-only diagnostic for rep↔customer assignment gaps (buckets by NO_REP_CODE, NO_SUCH_REP, BRANCH_MISMATCH).
+- New: `server/list-orphan-reps.js` — identify rep codes owning unassigned customers with no RouteOne login.
+- New: `server/reset-password.js` — one-off admin utility for password reset (hidden prompts, strength validation, optional `must_change_password` flag).
+- Updated `.env.example` documentation: clarified that `SECRET_KEY` is **always** required (not just `NODE_ENV=production`), and explained the consequence of a missing/changed key on stored SYSPRO/SMTP passwords.
+- Memory updated: deployment topology now documents NSSM service setup, safe `.env` editing via PowerShell helper, and the architectural decision that SERVER = production-rigor (SECRET_KEY hard-fail) even for a test box holding real data.
+
+**Why the changes:**
+- Earlier session revealed that `SECRET_KEY` missing from server `.env` was silently falling back to a hardcoded key, causing SYSPRO authentication to fail with no visible startup error — a failure mode discovered days after the misconfiguration, not at deploy time. Now it's loud and immediate.
+- Manual `npm start` in an RDP window dies when the session disconnects, losing the app and breaking overnight syncs/backups. NSSM Windows service survives logoff and reboot, matching production resilience expectations even for a test box with real customer data.
+- Windows deployment workflow (RDP, robocopy, NSSM) was documented with Linux/SSH assumptions and PM2 — causing confusion about where to run commands and which files deploy touches. Rewritten docs (DEPLOYMENT.md, QUICK_REFERENCE.md, status.ps1) now match reality.
 
 - Documents feature: admin/manager upload marketing PDFs; everyone (except the
   customer portal) can browse from the shared back-office menu. Reps reach it via

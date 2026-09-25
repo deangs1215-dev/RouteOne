@@ -5,7 +5,15 @@
       "name": "RouteOne",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 5190
+      "autoPort": true
+    },
+    {
+      "name": "RouteOne theme preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "C:/Users/dean.jvr/AppData/Local/Temp/claude/C--Projects-RouteOne/85f665dd-985c-4d20-8b7b-079c805ab9ad/scratchpad/preview/start.mjs"
+      ],
+      "port": 4399
     }
   ]
 }

@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { db, closeDb, DB_PATH, UPLOAD_DIR, getSetting, setSetting } from './db.js';
+import { db, dbx, closeDb, DB_PATH, UPLOAD_DIR } from './db.js';
+import { getSetting, setSetting } from './dbh.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const backupRoot = path.resolve(process.env.BACKUP_DIR || path.join(__dirname, 'backups'));
@@ -13,8 +14,8 @@ function backupStamp(date = new Date()) {
 
 // DB setting wins (editable from the Backups admin page); env var is the
 // pre-audit default for deployments that haven't touched the setting yet.
-function retentionDays() {
-  const fromSetting = Number(getSetting('backup_retention_days', ''));
+async function retentionDays() {
+  const fromSetting = Number(await getSetting('backup_retention_days', ''));
   if (Number.isFinite(fromSetting) && fromSetting >= 1) return Math.floor(fromSetting);
   const fromEnv = Number(process.env.BACKUP_RETENTION_DAYS || 14);
   return Number.isFinite(fromEnv) && fromEnv >= 1 ? Math.floor(fromEnv) : 14;
@@ -28,8 +29,8 @@ function assertBackupChild(targetPath) {
   return resolved;
 }
 
-function pruneOldBackups() {
-  const cutoff = Date.now() - retentionDays() * 86400000;
+async function pruneOldBackups() {
+  const cutoff = Date.now() - (await retentionDays()) * 86400000;
   for (const entry of fs.readdirSync(backupRoot, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith('routeone-') || entry.name.endsWith('.tmp')) continue;
     const fullPath = assertBackupChild(path.join(backupRoot, entry.name));
@@ -58,17 +59,22 @@ export async function runBackup() {
   const tempDir = assertBackupChild(`${finalDir}.tmp`);
   try {
     fs.mkdirSync(tempDir, { recursive: false });
-    await db.backup(path.join(tempDir, 'fieldsales.db'));
+    // On SQL Server the database is backed up by SQL Server itself (scheduled
+    // BACKUP DATABASE jobs, run by the DBA) - the app has no file to copy and no
+    // BACKUP permission. Only the uploads folder is this app's to snapshot.
+    const includesDatabase = dbx.dialect !== 'mssql';
+    if (includesDatabase) await db.backup(path.join(tempDir, 'fieldsales.db'));
     fs.cpSync(UPLOAD_DIR, path.join(tempDir, 'uploads'), { recursive: true });
     fs.writeFileSync(path.join(tempDir, 'backup.json'), JSON.stringify({
       created_at: new Date().toISOString(),
-      includes: ['fieldsales.db', 'uploads'],
-      retention_days: retentionDays()
+      includes: includesDatabase ? ['fieldsales.db', 'uploads'] : ['uploads'],
+      database: includesDatabase ? 'sqlite' : 'sqlserver (backed up by SQL Server, not by this job)',
+      retention_days: await retentionDays()
     }, null, 2));
     fs.renameSync(tempDir, finalDir);
-    setSetting('last_backup_at', new Date().toISOString());
-    setSetting('last_backup_path', finalDir);
-    pruneOldBackups();
+    await setSetting('last_backup_at', new Date().toISOString());
+    await setSetting('last_backup_path', finalDir);
+    await pruneOldBackups();
     return finalDir;
   } catch (error) {
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
@@ -104,6 +110,9 @@ export function listBackups() {
 // must respond to the HTTP request before the process exits, and the admin
 // must restart the server afterward for the restored data to take effect.
 export async function restoreBackup(name) {
+  if (dbx.dialect === 'mssql') {
+    throw new Error('Restore is not available with SQL Server - restore the database with SQL Server tools (RESTORE DATABASE), then copy the uploads folder from the backup.');
+  }
   if (running) throw new Error('A backup or restore is already running');
   if (typeof name !== 'string' || !/^routeone-[\w-]+$/.test(name)) {
     throw new Error('Invalid backup name');
@@ -116,12 +125,14 @@ export async function restoreBackup(name) {
   const sourceUploadsPath = path.join(sourceDir, 'uploads');
   if (!fs.existsSync(sourceDbPath)) throw new Error('Backup is missing its database file');
 
+  // Safety net: snapshot the current (pre-restore) state so an accidental
+  // restore is itself recoverable. This runs BEFORE the restore claims the
+  // `running` lock, because runBackup() takes that same lock itself - claiming
+  // it first made every restore fail on "A backup is already running".
+  await runBackup();
+
   running = true;
   try {
-    // Safety net: snapshot the current (pre-restore) state so an accidental
-    // restore is itself recoverable.
-    await runBackup();
-
     closeDb();
     // WAL/SHM sidecar files must go too, or the restored .db reopens against
     // stale write-ahead data left over from the live database.
@@ -144,17 +155,17 @@ export async function restoreBackup(name) {
 // rep-digest scheduler's pattern. Disabled by default is NOT the case here -
 // backups default ON, matching the pre-audit always-on behaviour; the admin
 // can turn them off from the Backups page if truly not wanted.
-function dueNow() {
-  if (getSetting('backup_enabled', '1') !== '1') return false;
-  const last = getSetting('last_backup_at', '');
+async function dueNow() {
+  if (await getSetting('backup_enabled', '1') !== '1') return false;
+  const last = await getSetting('last_backup_at', '');
   const minsSince = last ? (Date.now() - new Date(last).getTime()) / 60000 : Infinity;
-  const [h, m] = getSetting('backup_time', '02:00').split(':').map(Number);
+  const [h, m] = (await getSetting('backup_time', '02:00')).split(':').map(Number);
   const now = new Date();
   return now.getHours() === h && now.getMinutes() === m && minsSince >= 2;
 }
 
 async function runIfDue() {
-  if (!dueNow()) return;
+  if (!(await dueNow())) return;
   try {
     const destination = await runBackup();
     console.log(`[backup] scheduled backup completed: ${destination}`);
@@ -167,13 +178,14 @@ export function startBackupScheduler() {
   // Catch-up for a server that was down through its scheduled time, or has
   // never backed up at all - same "well overdue" safety net the old always-on
   // ">23h" check gave us, just gated by the enabled flag now.
-  const last = getSetting('last_backup_at', '');
-  const hoursSince = last ? (Date.now() - new Date(last).getTime()) / 3600000 : Infinity;
-  if (getSetting('backup_enabled', '1') === '1' && hoursSince >= 25) {
-    runBackup()
-      .then((destination) => console.log(`[backup] catch-up backup completed: ${destination}`))
-      .catch((error) => console.error('[backup] catch-up backup failed:', error.message));
-  }
+  (async () => {
+    const last = await getSetting('last_backup_at', '');
+    const hoursSince = last ? (Date.now() - new Date(last).getTime()) / 3600000 : Infinity;
+    if (await getSetting('backup_enabled', '1') === '1' && hoursSince >= 25) {
+      const destination = await runBackup();
+      console.log(`[backup] catch-up backup completed: ${destination}`);
+    }
+  })().catch((error) => console.error('[backup] catch-up backup failed:', error.message));
   const timer = setInterval(runIfDue, 60 * 1000);
   timer.unref?.();
 }

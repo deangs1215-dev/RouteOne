@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS users (
   must_change_password INTEGER NOT NULL DEFAULT 1,
   reset_token_hash TEXT,
   reset_token_expires TEXT,
+  token_version INTEGER NOT NULL DEFAULT 0,  -- bumped on any password change; invalidates older JWTs (see auth.js)
   home_address TEXT,                      -- where the rep starts their day (home/office)
   home_lat REAL,
   home_lng REAL,
@@ -101,10 +102,15 @@ CREATE TABLE IF NOT EXISTS products (
   description TEXT,
   uom TEXT DEFAULT 'each',
   pack_size TEXT,
-  pack_weight_kg REAL,             -- parsed from pack_size; list_price is per-kg, this converts to per-unit
+  pack_weight_kg REAL,             -- DEPRECATED: use conv_factor_alt_uom instead
+  conv_factor_alt_uom REAL,        -- SYSPRO ConvFactAltUom; list_price is per-kg, this converts to per-unit
   list_price REAL NOT NULL DEFAULT 0,
   cost_price REAL DEFAULT 0,
   stock_qty REAL DEFAULT 0,
+  -- SYSPRO InvMaster+.Discontinued. Run-out stock that is still being invoiced
+  -- stays visible in the catalogue (see docs/sql/vw_FS_Products-discontinued.sql)
+  -- so reps can see it exists, but always with active = 0 so it can't be ordered.
+  discontinued INTEGER DEFAULT 0,
   active INTEGER DEFAULT 1,
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -164,8 +170,21 @@ CREATE TABLE IF NOT EXISTS visits (
   check_out_lng REAL,
   notes TEXT,
   outcome TEXT,                           -- order / no_order / follow_up / other
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT
 );
+
+-- Track when planned visits are rescheduled and why
+CREATE TABLE IF NOT EXISTS visit_reschedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  visit_id INTEGER NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
+  from_date TEXT NOT NULL,
+  to_date TEXT NOT NULL,
+  reason TEXT,
+  rescheduled_by INTEGER NOT NULL REFERENCES users(id),
+  rescheduled_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_visit_reschedules_visit ON visit_reschedules(visit_id);
 
 -- Last known rep positions (pinged by the mobile app), for the live map.
 CREATE TABLE IF NOT EXISTS rep_locations (
@@ -176,6 +195,24 @@ CREATE TABLE IF NOT EXISTS rep_locations (
   recorded_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_rep_locations_user ON rep_locations(user_id, recorded_at);
+
+CREATE TABLE IF NOT EXISTS branch_clock_ins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rep_id INTEGER NOT NULL REFERENCES users(id),
+  clock_in_at TEXT NOT NULL DEFAULT (datetime('now')),
+  clock_out_at TEXT,
+  notes TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_branch_clock_ins_rep ON branch_clock_ins(rep_id, clock_in_at DESC);
+
+-- Tracks which branches/warehouses each manager is responsible for
+CREATE TABLE IF NOT EXISTS manager_warehouses (
+  manager_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  warehouse_id INTEGER NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+  PRIMARY KEY (manager_id, warehouse_id)
+);
+CREATE INDEX IF NOT EXISTS idx_manager_warehouses_manager ON manager_warehouses(manager_id);
 
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -189,6 +226,13 @@ CREATE TABLE IF NOT EXISTS orders (
   subtotal REAL DEFAULT 0,
   vat_amount REAL DEFAULT 0,
   total REAL DEFAULT 0,
+  -- The CUSTOMER's own order number / reference for this order (their PO
+  -- number, requisition number, whatever they quote back to us). Deliberately
+  -- its own column rather than buried in notes: it is the key the customer
+  -- reconciles against, so it has to be reliably searchable and printable on
+  -- the confirmation, not free text someone has to read out of a paragraph.
+  -- Distinct from orders.number, which is RouteOne's own ORD-xxxxx.
+  customer_order_no TEXT,
   notes TEXT,
   delivery_instructions TEXT,
   signature TEXT,                         -- customer signature captured on-site (base64 PNG), required before submit
@@ -204,7 +248,8 @@ CREATE TABLE IF NOT EXISTS order_items (
   uom TEXT,
   unit_price REAL NOT NULL,
   discount_pct REAL DEFAULT 0,
-  line_total REAL NOT NULL
+  line_total REAL NOT NULL,
+  price_source TEXT                       -- R1-044: which tier produced unit_price - see PRICE_SOURCES in db.js
 );
 
 -- Phase 2: pricing rules beyond contract prices. Category or product scope,
@@ -251,7 +296,8 @@ CREATE TABLE IF NOT EXISTS quote_items (
   uom TEXT,
   unit_price REAL NOT NULL,
   discount_pct REAL DEFAULT 0,
-  line_total REAL NOT NULL
+  line_total REAL NOT NULL,
+  price_source TEXT                       -- R1-044: which tier produced unit_price - see PRICE_SOURCES in db.js
 );
 
 -- Custom field-capture forms. fields is a JSON array:
@@ -289,6 +335,25 @@ CREATE TABLE IF NOT EXISTS form_submissions (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- In-progress order/quote/form captures a rep saved instead of submitting -
+-- e.g. connectivity dropped mid-capture, or they got pulled away and want to
+-- finish later. Server-side (not just device localStorage) so a draft follows
+-- the rep's login rather than being stuck on one phone. Personal to the rep
+-- who saved it - never shown to office/managers.
+CREATE TABLE IF NOT EXISTS drafts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rep_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,                      -- 'order' / 'quote' / 'form'
+  customer_id INTEGER REFERENCES customers(id),
+  template_id INTEGER REFERENCES form_templates(id),  -- forms only
+  visit_id INTEGER REFERENCES visits(id),
+  label TEXT,                              -- short summary shown in the drafts list
+  data TEXT NOT NULL DEFAULT '{}',         -- { items, notes } for order/quote; { data } for form
+  updated_at TEXT DEFAULT (datetime('now')),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_rep ON drafts(rep_id, kind);
+
 CREATE TABLE IF NOT EXISTS visit_photos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   visit_id INTEGER NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
@@ -318,6 +383,85 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id, invoice_date);
 
+-- Per-product invoice line detail, synced from SYSPRO's vw_FS_InvoiceLines
+-- (see docs/sql/vw_FS_InvoiceLines-delivery-customer.sql). That view covers the
+-- last 90 days of invoices, matching vw_FS_Invoices, so this table is wiped and
+-- fully rebuilt on every sync (no stable natural key per line - the same product
+-- can appear on more than one line of an invoice), same pattern as
+-- rep_monthly_sales. Invoices outside that window simply have no rows here; the
+-- app falls back to the linked RouteOne order's items as a best-effort guess.
+--
+-- delivery_customer_id is the STORE the goods went to (ArTrnDetail.Customer),
+-- which differs from invoices.customer_id (the billed account) whenever a
+-- retail chain is invoiced centrally - e.g. PICK N PAY RETAILERS billed for a
+-- delivery to OAKDENE MINI MARKET. Reps are assigned to the store, not the
+-- group account, so invoice visibility scopes on BOTH (see invoices.routes.js).
+CREATE TABLE IF NOT EXISTS invoice_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  product_id INTEGER REFERENCES products(id),  -- NULL if the code doesn't match any synced product (discontinued, etc.)
+  product_code TEXT NOT NULL,
+  delivery_customer_id INTEGER REFERENCES customers(id),  -- NULL if the store isn't a synced customer
+  delivery_customer_code TEXT,                            -- kept raw for diagnosing unresolved codes
+  qty REAL NOT NULL,
+  unit_price REAL NOT NULL,
+  line_total REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice ON invoice_items(invoice_id);
+-- "Previously bought" (products.routes.js for-customer) runs a correlated
+-- subquery per product filtered by product_id - without this index SQLite
+-- can't narrow invoice_items before evaluating the customer_id/
+-- delivery_customer_id OR check, so it scans the whole table once per
+-- product (272k+ rows x hundreds of products - multi-minute hang in
+-- production, confirmed 2026-09-07 timing a group-billed customer).
+CREATE INDEX IF NOT EXISTS idx_invoice_items_product ON invoice_items(product_id);
+-- NOTE: the index on delivery_customer_id is created in db.js's migration list,
+-- NOT here. schema.sql runs before those migrations and is not error-tolerant,
+-- so indexing a column that an existing database has not been migrated to yet
+-- crashes the process on startup. Any index over a newly-added column must go
+-- in the migration list, after the ALTER TABLE that adds it.
+
+-- Customer sales totals by month, synced from SYSPRO's vw_FS_CustomerSalesByMonth
+-- (see docs/sql/vw_FS_CustomerSalesByMonth.sql). Ex-VAT NetSalesValue, same
+-- measure and same ProductClass filter as rep_monthly_sales, so customer and
+-- rep totals reconcile.
+--
+-- Drives "Sales 12 months" on the customer profile. That figure used to sum
+-- RouteOne's own orders table, so it only showed what was captured in the app;
+-- and it could not just be repointed at the invoices table, which holds 90 days
+-- and is keyed on the BILLED account (a group-billed store would read R0).
+--
+-- Keyed on customer_code rather than customer_id: the sync writes this before
+-- any guarantee that every code resolves to a synced customer, and an unmatched
+-- code should be kept rather than silently dropped.
+--
+-- Accumulates by SUM within a run, so it is wiped before each sync
+-- (CLEAR_BEFORE_SYNC), exactly like rep_monthly_sales.
+CREATE TABLE IF NOT EXISTS customer_monthly_sales (
+  customer_code TEXT NOT NULL,
+  month TEXT NOT NULL,                     -- 'YYYY-MM'
+  sales_value REAL NOT NULL DEFAULT 0,     -- ex-VAT
+  synced_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (customer_code, month)
+);
+CREATE INDEX IF NOT EXISTS idx_customer_monthly_sales_month ON customer_monthly_sales(customer_code, month);
+
+-- Rep sales totals by month, synced from SYSPRO's vw_FS_RepSalesByMonth
+-- (actual invoiced sales, credited to the customer's currently-assigned rep -
+-- not the app's own order-capture). Used for the Rep KPIs "sales vs target"
+-- figure and the Monthly History table. One row per rep per month - a sync
+-- run replaces the whole table, since a rep's SYSPRO sales can be split
+-- across branches and must be summed into a single total here.
+CREATE TABLE IF NOT EXISTS rep_monthly_sales (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rep_id INTEGER NOT NULL REFERENCES users(id),
+  month TEXT NOT NULL,                     -- YYYY-MM
+  sales_value REAL NOT NULL DEFAULT 0,
+  synced_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(rep_id, month)
+);
+CREATE INDEX IF NOT EXISTS idx_rep_monthly_sales_rep_month ON rep_monthly_sales(rep_id, month);
+
 -- Phase 4: SYSPRO sync + email integration ------------------------------------
 
 -- One row per sync run per entity (customers / products / stock / prices).
@@ -328,21 +472,43 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   status TEXT DEFAULT 'running',           -- running / completed / failed
   rows_read INTEGER DEFAULT 0,
   rows_upserted INTEGER DEFAULT 0,
+  rows_skipped INTEGER DEFAULT 0,          -- upserter deliberately skipped the row (not an error) - e.g. no matching rep
   error TEXT,
   started_at TEXT DEFAULT (datetime('now')),
   finished_at TEXT
 );
 
--- Configured email recipients for order/quote distribution (admin setup).
+-- Configured email recipients for order distribution and technical-form
+-- notifications (admin setup). category separates the two lists shown on the
+-- Email Settings page - 'orders' recipients appear as checkboxes when
+-- confirming an order; 'technical' recipients are notified when a
+-- technical-category form is submitted (see buildFormEmail in integration/email.js).
 CREATE TABLE IF NOT EXISTS email_recipients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,                      -- e.g., "Finance", "Management", "Accounts"
   email TEXT NOT NULL UNIQUE,
   description TEXT,
+  category TEXT NOT NULL DEFAULT 'orders', -- 'orders' | 'technical'
+  warehouse_id INTEGER REFERENCES warehouses(id), -- NULL = every branch
   created_at TEXT DEFAULT (datetime('now'))
 );
 
--- Outbound emails (orders to the orders department, quotes to customers).
+-- A rep's own personal "who else should get my orders" list - separate from
+-- email_recipients, which is admin/manager-managed and branch-wide. Any
+-- authenticated user manages their own rows here (self-service, no role
+-- gate); a rep can never see or send via another rep's saved contact - every
+-- read/write is scoped to user_id server-side, not just hidden in the UI.
+CREATE TABLE IF NOT EXISTS rep_email_contacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE (user_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_rep_email_contacts_user ON rep_email_contacts(user_id);
+
+-- Outbound emails (orders and quotes to the customer, rep, and/or configured recipients).
 CREATE TABLE IF NOT EXISTS email_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,                      -- order / quote
@@ -408,6 +574,34 @@ CREATE TABLE IF NOT EXISTS customer_intel (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Customer contact log: a rep records that something happened with a customer
+-- WITHOUT checking in or being on site - a phone call, an email, a WhatsApp,
+-- a meeting elsewhere.
+--
+-- Deliberately NOT stored as a visit. Visits drive the rep KPIs (compliance,
+-- coverage, strike rate in planning.routes.js), and those count every completed
+-- visit regardless of check_in_type - so logging phone calls as offsite visits
+-- would inflate a rep's visit numbers. Keeping contact separate means a rep can
+-- record real activity honestly without it distorting their visit metrics.
+--
+-- Append-only: a note is a record of what happened at a point in time, so it is
+-- never edited. A rep may delete their own mistakes (see customers.routes.js).
+-- Distinct from customer_intel, which is a single overwritten profile of what is
+-- currently true about the customer, not a history of events.
+CREATE TABLE IF NOT EXISTS customer_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  note_type TEXT NOT NULL DEFAULT 'note',  -- note / call / email / whatsapp / meeting / sample
+  note TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+-- Customer detail reads these newest-first for one customer.
+CREATE INDEX IF NOT EXISTS idx_customer_notes_customer ON customer_notes(customer_id, created_at DESC);
+-- "What has this rep been doing" - manager activity views and any future
+-- per-rep contact reporting.
+CREATE INDEX IF NOT EXISTS idx_customer_notes_user ON customer_notes(user_id, created_at DESC);
+
 -- Monthly sales budgets per rep (Jan-Dec).
 CREATE TABLE IF NOT EXISTS rep_budgets (
   rep_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -433,6 +627,47 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Sales push notifications: a manager broadcasts "push this product" to every
+-- rep. Not tied to any one customer's purchase history (unlike the "others
+-- buy, they don't" suggestions in intelligence.routes.js) - it's a flat
+-- announcement shown to all reps on every customer they open, highlighted in
+-- the Selling tips card until a manager turns it off.
+CREATE TABLE IF NOT EXISTS sales_pushes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Support tickets (Help Desk): any staff user logs an issue they're hitting.
+-- Admin/manager triage in the Support Tickets dashboard and move it through
+-- open -> in_progress -> resolved; the creator gets an email each time the
+-- status changes. customer_id/order_id are optional context, not required -
+-- most issues (login trouble, app bugs, general questions) aren't tied to
+-- either.
+CREATE TABLE IF NOT EXISTS support_tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  subject TEXT NOT NULL,
+  description TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'other',   -- system_issue / product_question / pricing / order_problem / customer_issue / other
+  priority TEXT NOT NULL DEFAULT 'normal',  -- low / normal / high / urgent
+  status TEXT NOT NULL DEFAULT 'open',      -- open / in_progress / resolved
+  customer_id INTEGER REFERENCES customers(id),
+  order_id INTEGER REFERENCES orders(id),
+  admin_notes TEXT,
+  resolved_by INTEGER REFERENCES users(id),
+  resolved_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_created_by ON support_tickets(created_by, status);
+
+CREATE INDEX IF NOT EXISTS idx_sales_pushes_active ON sales_pushes(active, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_route_cycles_rep ON route_cycles(rep_id, active);
 CREATE INDEX IF NOT EXISTS idx_route_cycle_stops_cycle ON route_cycle_stops(cycle_id, week_no, weekday);

@@ -5,7 +5,8 @@
 // Each active customer gets 2-4 invoices dated within the last ~30 days, a mix
 // of paid / outstanding / overdue, so the "Invoices — last 30 days" panels show
 // realistic data on both the mobile and back-office customer screens.
-import { db, getTodayISO, getLocalDateISO } from './db.js';
+import { dbx, getTodayISO, getLocalDateISO } from './db.js';
+import { wipeTables } from './dbh.js';
 
 if (process.env.NODE_ENV === 'production') {
   throw new Error('Demo invoice seeding is disabled when NODE_ENV=production.');
@@ -16,12 +17,11 @@ const rand = (n) => Math.floor(Math.random() * n);
 const dateStr = (daysAgo) => getLocalDateISO(-daysAgo);
 const today = getTodayISO();
 
-db.prepare('DELETE FROM invoices').run();
-db.prepare("DELETE FROM sqlite_sequence WHERE name = 'invoices'").run();
+await wipeTables(['invoices']);
 
-const customers = db.prepare("SELECT id, code FROM customers WHERE status != 'closed'").all();
+const customers = await dbx.prepare("SELECT id, code FROM customers WHERE status != 'closed'").all();
 
-const insert = db.prepare(`
+const insert = dbx.prepare(`
   INSERT INTO invoices (number, customer_id, customer_code, order_number, invoice_date, due_date,
     subtotal, vat_amount, total, amount_paid, balance, status)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -52,7 +52,7 @@ for (const cust of customers) {
     else if (dueDate < today) status = 'overdue';
     else status = 'outstanding';
 
-    insert.run(`INV-${invN}`, cust.id, cust.code, `SO-${44000 + rand(900)}`,
+    await insert.run(`INV-${invN}`, cust.id, cust.code, `SO-${44000 + rand(900)}`,
       invoiceDate, dueDate, subtotal, vat, total, amountPaid, balance, status);
     count += 1;
   }

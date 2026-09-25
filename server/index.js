@@ -5,7 +5,7 @@ import compression from 'compression';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { db, UPLOAD_DIR } from './db.js';
+import { dbx, UPLOAD_DIR } from './db.js';
 import { requireAuth, customerGuard, passwordGuard, scopeForUser } from './auth.js';
 import authRoutes from './routes/auth.routes.js';
 import customerRoutes from './routes/customers.routes.js';
@@ -25,8 +25,14 @@ import settingsRoutes from './routes/settings.routes.js';
 import invoicesRoutes from './routes/invoices.routes.js';
 import documentRoutes from './routes/documents.routes.js';
 import backupRoutes from './routes/backups.routes.js';
+import monitoringRoutes from './routes/monitoring.routes.js';
+import salesPushesRoutes from './routes/sales-pushes.routes.js';
+import draftsRoutes from './routes/drafts.routes.js';
+import supportRoutes from './routes/support.routes.js';
+import branchClockInRoutes from './routes/branch-clock-in.routes.js';
 import { startScheduler } from './integration/scheduler.js';
 import { startRepDigestScheduler } from './integration/repDigest.js';
+import { startSyncDigestScheduler } from './integration/syncDigest.js';
 import { startBackupScheduler } from './backup.js';
 import { ensureDefaultForms } from './defaultForms.js';
 
@@ -42,7 +48,7 @@ const configuredOrigins = (process.env.APP_ORIGIN || '')
   .filter(Boolean);
 const allowedOrigins = new Set(configuredOrigins.length
   ? configuredOrigins
-  : ['http://localhost:5190', 'http://127.0.0.1:5190']);
+  : ['http://localhost:4200', 'http://127.0.0.1:4200', 'http://localhost:5190', 'http://127.0.0.1:5190', 'http://localhost:3000', 'http://127.0.0.1:3000']);
 if (process.env.NODE_ENV === 'production' && !configuredOrigins.length) {
   throw new Error('APP_ORIGIN is required in production');
 }
@@ -91,34 +97,45 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/api/health', (req, res) => {
-  const ok = db.prepare('SELECT 1 AS ok').get()?.ok === 1;
+app.get('/api/health', async (req, res) => {
+  let ok = false;
+  try {
+    ok = (await dbx.prepare('SELECT 1 AS ok').get())?.ok === 1;
+  } catch { /* database unreachable: report unhealthy rather than erroring */ }
   res.status(ok ? 200 : 503).json({ ok });
 });
+// Shadow-validation mode only (see dbxShadow.js): lets a test wait for the
+// background SQL Server checks to finish before it kills this process.
+if (process.env.DBX_SHADOW_LOG) {
+  const { shadowIdle } = await import('./dbxShadow.js');
+  app.get('/api/__shadow/flush', async (req, res) => { await shadowIdle(); res.json({ ok: true }); });
+}
 app.use('/api/auth', authRoutes);
 
-function canReadUpload(user, relativePath) {
+async function canReadUpload(user, relativePath) {
   if (scopeForUser(user).isOffice) return true;
   if (user.role_name !== 'rep') return false;
-  if (db.prepare('SELECT 1 FROM documents WHERE file_path = ?').get(relativePath)) return true;
-  if (db.prepare(`
+  if (await dbx.prepare('SELECT 1 FROM documents WHERE file_path = ?').get(relativePath)) return true;
+  if (await dbx.prepare(`
     SELECT 1 FROM visit_photos p
     JOIN visits v ON v.id = p.visit_id
     WHERE p.path = ? AND v.rep_id = ?
   `).get(relativePath, user.id)) return true;
-  return !!db.prepare(`
+  // Exact substring match (not LIKE, where '_' in a filename would be a wildcard).
+  const contains = dbx.dialect === 'mssql' ? 'CHARINDEX(?, data) > 0' : 'instr(data, ?) > 0';
+  return !!await dbx.prepare(`
     SELECT 1 FROM form_submissions
-    WHERE user_id = ? AND instr(data, ?) > 0
+    WHERE user_id = ? AND ${contains}
   `).get(user.id, relativePath);
 }
 
-app.get('/uploads/:filename', requireAuth, customerGuard, passwordGuard, (req, res, next) => {
+app.get('/uploads/:filename', requireAuth, customerGuard, passwordGuard, async (req, res, next) => {
   const filename = req.params.filename;
   if (!/^[A-Za-z0-9_-]+\.(png|jpe?g|webp|pdf)$/i.test(filename)) {
     return res.status(404).end();
   }
   const relativePath = `/uploads/${filename}`;
-  if (!canReadUpload(req.user, relativePath)) {
+  if (!await canReadUpload(req.user, relativePath)) {
     return res.status(403).json({ error: 'File access denied' });
   }
   res.setHeader('Cache-Control', 'private, no-store');
@@ -144,6 +161,11 @@ app.use('/api', dashboardRoutes);
 app.use('/api', invoicesRoutes);
 app.use('/api', documentRoutes);
 app.use('/api', backupRoutes);
+app.use('/api', monitoringRoutes);
+app.use('/api', salesPushesRoutes);
+app.use('/api', draftsRoutes);
+app.use('/api', supportRoutes);
+app.use('/api', branchClockInRoutes);
 app.use('/api', settingsRoutes);
 
 // Serve the built client in production. Vite fingerprints asset filenames, so
@@ -161,19 +183,35 @@ if (fs.existsSync(dist)) {
 
 app.use((err, req, res, next) => {
   console.error(err);
+  // A sync holding a write lock past better-sqlite3's busy_timeout (db.js) throws
+  // this instead of waiting forever - tell the rep to retry rather than showing
+  // a bare "Internal server error" for what is a transient, self-resolving state.
+  if (err.code === 'SQLITE_BUSY') {
+    return res.status(503).json({ error: 'Sync in progress - please try again in a few minutes' });
+  }
   res.status(500).json({ error: 'Internal server error' });
 });
 
-export function startServer(port = process.env.API_PORT || 4200) {
-  const seeded = db.prepare('SELECT COUNT(*) AS n FROM roles').get().n > 0;
+// Last-resort backstop. Node's default for an unhandled rejection is to exit,
+// which would take every logged-in rep offline for a fault in a background job
+// that has nothing to do with serving requests. Individual jobs still handle
+// their own errors - this only stops one that slipped through from ending the
+// process. Logged loudly so it is fixed at source rather than left to absorb.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection (server kept running):', reason);
+});
+
+export async function startServer(port = process.env.API_PORT || 4200) {
+  const seeded = (await dbx.prepare('SELECT COUNT(*) AS n FROM roles').get()).n > 0;
   if (!seeded) console.log('! Database is empty - run "npm run seed" to load demo data.');
-  else ensureDefaultForms(); // add the standard customer-visit forms if missing
+  else await ensureDefaultForms(); // add the standard customer-visit forms if missing
 
   return app.listen(port, () => {
     console.log(`RouteOne API running on http://localhost:${port}`);
     if (process.env.DISABLE_SCHEDULERS !== '1') {
       startScheduler();
       startRepDigestScheduler();
+      startSyncDigestScheduler();
       startBackupScheduler();
     }
   });
@@ -181,4 +219,4 @@ export function startServer(port = process.env.API_PORT || 4200) {
 
 const isMain = process.argv[1] &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (isMain) startServer();
+if (isMain) await startServer();

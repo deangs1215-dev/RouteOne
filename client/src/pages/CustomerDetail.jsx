@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime } from '../api';
 import { Card, Stat, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge, OrderStatusBadge, VisitStatusBadge, QuoteStatusBadge } from '../components/ui';
 import VisitSummary from '../components/VisitSummary';
+import CustomerNotes from '../components/CustomerNotes';
 import LocationPicker from '../components/LocationPicker';
 import { CustomerModal } from './Customers';
 import { useAuth } from '../auth';
@@ -12,6 +13,7 @@ export default function CustomerDetail() {
   const { user } = useAuth();
   const [c, setC] = useState(null);
   const [intel, setIntel] = useState(null);
+  const [salesPushes, setSalesPushes] = useState([]);
   const [showEdit, setShowEdit] = useState(false);
   const [showRouteOneDetails, setShowRouteOneDetails] = useState(false);
   const [showContact, setShowContact] = useState(false);
@@ -22,6 +24,7 @@ export default function CustomerDetail() {
   useEffect(() => {
     load();
     api.get(`/intel/customer/${id}`).then(setIntel).catch(() => {});
+    api.get('/sales-pushes/active').then(setSalesPushes).catch(() => {});
   }, [id]);
 
   if (!c) return <Spinner />;
@@ -47,8 +50,10 @@ export default function CustomerDetail() {
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Stat label="Sales MTD" value={fmtR(c.stats.sales_mtd)} accent="text-brand-600" />
-        <Stat label="Sales 12 months" value={fmtR(c.stats.sales_12m)} />
+        <Stat label="Sales MTD" value={fmtR(c.stats.sales_mtd)} accent="text-brand-600" sub="SYSPRO invoiced, excl. VAT" />
+        {/* SYSPRO invoiced sales, not RouteOne order capture - the sub-label
+            says so because the two figures differ and reps will compare them. */}
+        <Stat label="Sales 12 months" value={fmtR(c.stats.sales_12m)} sub="SYSPRO invoiced, excl. VAT" />
         <Stat label="Total orders" value={c.stats.order_count} />
         <Stat label="Credit limit" value={fmtR(c.credit_limit)} sub={c.payment_terms} />
       </div>
@@ -64,6 +69,16 @@ export default function CustomerDetail() {
             <InfoRow label="Warehouse" value={c.warehouse_name ? `${c.warehouse_name} (${c.warehouse_code})` : null} />
             <InfoRow label="Credit limit" value={fmtR(c.credit_limit)} />
             <InfoRow label="Payment terms" value={c.payment_terms} />
+            {(c.ship_to_name || c.ship_to_address || c.ship_to_city || c.ship_to_postcode) && (
+              <>
+                <div className="border-t my-2" />
+                <div className="font-semibold text-slate-600">Ship-to address:</div>
+                <InfoRow label="Ship-to name" value={c.ship_to_name} />
+                <InfoRow label="Ship-to address" value={c.ship_to_address} />
+                <InfoRow label="Ship-to city" value={c.ship_to_city} />
+                <InfoRow label="Ship-to postcode" value={c.ship_to_postcode} />
+              </>
+            )}
           </dl>
         </Card>
 
@@ -88,12 +103,22 @@ export default function CustomerDetail() {
         </Card>
       </div>
 
+      {salesPushes.length > 0 && (
+        <Card title="Selling tips">
+          {salesPushes.map((p) => (
+            <div key={p.id} className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-bold text-red-700 last:mb-0">
+              📢 {p.message}
+            </div>
+          ))}
+        </Card>
+      )}
+
       {intel && (
         <Card title="Sales intelligence">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <span>Segment: <Badge color="#8b5cf6">{intel.segment}</Badge></span>
             <span>Churn risk: <b className={intel.risk_score >= 70 ? 'text-red-600' : intel.risk_score >= 40 ? 'text-amber-600' : 'text-emerald-600'}>{intel.risk_score}/100</b></span>
-            <span className="text-slate-500">Last order {intel.last_order_at ? `${intel.recency_days}d ago` : 'never'} · buys ~every {intel.cycle_days}d · R·F·M {intel.r_score}·{intel.f_score}·{intel.m_score}</span>
+            <span className="text-slate-500">Last invoice {intel.last_invoice_at ? `${intel.recency_days}d ago` : 'never'} · buys ~every {intel.cycle_days}d · R·F·M {intel.r_score}·{intel.f_score}·{intel.m_score}</span>
             {intel.decline_pct > 0 && <span className="text-red-600">▼ spend down {intel.decline_pct}% vs prior quarter</span>}
           </div>
           {(intel.suggested_products.length > 0 || intel.lapsed_products.length > 0) && (
@@ -138,6 +163,14 @@ export default function CustomerDetail() {
           </Table>
         </Card>
 
+        <CustomerNotes
+          customerId={c.id}
+          notes={c.notes || []}
+          currentUserId={user.id}
+          canDelete={['admin', 'manager'].includes(user.role)}
+          onChanged={load}
+        />
+
         <Card title="Visit history">
           <Table headers={['Date', 'Rep', 'Status', 'Outcome']} empty={c.recent_visits.length === 0 && 'No visits yet.'}>
             {c.recent_visits.map((v) => (
@@ -174,22 +207,24 @@ export default function CustomerDetail() {
         </Card>
       )}
 
-      <Card title="Invoices — last 30 days"
-        actions={c.invoice_summary?.outstanding > 0 && (
-          <span className="text-xs font-semibold text-red-600">{fmtR(c.invoice_summary.outstanding)} outstanding</span>
-        )}>
-        <Table headers={['Number', 'Date', 'Order', 'Status', 'Total', 'Balance']}
+      {/* R1-015: the "outstanding" figure here was never a real SYSPRO balance -
+          vw_FS_Invoices has no balance/amount_paid columns, so sync.js's
+          `row.balance ?? (total - paid)` fallback always resolved to balance =
+          total (paid defaults to 0). Hidden until a real balance is sourced from
+          SYSPRO (e.g. ArInvoice.InvoiceBal1, or customers.balance which already
+          holds the account's true AR balance from vw_FS_Customers). */}
+      <Card title="Invoices — last 30 days">
+        {/* Status and Balance columns both hidden: derived from the same fake
+            total-minus-paid fallback (see the comment above) - Status always
+            said "outstanding", and Balance always equalled Total. */}
+        <Table headers={['Number', 'Date', 'Order', 'Total']}
           empty={(!c.recent_invoices || c.recent_invoices.length === 0) && 'No invoices in the last 30 days.'}>
           {(c.recent_invoices || []).map((iv) => (
             <tr key={iv.id} className="hover:bg-slate-50">
-              <td className="td font-medium">{iv.number}</td>
+              <td className="td font-medium"><Link className="hover:text-brand-600" to={`/invoices/${iv.id}`}>{iv.number}</Link></td>
               <td className="td text-slate-500">{fmtDate(iv.invoice_date)}</td>
               <td className="td text-slate-500">{iv.order_number || '—'}</td>
-              <td className="td">
-                <Badge color={iv.status === 'paid' ? '#16a34a' : iv.status === 'overdue' ? '#dc2626' : '#d97706'}>{iv.status}</Badge>
-              </td>
               <td className="td font-medium">{fmtR(iv.total)}</td>
-              <td className={`td font-medium ${iv.balance > 0 ? 'text-red-600' : 'text-slate-400'}`}>{fmtR(iv.balance)}</td>
             </tr>
           ))}
         </Table>

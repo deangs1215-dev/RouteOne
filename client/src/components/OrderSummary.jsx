@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { fmtR, fmtDate } from '../api';
 import SignatureCapture from './SignatureCapture';
+import { PRICE_SOURCE_LABELS } from './NewOrderModal';
 
 export default function OrderSummary({ order, items, customer, type = 'order', showSignature = false, onSignatureSave }) {
   const [capturingSignature, setCapturingSignature] = useState(false);
@@ -34,6 +35,14 @@ export default function OrderSummary({ order, items, customer, type = 'order', s
             <span className="text-xs font-semibold text-slate-500 uppercase">{dateLabel}</span>
             <div className="text-sm text-slate-700">{fmtDate(order.quote_date || order.order_date)}</div>
           </div>
+          {/* The customer's own reference sits directly under our order number -
+              it's what they quote back to us and reconcile against. */}
+          {order.customer_order_no && (
+            <div>
+              <span className="text-xs font-semibold text-slate-500 uppercase">Your Order No. / Ref</span>
+              <div className="text-sm font-medium text-slate-800">{order.customer_order_no}</div>
+            </div>
+          )}
           {order.customer_code && (
             <div>
               <span className="text-xs font-semibold text-slate-500 uppercase">Account</span>
@@ -54,11 +63,11 @@ export default function OrderSummary({ order, items, customer, type = 'order', s
         </div>
 
         <div className="text-right">
-          <div className="text-xs font-semibold text-slate-500 uppercase mb-2">TO</div>
-          <div className="text-lg font-bold text-slate-800">{customer?.name}</div>
-          {customer?.contact_name && <div className="text-sm text-slate-600">{customer.contact_name}</div>}
-          {customer?.address && <div className="text-sm text-slate-600">{customer.address}</div>}
-          {customer?.city && <div className="text-sm text-slate-600">{customer.city}</div>}
+          <div className="text-xs font-semibold text-slate-500 uppercase mb-2">SHIP TO</div>
+          <div className="text-lg font-bold text-slate-800">{customer?.ship_to_name || customer?.name}</div>
+          {(customer?.ship_to_address || customer?.address) && <div className="text-sm text-slate-600">{customer?.ship_to_address || customer?.address}</div>}
+          {(customer?.ship_to_city || customer?.city) && <div className="text-sm text-slate-600">{customer?.ship_to_city || customer?.city}</div>}
+          {customer?.ship_to_postcode && <div className="text-sm text-slate-600">{customer?.ship_to_postcode}</div>}
         </div>
       </div>
 
@@ -83,6 +92,13 @@ export default function OrderSummary({ order, items, customer, type = 'order', s
                 <td className="px-4 py-3 text-right text-slate-700">
                   {fmtR(item.unit_price)}
                   {item.kg_price != null && <div className="text-xs text-slate-400">{fmtR(item.kg_price)}/kg</div>}
+                  {/* R1-044: which tier this price came from - covers both the
+                      pre-submit review screen (price_source computed live) and
+                      order/quote detail afterwards (price_source stored at
+                      submit time), since both render through this component. */}
+                  {item.price_source && PRICE_SOURCE_LABELS[item.price_source] && (
+                    <div className="text-xs text-slate-400">{PRICE_SOURCE_LABELS[item.price_source]}</div>
+                  )}
                 </td>
                 <td className="px-4 py-3 text-right font-medium text-slate-700">
                   {item.qty} {item.uom}
