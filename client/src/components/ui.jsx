@@ -170,13 +170,20 @@ export function Modal({ title, onClose, children, wide, footer }) {
   }, [onClose]);
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-slate-900/50 p-4" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`card mt-8 flex max-h-[calc(100vh-4rem)] w-full flex-col ${wide ? 'max-w-3xl' : 'max-w-lg'} p-0`}>
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3">
+      {/* mt-4 (not mt-8): the panel is capped at 100dvh-4rem, and p-4 on the
+          overlay already contributes 1rem top and bottom. An mt-8 on top of
+          that pushed the panel's lower edge past the bottom of the screen on
+          short viewports, taking the end of the scroll area with it. */}
+      <div className={`card modal-panel mt-4 flex w-full flex-col ${wide ? 'max-w-3xl' : 'max-w-lg'} p-0`}>
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-5 py-3">
           <h3 className="font-semibold">{title}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
         </div>
-        <div className="overflow-y-auto p-5">{children}</div>
-        {footer && <div className="border-t border-slate-100 px-5 py-3">{footer}</div>}
+        {/* min-h-0 is required: a flex child defaults to min-height:auto, which
+            refuses to shrink below its content, so overflow-y-auto never
+            actually scrolls on a tall form. */}
+        <div className="modal-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain p-5">{children}</div>
+        {footer && <div className="shrink-0 border-t border-slate-100 px-5 py-3">{footer}</div>}
       </div>
     </div>
   );

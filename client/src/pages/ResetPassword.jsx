@@ -55,16 +55,16 @@ export default function ResetPassword() {
           ) : (
             <form onSubmit={submit} className="space-y-4">
               <h1 className="text-lg font-bold">Choose a new password</h1>
-              <p className="text-sm text-slate-500">Use at least 12 characters.</p>
+              <p className="text-sm text-slate-500">Use at least 9 characters.</p>
               <ErrorNote error={error} />
               <div>
                 <label className="label">New password</label>
-                <input className="input" type="password" minLength={12} maxLength={128} autoComplete="new-password"
+                <input className="input" type="password" minLength={9} maxLength={128} autoComplete="new-password"
                   value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required autoFocus />
               </div>
               <div>
                 <label className="label">Confirm new password</label>
-                <input className="input" type="password" minLength={12} maxLength={128} autoComplete="new-password"
+                <input className="input" type="password" minLength={9} maxLength={128} autoComplete="new-password"
                   value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required />
               </div>
               <button className="btn-primary w-full" disabled={busy}>{busy ? 'Updating…' : 'Update password'}</button>

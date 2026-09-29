@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime } from '../api';
 import { Card, Table, Spinner, QuoteStatusBadge, ErrorNote } from '../components/ui';
+import { PRICE_SOURCE_LABELS } from '../components/NewOrderModal';
 
 export default function QuoteDetail() {
   const { id } = useParams();
@@ -75,7 +76,12 @@ export default function QuoteDetail() {
               <td className="td font-medium">{i.product_name}</td>
               <td className="td">{i.qty}</td>
               <td className="td text-slate-500">{i.uom}</td>
-              <td className="td">{fmtR(i.unit_price)}</td>
+              <td className="td">
+                {fmtR(i.unit_price)}
+                {i.price_source && PRICE_SOURCE_LABELS[i.price_source] && (
+                  <div className="text-[11px] font-normal text-slate-400">{PRICE_SOURCE_LABELS[i.price_source]}</div>
+                )}
+              </td>
               <td className="td font-medium">{fmtR(i.line_total)}</td>
             </tr>
           ))}

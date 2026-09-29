@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { Modal, ErrorNote, Spinner } from './ui';
 
-export default function OrderSendModal({ order, kind = 'order', onClose, onSent }) {
+export default function OrderSendModal({ order, kind = 'order', warehouseId, onClose, onSent }) {
   const [recipients, setRecipients] = useState(null);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [sendToRep, setSendToRep] = useState(false);
@@ -12,12 +12,16 @@ export default function OrderSendModal({ order, kind = 'order', onClose, onSent 
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.get('/email-recipients').then((rows) => {
+    // Only the 'orders' list (this was previously fetching every category,
+    // Technical included, and offering those as order-send checkboxes too),
+    // and only recipients set up for this order/quote's own branch.
+    const wid = warehouseId ?? order.warehouse_id;
+    api.get(`/email-recipients?category=orders${wid ? `&warehouse_id=${wid}` : ''}`).then((rows) => {
       setRecipients(rows);
       // Pre-select all by default
       setSelectedIds(new Set(rows.map(r => r.id)));
     }).catch(console.error);
-  }, []);
+  }, [warehouseId, order.warehouse_id]);
 
   const handleRecipientChange = (id) => {
     const newIds = new Set(selectedIds);

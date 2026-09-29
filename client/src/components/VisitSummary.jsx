@@ -19,17 +19,50 @@ export default function VisitSummary({ visitId }) {
   const { visit, orders = [], quotes = [], forms = [], photo_count = 0 } = summary;
 
   const hasActivity = orders.length > 0 || quotes.length > 0 || forms.length > 0 || photo_count > 0;
-
-  if (!hasActivity) {
-    return (
-      <div className="card p-4 text-center text-slate-400 text-sm">
-        No orders, quotes, or forms recorded for this visit.
-      </div>
-    );
-  }
+  const OUTCOME_LABEL = { order: 'Order placed', no_order: 'No order', follow_up: 'Follow-up needed', other: 'Other' };
 
   return (
     <div className="space-y-3">
+      {/* Visit details - check-in/out, outcome, notes. Always shown, even when
+          there's no order/quote/form to report - a visit with just notes and
+          no sale is exactly the case reps most need to be able to look back at. */}
+      <div className="card p-4 space-y-2 text-sm">
+        <div className="flex justify-between text-slate-500">
+          <span>Checked in</span>
+          <span className="text-slate-800">{visit.check_in_at ? fmtDateTime(visit.check_in_at) : '—'}{visit.check_in_type && visit.check_in_type !== 'onsite' ? ` (${visit.check_in_type.replace('_', ' ')})` : ''}</span>
+        </div>
+        <div className="flex justify-between text-slate-500">
+          <span>Checked out</span>
+          <span className="text-slate-800">{visit.check_out_at ? fmtDateTime(visit.check_out_at) : '—'}</span>
+        </div>
+        {visit.check_in_address && (
+          <div className="flex justify-between text-slate-500">
+            <span>Address</span>
+            <span className="text-slate-800 text-right">{visit.check_in_address}</span>
+          </div>
+        )}
+        {visit.outcome && (
+          <div className="flex justify-between items-center text-slate-500">
+            <span>Outcome</span>
+            <Badge color={visit.outcome === 'order' ? '#16a34a' : visit.outcome === 'follow_up' ? '#f59e0b' : '#64748b'}>
+              {OUTCOME_LABEL[visit.outcome] || visit.outcome}
+            </Badge>
+          </div>
+        )}
+        {visit.notes && (
+          <div className="pt-1 border-t border-slate-100">
+            <div className="text-slate-500 mb-1">Notes</div>
+            <div className="text-slate-800 whitespace-pre-wrap">{visit.notes}</div>
+          </div>
+        )}
+      </div>
+
+      {!hasActivity && (
+        <div className="card p-4 text-center text-slate-400 text-sm">
+          No orders, quotes, or forms recorded for this visit.
+        </div>
+      )}
+
       {/* Orders */}
       {orders.length > 0 && (
         <div className="card p-4">

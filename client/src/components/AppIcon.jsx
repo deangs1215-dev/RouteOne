@@ -22,7 +22,8 @@ const GRAD = {
   users:       ['#7c8aa0', '#3f4d63'],
   today:       ['#f79a3c', '#e5701f'],
   shop:        ['#2aa5d0', '#1a7ea8'],
-  account:     ['#5aa9c9', '#3577a0']
+  account:     ['#5aa9c9', '#3577a0'],
+  support:     ['#f76d6d', '#d33a3a']
 };
 
 const DARK = 'rgba(0,0,0,0.2)'; // engraved detail lines/cut-outs
@@ -168,6 +169,16 @@ function Glyph({ name }) {
         <>
           <circle cx="24" cy="18.5" r="5.2" />
           <path d="M13 34.5c0-5.4 4.7-9 11-9s11 3.6 11 9c0 .6-.4 1-1 1H14c-.6 0-1-.4-1-1z" />
+        </>
+      );
+    case 'support':
+      return (
+        <>
+          <circle cx="24" cy="24" r="12" fill="none" stroke="#fff" strokeWidth="3" />
+          <circle cx="24" cy="24" r="3.4" fill={DARK} />
+          <g stroke="#fff" strokeWidth="3" strokeLinecap="round">
+            <path d="M24 12v3.6M24 32.4V36M12 24h3.6M32.4 24H36" />
+          </g>
         </>
       );
     case 'dashboard':

@@ -1,50 +1,45 @@
 // Loads demo data for a bakery-ingredient distributor. Safe to re-run: wipes and reloads.
 import bcrypt from 'bcryptjs';
-import { db, setSetting, getTodayISO } from './db.js';
+import { dbx, getTodayISO } from './db.js';
+import { setSetting, wipeTables } from './dbh.js';
 
 if (process.env.NODE_ENV === 'production') {
   throw new Error('Demo seeding is disabled when NODE_ENV=production.');
 }
 
-db.pragma('foreign_keys = OFF');
-const wipe = db.transaction(() => {
-  for (const t of ['rep_locations', 'form_submissions', 'form_templates', 'visit_photos', 'quote_items', 'quotes', 'price_rules',
-    'invoices', 'order_items', 'orders', 'visits', 'customer_prices', 'customer_contacts',
-    'customers', 'warehouses', 'products', 'product_categories', 'users', 'territories', 'roles', 'activity_log']) {
-    db.prepare(`DELETE FROM ${t}`).run();
-    db.prepare(`DELETE FROM sqlite_sequence WHERE name = ?`).run(t);
-  }
-});
-wipe();
-db.pragma('foreign_keys = ON');
-setSetting('counter_ORD', '0');
-setSetting('counter_CUS', '0');
+const WIPE_TABLES = ['rep_locations', 'form_submissions', 'form_templates', 'visit_photos', 'quote_items', 'quotes', 'price_rules',
+  'invoices', 'order_items', 'orders', 'visits', 'customer_prices', 'customer_contacts',
+  'customers', 'warehouses', 'products', 'product_categories', 'users', 'territories', 'roles', 'activity_log'];
+
+await wipeTables(WIPE_TABLES);
+await setSetting('counter_ORD', '0');
+await setSetting('counter_CUS', '0');
 
 // Roles + users -------------------------------------------------------------
 const roleIds = {};
 for (const name of ['admin', 'manager', 'office', 'rep', 'customer']) {
-  roleIds[name] = db.prepare('INSERT INTO roles (name) VALUES (?)').run(name).lastInsertRowid;
+  roleIds[name] = (await dbx.prepare('INSERT INTO roles (name) VALUES (?)').run(name)).lastInsertRowid;
 }
 
 const terr = {};
 for (const [name, region] of [['Cape Town North', 'Western Cape'], ['Cape Town South', 'Western Cape'], ['Winelands', 'Western Cape']]) {
-  terr[name] = db.prepare('INSERT INTO territories (name, region) VALUES (?, ?)').run(name, region).lastInsertRowid;
+  terr[name] = (await dbx.prepare('INSERT INTO territories (name, region) VALUES (?, ?)').run(name, region)).lastInsertRowid;
 }
 
 const hash = bcrypt.hashSync('demo123', 10);
-const addUser = (name, email, role, territory = null, target = 0) =>
-  db.prepare('INSERT INTO users (name, email, password_hash, role_id, territory_id, sales_target) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(name, email, hash, roleIds[role], territory, target).lastInsertRowid;
+const addUser = async (name, email, role, territory = null, target = 0) =>
+  (await dbx.prepare('INSERT INTO users (name, email, password_hash, role_id, territory_id, sales_target) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(name, email, hash, roleIds[role], territory, target)).lastInsertRowid;
 
-addUser('Sarah Admin', 'admin@demo.co.za', 'admin');
-const managerId = addUser('Pieter Manager', 'manager@demo.co.za', 'manager');
-const rep1 = addUser('Lizl Rep', 'rep@demo.co.za', 'rep', terr['Cape Town North'], 250000);
-const rep2 = addUser('Sergio Rep', 'rep2@demo.co.za', 'rep', terr['Cape Town South'], 220000);
+await addUser('Sarah Admin', 'admin@demo.co.za', 'admin');
+const managerId = await addUser('Pieter Manager', 'manager@demo.co.za', 'manager');
+const rep1 = await addUser('Lizl Rep', 'rep@demo.co.za', 'rep', terr['Cape Town North'], 250000);
+const rep2 = await addUser('Sergio Rep', 'rep2@demo.co.za', 'rep', terr['Cape Town South'], 220000);
 
 // Products ------------------------------------------------------------------
 const cats = {};
 for (const name of ['Flour & Premixes', 'Bread Improvers', 'Margarines & Fats', 'Fillings & Toppings', 'Yeast & Raising Agents']) {
-  cats[name] = db.prepare('INSERT INTO product_categories (name) VALUES (?)').run(name).lastInsertRowid;
+  cats[name] = (await dbx.prepare('INSERT INTO product_categories (name) VALUES (?)').run(name)).lastInsertRowid;
 }
 
 const PRODUCTS = [
@@ -68,16 +63,16 @@ const PRODUCTS = [
 ];
 const prodIds = [];
 for (const [code, name, cat, uom, pack, price, cost, stock] of PRODUCTS) {
-  prodIds.push(db.prepare(`
+  prodIds.push((await dbx.prepare(`
     INSERT INTO products (code, name, category_id, uom, pack_size, list_price, cost_price, stock_qty)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(code, name, cats[cat], uom, pack, price, cost, stock).lastInsertRowid);
+  `).run(code, name, cats[cat], uom, pack, price, cost, stock)).lastInsertRowid);
 }
 
 // Warehouses ------------------------------------------------------------------
 const wh = {};
 for (const [code, name] of [['FG', 'Cape Town — Finished Goods'], ['JHB', 'Johannesburg Distribution Centre'], ['DBN', 'Durban Depot']]) {
-  wh[code] = db.prepare('INSERT INTO warehouses (code, name) VALUES (?, ?)').run(code, name).lastInsertRowid;
+  wh[code] = (await dbx.prepare('INSERT INTO warehouses (code, name) VALUES (?, ?)').run(code, name)).lastInsertRowid;
 }
 
 // Customers -----------------------------------------------------------------
@@ -100,62 +95,62 @@ let cusN = 0;
 for (const [name, cls, t, rep, contact, city, lat, lng, freq] of CUSTOMERS) {
   cusN += 1;
   const code = `CUS-${String(cusN).padStart(5, '0')}`;
-  const id = db.prepare(`
+  const id = (await dbx.prepare(`
     INSERT INTO customers (code, name, classification, territory_id, rep_id, contact_name, phone, email,
       address, city, lat, lng, credit_limit, payment_terms, visit_frequency, warehouse_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(code, name, cls, terr[t], rep, contact, `+27 82 ${String(1000000 + cusN * 13579).slice(0, 7)}`,
     `orders@${name.toLowerCase().replace(/[^a-z]/g, '')}.co.za`, `${cusN * 7} Main Road`, city, lat, lng,
-    cls === 'A' ? 150000 : cls === 'B' ? 75000 : 25000, '30 days', freq, wh.FG).lastInsertRowid;
+    cls === 'A' ? 150000 : cls === 'B' ? 75000 : 25000, '30 days', freq, wh.FG)).lastInsertRowid;
   custIds.push(id);
-  db.prepare('INSERT INTO customer_contacts (customer_id, name, role, phone) VALUES (?, ?, ?, ?)')
+  await dbx.prepare('INSERT INTO customer_contacts (customer_id, name, role, phone) VALUES (?, ?, ?, ?)')
     .run(id, contact, 'Owner', `+27 82 ${String(1000000 + cusN * 13579).slice(0, 7)}`);
 }
-setSetting('counter_CUS', String(cusN));
+await setSetting('counter_CUS', String(cusN));
 
 // Contract prices for the A-grade accounts (about 8% below list).
 for (const custId of [custIds[0], custIds[3], custIds[5], custIds[9]]) {
   for (const prodId of prodIds.slice(0, 6)) {
-    const list = db.prepare('SELECT list_price FROM products WHERE id = ?').get(prodId).list_price;
-    db.prepare('INSERT INTO customer_prices (customer_id, product_id, price) VALUES (?, ?, ?)')
+    const list = (await dbx.prepare('SELECT list_price FROM products WHERE id = ?').get(prodId)).list_price;
+    await dbx.prepare('INSERT INTO customer_prices (customer_id, product_id, price) VALUES (?, ?, ?)')
       .run(custId, prodId, Math.round(list * 0.92 * 100) / 100);
   }
 }
 
 // Price rules (Phase 2) -------------------------------------------------------
-const addRule = db.prepare(`
+const addRule = dbx.prepare(`
   INSERT INTO price_rules (name, product_id, category_id, rule_type, discount_pct, fixed_price, min_qty, starts_on, ends_on)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 // Volume break: 10+ bags of any flour/premix = 5% off list.
-addRule.run('Flour volume 10+ (5% off)', null, cats['Flour & Premixes'], 'discount_pct', 5, null, 10, null, null);
+await addRule.run('Flour volume 10+ (5% off)', null, cats['Flour & Premixes'], 'discount_pct', 5, null, 10, null, null);
 // Bigger break at 25 bags.
-addRule.run('Flour volume 25+ (10% off)', null, cats['Flour & Premixes'], 'discount_pct', 10, null, 25, null, null);
+await addRule.run('Flour volume 25+ (10% off)', null, cats['Flour & Premixes'], 'discount_pct', 10, null, 25, null, null);
 // Winter promo on margarines, date-bound around today.
 const today = new Date();
 const promoStart = new Date(today.getTime() - 7 * 86400000).toISOString().slice(0, 10);
 const promoEnd = new Date(today.getTime() + 21 * 86400000).toISOString().slice(0, 10);
-addRule.run('Winter margarine promo (8% off)', null, cats['Margarines & Fats'], 'discount_pct', 8, null, 0, promoStart, promoEnd);
+await addRule.run('Winter margarine promo (8% off)', null, cats['Margarines & Fats'], 'discount_pct', 8, null, 0, promoStart, promoEnd);
 // Fixed clearance price on strawberry glaze.
-addRule.run('Strawberry glaze clearance', prodIds[12], null, 'fixed_price', null, 249, 0, null, null);
+await addRule.run('Strawberry glaze clearance', prodIds[12], null, 'fixed_price', null, 249, 0, null, null);
 
 // Form templates (Phase 2) ----------------------------------------------------
-const addForm = db.prepare('INSERT INTO form_templates (name, description, fields) VALUES (?, ?, ?)');
-addForm.run('Shelf & stock check', 'Capture shelf presence and competitor activity at the customer.', JSON.stringify([
+const addForm = dbx.prepare('INSERT INTO form_templates (name, description, fields) VALUES (?, ?, ?)');
+await addForm.run('Shelf & stock check', 'Capture shelf presence and competitor activity at the customer.', JSON.stringify([
   { key: 'our_products_on_shelf', label: 'Our products visible on shelf?', type: 'checkbox' },
   { key: 'shelf_share_pct', label: 'Estimated shelf share (%)', type: 'number', required: true },
   { key: 'competitor_brands', label: 'Competitor brands present', type: 'text' },
   { key: 'stock_condition', label: 'Stock condition', type: 'select', options: ['Good', 'Low', 'Out of stock', 'Damaged'], required: true },
   { key: 'shelf_photo', label: 'Shelf photo', type: 'photo' }
 ]));
-addForm.run('Customer complaint', 'Log a product or delivery complaint raised during a visit.', JSON.stringify([
+await addForm.run('Customer complaint', 'Log a product or delivery complaint raised during a visit.', JSON.stringify([
   { key: 'complaint_type', label: 'Complaint type', type: 'select', options: ['Product quality', 'Delivery', 'Pricing', 'Service', 'Other'], required: true },
   { key: 'product_code', label: 'Product code (if applicable)', type: 'text' },
   { key: 'description', label: 'Description', type: 'text', required: true },
   { key: 'photo', label: 'Photo evidence', type: 'photo' },
   { key: 'requires_credit', label: 'Credit/return requested?', type: 'checkbox' }
 ]));
-addForm.run('New customer survey', 'First-visit survey for onboarding a prospective customer.', JSON.stringify([
+await addForm.run('New customer survey', 'First-visit survey for onboarding a prospective customer.', JSON.stringify([
   { key: 'business_type', label: 'Business type', type: 'select', options: ['Bakery', 'Café', 'Supermarket', 'Caterer', 'Other'], required: true },
   { key: 'weekly_flour_usage', label: 'Weekly flour usage (bags)', type: 'number' },
   { key: 'current_supplier', label: 'Current supplier', type: 'text' },
@@ -168,11 +163,11 @@ const rand = (n) => Math.floor(Math.random() * n);
 const custRep = (i) => CUSTOMERS[i][3];
 let ordN = 0;
 
-const insertOrder = db.prepare(`
+const insertOrder = dbx.prepare(`
   INSERT INTO orders (number, customer_id, rep_id, visit_id, warehouse_id, status, order_date, subtotal, vat_amount, total, notes)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
-const insertItem = db.prepare(`
+const insertItem = dbx.prepare(`
   INSERT INTO order_items (order_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
@@ -196,28 +191,28 @@ for (let day = 60; day >= 0; day--) {
     const checkOut = `${date} ${String(inH + 1).padStart(2, '0')}:${String(rand(60)).padStart(2, '0')}:00`;
     const placesOrder = Math.random() < 0.7;
     const isToday = day === 0;
-    const visitId = db.prepare(`
+    const visitId = (await dbx.prepare(`
       INSERT INTO visits (customer_id, rep_id, planned_date, purpose, status, check_in_at, check_in_lat, check_in_lng,
         check_out_at, check_out_lat, check_out_lng, outcome, notes)
       VALUES (?, ?, ?, 'sales call', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       custId, repId, date,
       isToday ? 'planned' : 'completed',
-      isToday ? null : checkIn, isToday ? null : CUSTOMERS[ci][7], isToday ? null : CUSTOMERS[ci][8],
-      isToday ? null : checkOut, isToday ? null : CUSTOMERS[ci][7], isToday ? null : CUSTOMERS[ci][8],
+      isToday ? null : checkIn, isToday ? null : CUSTOMERS[ci][6], isToday ? null : CUSTOMERS[ci][7],
+      isToday ? null : checkOut, isToday ? null : CUSTOMERS[ci][6], isToday ? null : CUSTOMERS[ci][7],
       isToday ? null : (placesOrder ? 'order' : 'no_order'),
       isToday ? null : (placesOrder ? 'Stock levels checked, order placed.' : 'No order needed this cycle.')
-    ).lastInsertRowid;
+    )).lastInsertRowid;
 
     if (!placesOrder || isToday) continue;
 
     // Build an order of 2-5 lines.
     ordN += 1;
-    const orderId = insertOrder.run(
+    const orderId = (await insertOrder.run(
       `ORD-${String(ordN).padStart(5, '0')}`, custId, repId, visitId, wh.FG,
       day < 2 ? 'submitted' : day < 7 ? 'processing' : 'invoiced',
       checkOut, 0, 0, 0, null
-    ).lastInsertRowid;
+    )).lastInsertRowid;
     let subtotal = 0;
     const lines = 2 + rand(4);
     const used = new Set();
@@ -225,28 +220,28 @@ for (let day = 60; day >= 0; day--) {
       const pi = rand(prodIds.length);
       if (used.has(pi)) continue;
       used.add(pi);
-      const prod = db.prepare('SELECT * FROM products WHERE id = ?').get(prodIds[pi]);
-      const contract = db.prepare('SELECT price FROM customer_prices WHERE customer_id = ? AND product_id = ?').get(custId, prod.id);
+      const prod = await dbx.prepare('SELECT * FROM products WHERE id = ?').get(prodIds[pi]);
+      const contract = await dbx.prepare('SELECT price FROM customer_prices WHERE customer_id = ? AND product_id = ?').get(custId, prod.id);
       const price = contract ? contract.price : prod.list_price;
       const qty = 1 + rand(8);
       const lineTotal = Math.round(qty * price * 100) / 100;
       subtotal += lineTotal;
-      insertItem.run(orderId, prod.id, prod.name, qty, prod.uom, price, 0, lineTotal);
+      await insertItem.run(orderId, prod.id, prod.name, qty, prod.uom, price, 0, lineTotal);
     }
     const vat = Math.round(subtotal * 0.15 * 100) / 100;
-    db.prepare('UPDATE orders SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
+    await dbx.prepare('UPDATE orders SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
       .run(Math.round(subtotal * 100) / 100, vat, Math.round((subtotal + vat) * 100) / 100, orderId);
   }
 }
-setSetting('counter_ORD', String(ordN));
+await setSetting('counter_ORD', String(ordN));
 
 // A few open quotes (Phase 2) -------------------------------------------------
 let quoN = 0;
-const insertQuote = db.prepare(`
+const insertQuote = dbx.prepare(`
   INSERT INTO quotes (number, customer_id, rep_id, status, quote_date, valid_until, subtotal, vat_amount, total, notes)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
-const insertQuoteItem = db.prepare(`
+const insertQuoteItem = dbx.prepare(`
   INSERT INTO quote_items (quote_id, product_id, product_name, qty, uom, unit_price, discount_pct, line_total)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
@@ -254,40 +249,41 @@ for (const [ci, daysAgo, status] of [[3, 2, 'sent'], [5, 5, 'sent'], [7, 12, 're
   quoN += 1;
   const qDate = new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10) + ' 10:30:00';
   const validUntil = new Date(Date.now() + (14 - daysAgo) * 86400000).toISOString().slice(0, 10);
-  const quoteId = insertQuote.run(`QUO-${String(quoN).padStart(5, '0')}`, custIds[ci], custRep(ci), status, qDate, validUntil, 0, 0, 0, null).lastInsertRowid;
+  const quoteId = (await insertQuote.run(`QUO-${String(quoN).padStart(5, '0')}`, custIds[ci], custRep(ci), status, qDate, validUntil, 0, 0, 0, null)).lastInsertRowid;
   let subtotal = 0;
   for (let l = 0; l < 2 + rand(3); l++) {
-    const prod = db.prepare('SELECT * FROM products WHERE id = ?').get(prodIds[rand(prodIds.length)]);
+    const prod = await dbx.prepare('SELECT * FROM products WHERE id = ?').get(prodIds[rand(prodIds.length)]);
     const qty = 2 + rand(10);
     const lineTotal = Math.round(qty * prod.list_price * 100) / 100;
     subtotal += lineTotal;
-    insertQuoteItem.run(quoteId, prod.id, prod.name, qty, prod.uom, prod.list_price, 0, lineTotal);
+    await insertQuoteItem.run(quoteId, prod.id, prod.name, qty, prod.uom, prod.list_price, 0, lineTotal);
   }
   const vat = Math.round(subtotal * 0.15 * 100) / 100;
-  db.prepare('UPDATE quotes SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
+  await dbx.prepare('UPDATE quotes SET subtotal = ?, vat_amount = ?, total = ? WHERE id = ?')
     .run(Math.round(subtotal * 100) / 100, vat, Math.round((subtotal + vat) * 100) / 100, quoteId);
 }
-setSetting('counter_QUO', String(quoN));
+await setSetting('counter_QUO', String(quoN));
 
 // Customer portal login (Phase 5): Maria at Golden Crust Bakery ---------------
-db.prepare('INSERT INTO users (name, email, password_hash, role_id, customer_id) VALUES (?, ?, ?, ?, ?)')
+await dbx.prepare('INSERT INTO users (name, email, password_hash, role_id, customer_id) VALUES (?, ?, ?, ?, ?)')
   .run('Maria Santos', 'customer@demo.co.za', hash, roleIds.customer, custIds[0]);
 
 // Route order for today's planned visits + rep positions (Phase 3) ------------
 for (const repId of [rep1, rep2]) {
-  const todays = db.prepare(
+  const todays = await dbx.prepare(
     "SELECT id FROM visits WHERE rep_id = ? AND status = 'planned' AND date(planned_date) = date('now') ORDER BY id"
   ).all(repId);
-  todays.forEach((v, i) =>
-    db.prepare('UPDATE visits SET route_order = ? WHERE id = ?').run(i + 1, v.id));
+  for (const [i, v] of todays.entries()) {
+    await dbx.prepare('UPDATE visits SET route_order = ? WHERE id = ?').run(i + 1, v.id);
+  }
 }
 // Last known positions: Lizl near Milnerton, Sergio near Claremont.
-db.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(rep1, -33.885, 18.51);
-db.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(rep2, -33.975, 18.47);
+await dbx.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(rep1, -33.885, 18.51);
+await dbx.prepare('INSERT INTO rep_locations (user_id, lat, lng) VALUES (?, ?, ?)').run(rep2, -33.975, 18.47);
 
 // Demo invoices from "SYSPRO" (Phase 5): 2-4 per customer within the last 30
 // days, mixed paid/outstanding/overdue. Stands in for the invoice sync feed.
-const insertInvoice = db.prepare(`
+const insertInvoice = dbx.prepare(`
   INSERT INTO invoices (number, customer_id, customer_code, order_number, invoice_date, due_date,
     subtotal, vat_amount, total, amount_paid, balance, status)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -295,7 +291,7 @@ const insertInvoice = db.prepare(`
 const todayStr = getTodayISO();
 let invN = 90000;
 for (const custId of custIds) {
-  const cust = db.prepare('SELECT code FROM customers WHERE id = ?').get(custId);
+  const cust = await dbx.prepare('SELECT code FROM customers WHERE id = ?').get(custId);
   const n = 2 + rand(3);
   for (let i = 0; i < n; i++) {
     invN += 1;
@@ -310,7 +306,7 @@ for (const custId of custIds) {
     const amountPaid = roll < 0.45 ? total : roll < 0.6 ? Math.round(total * 0.5 * 100) / 100 : 0;
     const balance = Math.round((total - amountPaid) * 100) / 100;
     const status = balance <= 0.005 ? 'paid' : dueDate < todayStr ? 'overdue' : 'outstanding';
-    insertInvoice.run(`INV-${invN}`, custId, cust.code, `SO-${44000 + rand(900)}`,
+    await insertInvoice.run(`INV-${invN}`, custId, cust.code, `SO-${44000 + rand(900)}`,
       invoiceDate, dueDate, subtotal, vat, total, amountPaid, balance, status);
   }
 }

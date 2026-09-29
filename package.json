@@ -12,6 +12,7 @@
     "seed:invoices": "node server/seed-invoices.js",
     "build": "vite build client",
     "test": "node --test --test-concurrency=1 server/tests/*.test.js",
+    "test:mssql": "node server/tests/run-mssql.mjs",
     "backup": "node server/backup.js",
     "start": "node --use-system-ca server/index.js"
   },

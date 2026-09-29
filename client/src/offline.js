@@ -16,8 +16,26 @@ export function onOfflineChange(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
 }
+// R1-033: each outbox item carries a status - 'pending' (waiting to sync),
+// 'syncing' (send in flight), 'synced' (just succeeded - lingers briefly so
+// the rep sees the confirmation, then is removed) or 'failed' (the server
+// rejected it for a real reason, e.g. validation - not a connectivity issue,
+// so retrying automatically would just fail again the same way). `pending`
+// here counts everything NOT yet successfully synced (waiting + syncing +
+// failed), matching what earlier UI already called "pending sync"; `synced`
+// is broken out separately since those items are done, just not yet cleared.
 function emit() {
-  const state = { online: navigator.onLine, pending: getOutbox().length, snapshotAt: getSnapshot()?.generated_at || null };
+  const items = getOutbox();
+  const state = {
+    online: navigator.onLine,
+    items,
+    waiting: items.filter((o) => o.status === 'pending' || !o.status).length,
+    syncing: items.filter((o) => o.status === 'syncing').length,
+    failed: items.filter((o) => o.status === 'failed').length,
+    synced: items.filter((o) => o.status === 'synced').length,
+    pending: items.filter((o) => o.status !== 'synced').length,
+    snapshotAt: getSnapshot()?.generated_at || null
+  };
   listeners.forEach((fn) => fn(state));
 }
 
@@ -103,11 +121,47 @@ export async function clearOfflineData() {
   emit();
 }
 
-export function queueWrite(method, path, body) {
-  const outbox = getOutbox();
-  outbox.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), method, path, body, queued_at: new Date().toISOString() });
+function persistOutbox(outbox) {
   localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
   emit();
+}
+
+export function queueWrite(method, path, body) {
+  const outbox = getOutbox();
+  outbox.push({ id: Date.now() + Math.random().toString(36).slice(2, 6), method, path, body, queued_at: new Date().toISOString(), status: 'pending' });
+  persistOutbox(outbox);
+}
+
+// R1-033: friendly label for an outbox item, for the sync-status list - the
+// item itself only carries the raw method/path it'll be replayed with.
+export function describeOutboxItem({ method, path }) {
+  if (method === 'POST' && path === '/orders') return 'Order';
+  if (method === 'POST' && path === '/quotes') return 'Quote';
+  if (method === 'POST' && path === '/visits/log-offline') return 'Visit';
+  if (method === 'POST' && /^\/visits\/\d+\/check-out$/.test(path)) return 'Visit check-out';
+  if (method === 'POST' && /^\/visits\/\d+\/photos$/.test(path)) return 'Visit photo';
+  if (method === 'DELETE' && /^\/visits\/\d+\/photos\/\d+$/.test(path)) return 'Delete photo';
+  if (/^\/customers\/\d+\/notes$/.test(path)) return 'Customer note';
+  if (/^\/customers\/\d+\/intel-notes$/.test(path)) return 'Field notes';
+  if (/^\/customers\/\d+\/details$/.test(path)) return 'Customer details';
+  if (method === 'POST' && path === '/form-submissions') return 'Form submission';
+  return `${method} ${path}`;
+}
+
+// A failed item sits until the rep acts on it - resets it to 'pending' and
+// kicks a flush so it's retried right away.
+export function retryOutboxItem(id) {
+  const outbox = getOutbox();
+  const item = outbox.find((o) => o.id === id);
+  if (!item) return;
+  item.status = 'pending';
+  delete item.error;
+  persistOutbox(outbox);
+  flushOutbox();
+}
+
+export function discardOutboxItem(id) {
+  persistOutbox(getOutbox().filter((o) => o.id !== id));
 }
 
 let flushing = false;
@@ -115,21 +169,40 @@ export async function flushOutbox() {
   if (flushing || !navigator.onLine) return;
   flushing = true;
   try {
-    let outbox = getOutbox();
-    while (outbox.length > 0) {
-      const item = outbox[0];
+    // Snapshot the order once; items are mutated/removed by reference as we
+    // go (via getOutbox()/persistOutbox()), not by re-reading this array.
+    const toTry = getOutbox().filter((o) => o.status !== 'failed'); // a failed item needs a manual retry, not another automatic attempt
+    for (const item of toTry) {
+      let outbox = getOutbox();
+      const live = outbox.find((o) => o.id === item.id);
+      if (!live) continue; // discarded by the rep while we were mid-flush
+      live.status = 'syncing';
+      persistOutbox(outbox);
       try {
-        await api.raw(item.method, item.path, item.body);
+        await api.raw(live.method, live.path, live.body);
+        live.status = 'synced';
+        persistOutbox(outbox);
+        // Linger briefly so the rep actually sees the "synced" confirmation
+        // rather than the item just vanishing. Reads fresh state rather than
+        // closing over `outbox` so it can't clobber a write from elsewhere.
+        setTimeout(() => persistOutbox(getOutbox().filter((o) => o.id !== live.id)), 2500);
       } catch (e) {
-        // Network still down or session expired: stop and retry after
-        // reconnect/re-login. Real server rejection (other 4xx): drop the item
-        // so one bad entry can't block the queue forever.
-        if (e.isNetworkError || e.status === 401) break;
-        console.warn('Outbox item rejected by server, dropping:', item.path, e.message);
+        // Network still down or session expired: stop and retry everything
+        // after reconnect/re-login - this item and any not yet attempted stay
+        // 'pending'. A real server rejection (validation, etc.) is a
+        // different problem retrying won't fix on its own, so it's marked
+        // 'failed' and kept - visible and actionable - rather than silently
+        // dropped, which is what happened before this ticket.
+        if (e.isNetworkError || e.status === 401) {
+          live.status = 'pending';
+          persistOutbox(outbox);
+          break;
+        }
+        live.status = 'failed';
+        live.error = e.message;
+        live.failed_at = new Date().toISOString();
+        persistOutbox(outbox);
       }
-      outbox = outbox.slice(1);
-      localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
-      emit();
     }
   } finally {
     flushing = false;

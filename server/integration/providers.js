@@ -6,47 +6,57 @@
 //
 // Every provider returns plain row arrays in the app's canonical shape:
 //  warehouses: { code, name }
-//  customers: { code, name, contact_name, phone, email, address, city, credit_limit, balance, payment_terms, on_hold, warehouse_code, rep_code, rep_warehouse_code }
+//  customers: { code, name, contact_name, phone, email, address, city, ship_to_name, ship_to_address, ship_to_city, ship_to_postcode, credit_limit, balance, payment_terms, on_hold, warehouse_code, rep_code, rep_warehouse_code }
 //  products:  { code, name, category, description, uom, pack_size, list_price, cost_price }
 //  stock:     { code, warehouse_code, qty_available }  (one row per product per branch)
 //  prices:    { customer_code, product_code, price }   (contract prices)
 //  invoices:  { number, customer_code, order_number, invoice_date, due_date, subtotal, vat_amount, total, amount_paid, balance, status }
-import { getSetting } from '../db.js';
+//  invoice_lines: { invoice_number, product_code, qty, unit_price, line_total } - one row per invoice line, last 30 days only
+//  rep_sales: { TrnYear, TrnMonth, TrnBranch, CustomerBranch, 'Customer SalesPerson', 'Customer SP name', NSV } - one row per rep per month per branch
+//  customer_sales: { customer_code, trn_year, trn_month, nsv } - one row per customer per month, ex-VAT, last 13 months
+import { getSetting } from '../dbh.js';
 import { decryptSecret } from '../crypto.js';
 
 // overrides lets "Test connection" check the values currently typed in the
 // form (not yet saved) instead of only ever testing the last-saved settings.
 // A blank overridden password means "keep using the saved one", matching the
 // "type to replace" pattern the field already shows.
-export function sysproConfig(overrides = {}) {
-  const port = parseInt(overrides.syspro_port ?? getSetting('syspro_port', '1433'), 10);
+export async function sysproConfig(overrides = {}) {
+  const port = parseInt(overrides.syspro_port ?? await getSetting('syspro_port', '1433'), 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid SYSPRO SQL port');
   return {
-    host: overrides.syspro_host ?? getSetting('syspro_host', ''),
+    host: overrides.syspro_host ?? await getSetting('syspro_host', ''),
     port,
-    database: overrides.syspro_db ?? getSetting('syspro_db', ''),
-    user: overrides.syspro_user ?? getSetting('syspro_user', ''),
-    password: overrides.syspro_password ? overrides.syspro_password : decryptSecret(getSetting('syspro_password', '')),
-    encrypt: (overrides.syspro_encrypt ?? getSetting('syspro_encrypt', '1')) !== '0',
-    trustServerCertificate: (overrides.syspro_trust_server_certificate ?? getSetting('syspro_trust_server_certificate', '0')) === '1',
+    database: overrides.syspro_db ?? await getSetting('syspro_db', ''),
+    user: overrides.syspro_user ?? await getSetting('syspro_user', ''),
+    password: overrides.syspro_password ? overrides.syspro_password : decryptSecret(await getSetting('syspro_password', '')),
+    encrypt: (overrides.syspro_encrypt ?? await getSetting('syspro_encrypt', '1')) !== '0',
+    trustServerCertificate: (overrides.syspro_trust_server_certificate ?? await getSetting('syspro_trust_server_certificate', '0')) === '1',
     // '|| default' (not just getSetting's own fallback) because saving the
     // settings form always writes an explicit '' for every view field, even
     // ones left blank - getSetting's fallback only fires when no row exists
     // at all, so a saved-but-empty value would otherwise shadow the default.
     views: {
-      warehouses: getSetting('syspro_view_warehouses', '') || 'vw_FS_Warehouses',
-      customers: getSetting('syspro_view_customers', '') || 'vw_FS_Customers',
-      products: getSetting('syspro_view_products', '') || 'vw_FS_Products',
-      stock: getSetting('syspro_view_stock', '') || 'vw_FS_Stock',
-      customer_pricing: getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
-      invoices: getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices'
+      warehouses: await getSetting('syspro_view_warehouses', '') || 'vw_FS_Warehouses',
+      customers: await getSetting('syspro_view_customers', '') || 'vw_FS_Customers',
+      products: await getSetting('syspro_view_products', '') || 'vw_FS_Products',
+      stock: await getSetting('syspro_view_stock', '') || 'vw_FS_Stock',
+      customer_pricing: await getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
+      invoices: await getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices',
+      invoice_lines: await getSetting('syspro_view_invoice_lines', '') || 'vw_FS_InvoiceLines',
+      rep_sales: await getSetting('syspro_view_rep_sales', '') || 'vw_FS_RepSalesByMonth',
+      customer_sales: await getSetting('syspro_view_customer_sales', '') || 'vw_FS_CustomerSalesByMonth'
     }
   };
 }
 
-async function sysproPool(overrides) {
+// requestTimeout is per-call: most views answer in seconds, but the big ones
+// (customer_pricing is ~13M rows, stock/invoices are large too) can take many
+// minutes on a busy SYSPRO box. A blanket-high timeout would mask a genuinely
+// stuck connection on a small view, so callers pass what that entity needs.
+async function sysproPool(overrides, requestTimeout = 60000) {
   const sql = (await import('mssql')).default;
-  const cfg = sysproConfig(overrides);
+  const cfg = await sysproConfig(overrides);
   if (!cfg.host || !cfg.database || !cfg.user) {
     throw new Error('SYSPRO connection is not configured (host, database, user are required)');
   }
@@ -62,7 +72,7 @@ async function sysproPool(overrides) {
     },
     pool: { max: 2 },
     connectionTimeout: 10000,
-    requestTimeout: 60000
+    requestTimeout
   });
 }
 
@@ -78,7 +88,7 @@ const sysproProvider = {
     return result.recordset[0].ok === 1;
   },
   async fetch(entity) {
-    const cfg = sysproConfig();
+    const cfg = await sysproConfig();
     const view = cfg.views[entity];
     const parts = String(view || '').split('.');
     if (!parts.length || parts.length > 2 ||
@@ -91,14 +101,60 @@ const sysproProvider = {
       customers: 500000,
       products: 500000,
       stock: 1000000,
-      customer_pricing: 1000000,
-      invoices: 1000000
+      customer_pricing: 5000000,  // increased from 1M to handle ~13M SYSPRO view (will fetch TOP 5M)
+      invoices: 1000000,
+      invoice_lines: 500000,
+      rep_sales: 200000,
+      customer_sales: 500000
     };
     const limit = limits[entity];
     if (!limit) throw new Error(`Unknown SYSPRO entity ${entity}`);
-    const pool = await sysproPool();
+    // Tried naming only the columns each upserter reads instead of SELECT * -
+    // reverted (2026-09-22). The documented view shape (docs/SYSPRO-DBA-VIEWS-
+    // HANDOVER.md) doesn't reliably match what's actually deployed on the
+    // SYSPRO box: customers.rep_code is documented but the live view doesn't
+    // have it, and naming a column that doesn't exist fails the WHOLE query
+    // ("Invalid column name") instead of just coming through as undefined the
+    // way SELECT * does. That broke customers/invoices sync in production.
+    // Without a reliable way to check the live view schema before every
+    // deploy, SELECT * is the safer default here even though it costs more
+    // bandwidth on the big views - a slow sync beats a broken one.
+    const selectList = '*';
+    // Big views need far longer than the 60s default - customer_pricing alone
+    // is millions of rows and has been measured at ~20 min on a good run, so
+    // it gets 45 min of headroom for a busier SYSPRO box. Small reference
+    // views keep the short timeout so a hung connection surfaces quickly
+    // instead of blocking for the better part of an hour.
+    const timeouts = {
+      customer_pricing: 2700000, // 45 min (~20 min observed, generous headroom)
+      stock: 900000,             // 15 min
+      invoices: 900000,
+      invoice_lines: 600000,     // 10 min - only a 30-day window, but ArTrnDetail itself is huge
+      products: 600000,          // 10 min
+      customers: 600000,
+      rep_sales: 600000,
+      customer_sales: 600000
+    };
+    const pool = await sysproPool(undefined, timeouts[entity] ?? 60000);
     try {
-      const result = await pool.request().query(`SELECT TOP (${limit + 1}) * FROM ${quotedView}`);
+      // These views read straight off live SYSPRO OLTP tables (ArCustomer,
+      // ArCustomerBal, etc.) with no locking hints of their own - unlike
+      // vw_FS_Reps, which explicitly uses WITH (NOLOCK). Under the default
+      // READ COMMITTED isolation, a plain SELECT here can queue behind a
+      // concurrent write's lock on a 24/7 SYSPRO box, which is what turned an
+      // otherwise-sub-1s customers fetch into 23.7s with the server otherwise
+      // idle (confirmed: low CPU/memory, no connection cap, no logon
+      // trigger - so it wasn't a resource problem, it was a queuing one).
+      // READ UNCOMMITTED here reads the same way WITH (NOLOCK) would, without
+      // needing the DBA to touch the SYSPRO view definitions - dirty reads
+      // are an acceptable trade-off for a reporting/sync connection.
+      // One batch, not two separate .query() calls: the pool can hand two
+      // requests different pooled connections, and isolation level is
+      // per-session - splitting these risks the SET landing on a connection
+      // the SELECT never uses.
+      const result = await pool.request().query(
+        `SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; SELECT TOP (${limit + 1}) ${selectList} FROM ${quotedView}`
+      );
       if (result.recordset.length > limit) {
         throw new Error(`${entity} view exceeds the ${limit.toLocaleString()} row safety limit; narrow the DBA view before syncing`);
       }
@@ -145,8 +201,8 @@ const demoProvider = {
   }
 };
 
-export function getProvider() {
-  return getSetting('intg_source', 'demo') === 'syspro' ? sysproProvider : demoProvider;
+export async function getProvider() {
+  return await getSetting('intg_source', 'demo') === 'syspro' ? sysproProvider : demoProvider;
 }
 
 // Exposed so "Test connection" can test SYSPRO specifically, with overrides

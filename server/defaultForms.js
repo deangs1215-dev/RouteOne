@@ -16,7 +16,8 @@
 //
 // Seeding is version-gated: bump SEED_VERSION to wipe the old templates and
 // reinstall this set on the next boot (see ensureDefaultForms below).
-import { db, getSetting, setSetting } from './db.js';
+import { dbx } from './db.js';
+import { getSetting, setSetting } from './dbh.js';
 
 const SEED_VERSION = '2026-07-bakels-forms-1';
 
@@ -43,54 +44,6 @@ const product = (key, label) => ({ key, label, type: 'product' });
 const select = (key, label, options, required = false) => ({ key, label, type: 'select', options, required });
 
 const DEFAULT_FORMS = [
-  // 1 ---------------------------------------------------------------------
-  {
-    name: 'Technical Assistance Request',
-    description: 'Request technical assistance / a demonstration for a customer.',
-    category: 'technical',
-    fields: [
-      h('rep_section', 'Below to be completed by rep'),
-      text('customer', 'Customer'),
-      text('acc_no', 'Acc no'),
-      text('contact_person', 'Contact person'),
-      email('email', 'Email'),
-      text('tel_no', 'Tel no'),
-      text('cell_no', 'Cell no'),
-      text('address', 'Address'),
-      text('demo_1', 'Products to be demonstrated: 1 - Basic Bread and Rolls'),
-      text('samples_1', 'List samples to be taken: 1 - Basic Bread and Rolls'),
-      text('demo_2', 'Products to be demonstrated: 2 - Confectionery'),
-      text('samples_2', 'List samples to be taken: 2 - Confectionery'),
-      text('demo_3', 'Products to be demonstrated: 3 - Speciality Breads'),
-      text('samples_3', 'List samples to be taken: 3 - Speciality Breads'),
-      text('demo_4', 'Products to be demonstrated: 4 - Decorating'),
-      text('samples_4', 'List samples to be taken: 4 - Decorating'),
-      text('demo_5', 'Products to be demonstrated: 5 - Other'),
-      text('samples_5', 'List samples to be taken: 5 - Other'),
-      text('additional_comments', 'Additional comments / requests'),
-      h('office_section', 'Below to be completed by office / demonstrator'),
-      text('demonstrators_name', 'Demonstrators name'),
-      date('training_date', 'Date training will take place'),
-      text('training_time', 'Time training will take place (am - pm)'),
-      h('staff_section', 'Below to be completed by demonstrator / customer bakery staff'),
-      text('present_1', 'Present at training (Full Name, ID Number, Designated Group and Signature) 1'),
-      text('present_2', 'Present at training (Full Name, ID Number, Designated Group and Signature) 2'),
-      text('present_3', 'Present at training (Full Name, ID Number, Designated Group and Signature) 3'),
-      text('present_4', 'Present at training (Full Name, ID Number, Designated Group and Signature) 4'),
-      text('present_5', 'Present at training (Full Name, ID Number, Designated Group and Signature) 5'),
-      text('present_6', 'Present at training (Full Name, ID Number, Designated Group and Signature) 6'),
-      h('customer_section', 'Below to be completed by customer'),
-      text('arrival_time', 'Arrival time'),
-      text('departure_time', 'Departure time'),
-      text('demo_on_time', 'Was the demonstration done on time?'),
-      text('demo_good', 'Was the product demonstration good?'),
-      text('interested_other', 'Are you interested in other products?'),
-      text('placed_order', 'Did you place an order?'),
-      text('customer_name', 'Customer name'),
-      sign('customer_signature', 'Customer signature')
-    ]
-  },
-
   // 2 ---------------------------------------------------------------------
   {
     name: 'Demonstration & Training',
@@ -308,21 +261,25 @@ const DEFAULT_FORMS = [
 // existing template (and their submissions, so the FK stays valid) and install
 // the set above. Runs once per version, so admin edits made afterwards survive
 // restarts until the version is bumped again.
-export function ensureDefaultForms() {
-  if (getSetting('forms_seed_version') === SEED_VERSION) return;
+export async function ensureDefaultForms() {
+  if (await getSetting('forms_seed_version') === SEED_VERSION) return;
 
-  const insert = db.prepare(
-    'INSERT INTO form_templates (name, description, fields, category, active) VALUES (?, ?, ?, ?, 1)'
-  );
-  const reseed = db.transaction(() => {
-    db.prepare('DELETE FROM form_submissions').run();
-    db.prepare('DELETE FROM form_templates').run();
-    db.prepare("DELETE FROM sqlite_sequence WHERE name IN ('form_templates', 'form_submissions')").run();
-    for (const f of DEFAULT_FORMS) {
-      insert.run(f.name, f.description || null, JSON.stringify(f.fields), f.category === 'technical' ? 'technical' : 'general');
+  await dbx.transaction(async (tx) => {
+    await tx.prepare('DELETE FROM form_submissions').run();
+    await tx.prepare('DELETE FROM form_templates').run();
+    // Restart ids at 1, as a fresh database would.
+    if (tx.dialect === 'mssql') {
+      await tx.exec("DBCC CHECKIDENT ('form_templates', RESEED, 0); DBCC CHECKIDENT ('form_submissions', RESEED, 0)");
+    } else {
+      await tx.prepare("DELETE FROM sqlite_sequence WHERE name IN ('form_templates', 'form_submissions')").run();
     }
-    setSetting('forms_seed_version', SEED_VERSION);
+    const insert = tx.prepare(
+      'INSERT INTO form_templates (name, description, fields, category, active) VALUES (?, ?, ?, ?, 1)'
+    );
+    for (const f of DEFAULT_FORMS) {
+      await insert.run(f.name, f.description || null, JSON.stringify(f.fields), f.category === 'technical' ? 'technical' : 'general');
+    }
+    await setSetting('forms_seed_version', SEED_VERSION, tx);
   });
-  reseed();
   console.log(`[forms] reseeded ${DEFAULT_FORMS.length} field form(s) (version ${SEED_VERSION})`);
 }

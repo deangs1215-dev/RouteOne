@@ -5,16 +5,88 @@ CHANGELOG.md instead of leaving it checked off here.
 
 ## Urgent / housekeeping
 
-- [ ] **Commit the backlog of uncommitted work.** `git status` currently shows ~105
-      changed files and ~30 new/untracked files (Documents feature, Tasks module,
-      invoices, settings/email admin pages, backup.js, tests, the production audit
-      fixes, this session's graphify build, etc.) sitting uncommitted. Break into
-      logical commits before it gets any bigger or harder to review.
+- [x] **Commit the backlog of uncommitted work.** Commit `8284944` landed the
+      production hardening changes (SECRET_KEY hard-fail, NSSM setup, diagnostic
+      scripts, rewritten deployment docs). Remaining unreleased work (Documents,
+      Tasks, invoices, email/backup/settings admin) is still uncommitted — this
+      should be the next batch.
+- [x] **Login freeze on production, fixed 2026-08-12.** Login appeared to work
+      then bounced/froze back to the login screen. Root cause: `NODE_ENV=production`
+      defaults session cookies to `Secure`, which browsers silently drop over plain
+      HTTP — so the login response succeeded but the cookie never actually stored,
+      and every subsequent API call 401'd and redirected back to `/login`. Fixed by
+      setting `COOKIE_SECURE=0` in the server's `.env` (documented escape hatch
+      already built into `server/auth.js`) and restarting the service. **This is a
+      stopgap** — see the HTTPS post go-live cleanup item below to revert it properly.
+- [ ] **`customer_pricing` sync — do not put on an automatic schedule.** Row limit
+      raised to 5M (actual SYSPRO view is ~13M rows, syncs fine as a one-off — took
+      the whole event loop with it for the duration). The upsert runs inside a single
+      `better-sqlite3` transaction, which is synchronous and blocks the entire Node
+      process — no requests (including login) are served while it runs. Keep this
+      entity's sync schedule set to "Off (manual only)" in Integration settings until
+      it's re-architected to not block the event loop (e.g. batched transactions with
+      a yield between batches, or moved off the main thread).
 - [ ] Decide what to do with the two files graphify couldn't read (office-format
       conversion isn't installed): `Master Blueprint Claud info.docx` and
       `RouteOne_Engineering_Library_Volume_1_Product_Constitution_v1.docx`. Either
       run `pip install "graphifyy[office]"` and re-index them, or confirm they're
       stale and can be ignored.
+
+## UAT issues (R1 series)
+
+Numbering continues the R1 series. **R1-058 is derived from the highest number
+referenced in this repo (R1-057, `intelligence.routes.js`)** — the canonical
+tracker is the user's, and per the 2026-08-28 handover several R1 numbers exist
+there that never reached the code, so bump this if the tracker is further along.
+
+- [ ] **R1-058 — Rep "Sales this month" understates actual SYSPRO sales.**
+      Reported 2026-09-12: the mobile Today card showed **R 925 841,46 (35% of a
+      R 2 634 923 target)** for a rep, which isn't a believable figure.
+
+      *Scope is wider than that one card* — `rep_monthly_sales` is also the source
+      for Rep KPIs (`/kpis`, `/kpis/monthly-history`), Sales AI analytics
+      (`/analytics` monthly chart + MTD revenue) and the desktop dashboard's
+      `sales_mtd`. All of them are understated by the same amount.
+
+      **Direction is confirmed, not guessed.** The card reads exactly one value —
+      `rep_monthly_sales.sales_value` for (rep, current month) — and that table is
+      populated solely by the `rep_sales` sync from `vw_FS_RepSalesByMonth`. That
+      sync skips ~51% of its rows (run 7233, 2026-09-08: 5922 read, 2891 upserted,
+      **3031 skipped**), and `upsertRepSales` discards a skipped row's NSV rather
+      than crediting it anywhere. See `docs/sql/vw_FS_RepSalesByMonth-skip-diagnostic.sql`.
+
+      **Probable root cause:** `vw_FS_RepSalesByMonth` is the only sales view in
+      `docs/sql/` that doesn't `RTRIM` its columns. SYSPRO's `Branch` and
+      `Salesperson` are fixed-width `char`, so they arrive space-padded, while
+      `import-reps.js` trims them on the way in — so `matchRep`'s bare `=` never
+      matched. The skip diagnostic needed `RTRIM()` on both sides of its join,
+      which is the tell.
+
+      **Already done (UNVERIFIED against live data):** `matchRep()` in
+      `server/integration/sync.js` now trims both sides. On branch
+      `pricing-convfactaltuom`, **not yet deployed**. Same function assigns
+      `customers.rep_id`, so if padding is the cause this also explains customers
+      silently not being reassigned when SYSPRO moves them.
+
+      **To verify:** deploy, re-run the rep_sales sync, then
+      `SELECT id, rows_read, rows_upserted, rows_skipped FROM sync_runs WHERE entity='rep_sales' ORDER BY id DESC LIMIT 5;`
+      — `rows_skipped` should collapse and the Today figure should rise. Expect
+      *some* legitimate residual skips (house/export codes, terminated reps).
+
+      **If the skip count doesn't move, next suspects:**
+      - `TrnMonth` may be a SYSPRO *financial period*, not a calendar month.
+        `upsertRepSales` builds `'YYYY-MM'` straight from `TrnYear`/`TrnMonth`
+        and the card compares it against `strftime('%Y-%m','now')`.
+      - The view credits the customer's **currently assigned** rep retroactively
+        (documented in its own header), so any reassignment shifts historical
+        months between reps.
+- [ ] **Fix the duplicate-check in `vw_FS_RepSalesByMonth.sql`.** Its validation
+      query is commented "Should return ZERO rows" but groups by
+      `TrnYear, TrnMonth, CustomerBranch, [Customer SalesPerson]` while the view's
+      own `GROUP BY` also includes `TrnBranch`. It therefore returns rows whenever
+      a customer is invoiced from more than one branch, and has never actually
+      validated the property it claims. Add `TrnBranch` to the check. (RouteOne
+      summing those rows is correct — they're disjoint by `TrnBranch`.)
 
 ## Before production (from the 2026-07-26 audit)
 
@@ -22,12 +94,40 @@ See [docs/PRODUCTION-READINESS-AUDIT-2026-07-26.md](docs/PRODUCTION-READINESS-AU
 for full detail — application-level fixes are done, these are the deployment-side
 items still open:
 
-- [ ] Set `NODE_ENV=production`, a unique high-entropy `SECRET_KEY`, the exact
-      HTTPS `APP_ORIGIN`, and the correct proxy-trust setting.
-- [ ] Terminate TLS at a maintained reverse proxy; confirm cookies arrive with
-      the `Secure` flag.
-- [ ] Put `BACKUP_DIR` on a protected volume separate from the app disk. Run a
-      full restore drill and document the recovery time.
+- [x] **Set `SECRET_KEY` unconditionally required.** Commit `8284944`: `server/crypto.js`
+      now throws at startup if `SECRET_KEY` is missing, on all machines, not just
+      `NODE_ENV=production`. No more silent fallback key (which masked encrypted-password
+      failures until it was too late).
+- [x] **Install as Windows service (NSSM).** Test server now runs as NSSM service,
+      survives RDP logoff and reboot, auto-restarts on crash. See DEPLOYMENT.md §8.
+      Tested and verified: service is `SERVICE_RUNNING` after RDP disconnect.
+- [ ] Set `NODE_ENV=production`, hostname-based `APP_ORIGIN`, and correct
+      proxy-trust setting (`TRUST_PROXY=1`). Currently unset for HTTP-only test;
+      will be set when TLS lands.
+- [ ] **HTTPS on the production server (in progress, 2026-08-12).** Decision made:
+      no reverse proxy — Node runs HTTPS directly, using an internal cert issued by
+      SAFOS for `routeone-test.sbakels.net`. Both HTTP (4200) and HTTPS (4443) run
+      simultaneously; dev stays HTTP-only. Status:
+      - [x] Certificate placed on both laptop (`C:\Projects\RouteOne\RouteOne APP - Cert.crt`)
+            and server (`C:\RouteOne\RouteOne APP - Cert.crt`).
+      - [ ] **Blocked on the private key** from IT for that certificate — nothing else
+            can proceed until it arrives.
+      - [ ] Once the key arrives: add an `https.createServer()` listener alongside the
+            existing `app.listen()` in `server/index.js` (port 4443), loading the cert +
+            key from `C:\RouteOne\`.
+      - [ ] Deploy and confirm `https://routeone-test.sbakels.net:4443` serves the app.
+- [ ] **Post go-live cleanup once HTTPS is confirmed working:**
+      - [ ] Remove the temporary `COOKIE_SECURE=0` line from the server's `.env` (added
+            2026-08-12 as a stopgap — see below) so session cookies go back to `Secure`.
+      - [ ] Set `NODE_ENV=production` (see item above) now that Secure cookies will work.
+      - [ ] Re-test login end-to-end over HTTPS to confirm cookies persist correctly.
+      - [ ] Re-test GPS pickup (check-in location, "Optimise Routes" starting point,
+            live map). Browsers block `navigator.geolocation` on plain HTTP for any host
+            other than `localhost` — this is almost certainly the cause of the rep-reported
+            "can't pick up my location" issue, and should resolve once HTTPS is live.
+- [ ] Put `BACKUP_DIR` on a protected volume separate from the app disk. Currently
+      at `C:\RouteOne\server\backups` (1.15 GB database, ~6 GB backups at 14-day
+      retention = growing problem). Run a full restore drill and document recovery time.
 - [ ] Confirm all 43 existing users complete the forced password change before
       broad access is enabled.
 - [ ] Use a least-privileged, read-only SYSPRO SQL account. Prefer a CA-trusted
@@ -40,9 +140,15 @@ items still open:
       HTTPS endpoint from outside the server network (proxy/WAN/SQL/backup/AV
       overhead wasn't in the local test).
 - [ ] Confirm only one RouteOne Node process runs against the SQLite database
-      — no multiple replicas sharing the same file.
-- [ ] Set up log collection, `/api/health` uptime checks, disk-space alerts,
-      backup-failure alerts, and an incident owner.
+      — no multiple replicas sharing the same file. (NSSM service ensures this.)
+- [x] **Monitoring & alerting setup documented, 2026-08-12.** See [MONITORING_SETUP.md](MONITORING_SETUP.md) for:
+      - Health check every 5 minutes with auto-restart on 3 failures
+      - Disk space alerts (warn at 50GB, critical at 20GB free)
+      - Daily backup verification (alert if age > 48h or file missing)
+      - Email alerts via M365/SMTP (to be configured in `.env`)
+      - Log rotation and centralized view (Windows Event Viewer optional)
+      - Incident escalation procedure (primary/secondary/manager handoff)
+      - All tools built-in to Windows or freely available (no paid infrastructure)
 
 ## Feature follow-ups
 

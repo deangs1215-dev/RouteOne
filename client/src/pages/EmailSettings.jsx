@@ -5,6 +5,20 @@ import { api } from '../api';
 import { Card, Field, ErrorNote, Spinner, Table, Modal } from '../components/ui';
 import { useAuth } from '../auth';
 
+// Groups recipients by warehouse_name, "Every branch" for warehouse_id null -
+// listed last since it's the fallback case, not a specific place.
+function groupByBranch(rows) {
+  const groups = {};
+  for (const r of rows) {
+    const key = r.warehouse_name || 'Every branch';
+    (groups[key] ??= []).push(r);
+  }
+  const { 'Every branch': everyBranch, ...named } = groups;
+  const sorted = Object.fromEntries(Object.entries(named).sort(([a], [b]) => a.localeCompare(b)));
+  if (everyBranch) sorted['Every branch'] = everyBranch;
+  return sorted;
+}
+
 export default function EmailSettings() {
   const { user } = useAuth();
   const canEdit = ['admin', 'manager'].includes(user.role);
@@ -15,7 +29,8 @@ export default function EmailSettings() {
   const [testTo, setTestTo] = useState('');
 
   const [recipients, setRecipients] = useState(null);
-  const [editing, setEditing] = useState(null); // null | 'new' | recipient
+  const [warehouses, setWarehouses] = useState([]);
+  const [editing, setEditing] = useState(null); // null | { category } | recipient
 
   const load = () => {
     api.get('/integration/settings').then(setSettings).catch((e) => setError(e.message));
@@ -23,9 +38,15 @@ export default function EmailSettings() {
   const loadRecipients = () => {
     api.get('/email-recipients').then(setRecipients).catch(console.error);
   };
-  useEffect(() => { load(); loadRecipients(); }, []);
+  useEffect(() => {
+    load(); loadRecipients();
+    api.get('/warehouses').then(setWarehouses).catch(() => {});
+  }, []);
 
   if (!settings) return <Spinner />;
+
+  const ordersRecipients = recipients?.filter((r) => r.category === 'orders') ?? null;
+  const technicalRecipients = recipients?.filter((r) => r.category === 'technical') ?? null;
 
   const set = (k) => (e) => setSettings({ ...settings, [k]: e.target.type === 'checkbox' ? (e.target.checked ? '1' : '0') : e.target.value });
 
@@ -132,38 +153,46 @@ export default function EmailSettings() {
 
       <Card title="Orders Email">
         <p className="text-sm text-slate-500 mb-4">
-          Configured email addresses will appear as checkboxes when reps or managers confirm an order.
-          The order PDF will be emailed to selected addresses.
+          Configured email addresses will appear as checkboxes when reps or managers confirm an order or quote -
+          scoped to that customer's own branch, so a Cape Town order only offers Cape Town's list, not
+          Johannesburg's. "Every branch" recipients appear on all of them.
         </p>
-        {!recipients ? (
+        {!ordersRecipients ? (
           <Spinner />
+        ) : ordersRecipients.length === 0 ? (
+          <div className="text-sm text-slate-400">No email recipients configured.</div>
         ) : (
-          <>
-            <Table headers={['Name', 'Email', 'Description', '']}
-              empty={recipients.length === 0 && 'No email recipients configured.'}>
-              {recipients.map((r) => (
-                <tr key={r.id} className={`hover:bg-slate-50 ${canEdit ? 'cursor-pointer' : ''}`}
-                  onClick={() => canEdit && setEditing(r)}>
-                  <td className="td font-medium">{r.name}</td>
-                  <td className="td text-slate-600">{r.email}</td>
-                  <td className="td text-slate-500">{r.description || '—'}</td>
-                  <td className="td text-right">
-                    {canEdit && (
-                      <button className="text-xs text-brand-600 hover:underline"
-                        onClick={(e) => { e.stopPropagation(); setEditing(r); }}>
-                        edit
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </Table>
-            {canEdit && (
-              <button className="btn-primary mt-4" onClick={() => setEditing('new')}>
-                + Add recipient
-              </button>
-            )}
-          </>
+          // R1-...: grouped by branch rather than one flat list, so it's
+          // obvious at a glance who's set up where (and who still needs to
+          // be, for a branch with no rows at all).
+          Object.entries(groupByBranch(ordersRecipients)).map(([branch, rows]) => (
+            <div key={branch} className="mb-6 last:mb-0">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">{branch}</h3>
+              <Table headers={['Name', 'Email', 'Description', '']}>
+                {rows.map((r) => (
+                  <tr key={r.id} className={`hover:bg-slate-50 ${canEdit ? 'cursor-pointer' : ''}`}
+                    onClick={() => canEdit && setEditing(r)}>
+                    <td className="td font-medium">{r.name}</td>
+                    <td className="td text-slate-600">{r.email}</td>
+                    <td className="td text-slate-500">{r.description || '—'}</td>
+                    <td className="td text-right">
+                      {canEdit && (
+                        <button className="text-xs text-brand-600 hover:underline"
+                          onClick={(e) => { e.stopPropagation(); setEditing(r); }}>
+                          edit
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          ))
+        )}
+        {canEdit && (
+          <button className="btn-primary mt-2" onClick={() => setEditing({ category: 'orders' })}>
+            + Add recipient
+          </button>
         )}
       </Card>
 
@@ -171,13 +200,13 @@ export default function EmailSettings() {
         <p className="text-sm text-slate-500 mb-4">
           Configured email addresses will receive notifications when a form marked as Technical is completed in the field.
         </p>
-        {!recipients ? (
+        {!technicalRecipients ? (
           <Spinner />
         ) : (
           <>
             <Table headers={['Name', 'Email', 'Description', '']}
-              empty={recipients.length === 0 && 'No email recipients configured.'}>
-              {recipients.map((r) => (
+              empty={technicalRecipients.length === 0 && 'No email recipients configured.'}>
+              {technicalRecipients.map((r) => (
                 <tr key={r.id} className={`hover:bg-slate-50 ${canEdit ? 'cursor-pointer' : ''}`}
                   onClick={() => canEdit && setEditing(r)}>
                   <td className="td font-medium">{r.name}</td>
@@ -195,7 +224,7 @@ export default function EmailSettings() {
               ))}
             </Table>
             {canEdit && (
-              <button className="btn-primary mt-4" onClick={() => setEditing('new')}>
+              <button className="btn-primary mt-4" onClick={() => setEditing({ category: 'technical' })}>
                 + Add recipient
               </button>
             )}
@@ -204,7 +233,9 @@ export default function EmailSettings() {
       </Card>
 
       {editing && (
-        <RecipientModal recipient={editing === 'new' ? null : editing}
+        <RecipientModal recipient={editing.id ? editing : null}
+          category={editing.category}
+          warehouses={warehouses}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); loadRecipients(); }}
           onError={setError}
@@ -214,12 +245,14 @@ export default function EmailSettings() {
   );
 }
 
-function RecipientModal({ recipient, onClose, onSaved, onError }) {
+function RecipientModal({ recipient, category, warehouses, onClose, onSaved, onError }) {
   const [name, setName] = useState(recipient?.name || '');
   const [email, setEmail] = useState(recipient?.email || '');
   const [description, setDescription] = useState(recipient?.description || '');
+  const [warehouseId, setWarehouseId] = useState(recipient?.warehouse_id || '');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const effectiveCategory = recipient?.category || category;
 
   const submit = async () => {
     setError('');
@@ -228,10 +261,11 @@ function RecipientModal({ recipient, onClose, onSaved, onError }) {
     }
     setBusy(true);
     try {
+      const body = { name, email, description, warehouse_id: warehouseId ? Number(warehouseId) : null };
       if (recipient) {
-        await api.put(`/email-recipients/${recipient.id}`, { name, email, description });
+        await api.put(`/email-recipients/${recipient.id}`, body);
       } else {
-        await api.post('/email-recipients', { name, email, description });
+        await api.post('/email-recipients', { ...body, category });
       }
       onSaved();
     } catch (e) {
@@ -258,7 +292,7 @@ function RecipientModal({ recipient, onClose, onSaved, onError }) {
   };
 
   return (
-    <Modal title={recipient ? 'Edit recipient' : 'New recipient'} onClose={onClose} wide>
+    <Modal title={recipient ? 'Edit recipient' : `New ${category === 'technical' ? 'technical' : 'orders'} recipient`} onClose={onClose} wide>
       <ErrorNote error={error} />
       <div className="space-y-4">
         <Field label="Name *">
@@ -272,6 +306,14 @@ function RecipientModal({ recipient, onClose, onSaved, onError }) {
             onChange={(e) => setDescription(e.target.value)}
             placeholder="e.g., Finance department, Regional manager, etc." />
         </Field>
+        {effectiveCategory !== 'technical' && (
+          <Field label="Branch">
+            <select className="input" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+              <option value="">Every branch</option>
+              {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name} ({w.code})</option>)}
+            </select>
+          </Field>
+        )}
         <div className="flex gap-2 border-t border-slate-100 pt-4">
           <button className="btn-secondary flex-1" onClick={onClose} disabled={busy}>Cancel</button>
           {recipient && (

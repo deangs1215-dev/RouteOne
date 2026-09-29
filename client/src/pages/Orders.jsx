@@ -37,12 +37,16 @@ export default function Orders() {
 
       <Card>
         {!rows ? <Spinner /> : (
-          <Table headers={['Number', 'Customer', 'Rep', 'Date', 'Lines', 'Status', 'Total']}
+          <Table headers={['Number', 'Customer', 'Customer Order No.', 'Rep', 'Date', 'Lines', 'Status', 'Total']}
             empty={rows.length === 0 && 'No orders found.'} emptyIcon="🧾">
             {rows.map((o) => (
               <tr key={o.id} className="hover:bg-slate-50">
                 <td className="td font-medium"><Link className="hover:text-brand-600" to={`/orders/${o.id}`}>{o.number}</Link></td>
                 <td className="td">{o.customer_name}</td>
+                {/* R1-043: the customer's own PO/reference (R1-004) alongside
+                    our number, so office can find/reconcile an order by
+                    either identifier without opening it. */}
+                <td className="td text-slate-500">{o.customer_order_no || '—'}</td>
                 <td className="td text-slate-500">{o.rep_name || '—'}</td>
                 <td className="td text-slate-500">{fmtDateTime(o.order_date)}</td>
                 <td className="td text-slate-500">{o.line_count}</td>

@@ -12,10 +12,26 @@ export default function Users() {
   const [warehouses, setWarehouses] = useState([]);
   const [editing, setEditing] = useState(null); // null | 'new' | user row
   const [budgetsOpen, setBudgetsOpen] = useState(null); // null | user row with role info
+  const [sendingLoginDetails, setSendingLoginDetails] = useState(null); // user id being sent details to
+  const [sendMessage, setSendMessage] = useState(''); // success/error message
 
   const isAdmin = user.role === 'admin';
 
   const load = () => api.get('/users').then(setRows).catch(console.error);
+
+  const sendLoginDetails = async (userId) => {
+    setSendingLoginDetails(userId);
+    setSendMessage('');
+    try {
+      const result = await api.post(`/users/${userId}/send-login-details`, {});
+      setSendMessage(result.message || 'Login details sent successfully!');
+      setTimeout(() => setSendMessage(''), 3000);
+    } catch (e) {
+      setSendMessage('Error: ' + (e.message || 'Failed to send login details'));
+    }
+    setSendingLoginDetails(null);
+  };
+
   useEffect(() => {
     load();
     api.get('/roles').then(setRoles).catch(() => {});
@@ -40,6 +56,12 @@ export default function Users() {
         {isAdmin && <button className="btn-primary" onClick={() => setEditing('new')}>+ New user</button>}
       </div>
 
+      {sendMessage && (
+        <div className={`rounded-lg px-3 py-2 text-sm ${sendMessage.startsWith('Error') ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-green-50 text-green-700 border border-green-200'}`}>
+          {sendMessage}
+        </div>
+      )}
+
       <Card>
         {!rows ? <Spinner /> : (
           <Table headers={['Name', 'Email', 'Role', 'Code', 'Branch', 'Target', 'Status', '']} empty={rows.length === 0 && 'No users.'}>
@@ -52,7 +74,13 @@ export default function Users() {
                 <td className="td text-slate-500">{u.warehouse_name || '—'}</td>
                 <td className="td text-slate-500">{u.sales_target ? fmtR(u.sales_target) : '—'}</td>
                 <td className="td"><Badge color={u.active ? '#16a34a' : '#64748b'}>{u.active ? 'active' : 'inactive'}</Badge></td>
-                <td className="td text-right">
+                <td className="td text-right space-x-2">
+                  <button className="text-xs text-brand-600 hover:underline" onClick={(e) => {
+                    e.stopPropagation();
+                    sendLoginDetails(u.id);
+                  }}>
+                    Send login
+                  </button>
                   {u.role === 'rep' && (
                     <button className="text-xs text-brand-600 hover:underline" onClick={(e) => { e.stopPropagation(); setBudgetsOpen(u); }}>
                       budgets
@@ -84,14 +112,23 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
     customer_id: u?.customer_id || '',
     rep_code: u?.rep_code || '', warehouse_id: u?.warehouse_id || '',
     sales_target: u?.sales_target ?? 0, active: u?.active ?? 1,
-    home_address: u?.home_address || '', home_lat: u?.home_lat ?? '', home_lng: u?.home_lng ?? ''
+    home_address: u?.home_address || '', home_lat: u?.home_lat ?? '', home_lng: u?.home_lng ?? '',
+    manager_warehouses: u?.manager_warehouses || []
   });
   const [customers, setCustomers] = useState([]);
   const [error, setError] = useState('');
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
+  const toggleWarehouse = (warehouseId) => {
+    const updated = form.manager_warehouses.includes(warehouseId)
+      ? form.manager_warehouses.filter(id => id !== warehouseId)
+      : [...form.manager_warehouses, warehouseId];
+    setForm({ ...form, manager_warehouses: updated });
+  };
+
   const isCustomerRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'customer';
   const isRepRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'rep';
+  const isManagerRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'manager';
   useEffect(() => {
     if (isCustomerRole && customers.length === 0) api.get('/customers').then(setCustomers).catch(() => {});
   }, [isCustomerRole]);
@@ -131,7 +168,7 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
         <Field label="Email"><input className="input" type="email" value={form.email} onChange={set('email')} required /></Field>
         <Field label="Phone"><input className="input" value={form.phone} onChange={set('phone')} /></Field>
         <Field label={u ? 'New password (leave blank to keep)' : 'Password'}>
-          <input className="input" type="password" minLength={12} maxLength={128}
+          <input className="input" type="password" minLength={9} maxLength={128}
             value={form.password} onChange={set('password')} required={!u} />
         </Field>
         <Field label="Role">
@@ -159,6 +196,23 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
               <option value="">—</option>
               {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name} ({w.code})</option>)}
             </select>
+          </Field>
+        )}
+        {isManagerRole && (
+          <Field label="Manages branches">
+            <div className="space-y-2">
+              {warehouses.map((w) => (
+                <label key={w.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={form.manager_warehouses.includes(w.id)}
+                    onChange={() => toggleWarehouse(w.id)}
+                    className="rounded"
+                  />
+                  <span>{w.name} ({w.code})</span>
+                </label>
+              ))}
+            </div>
           </Field>
         )}
         <Field label="Monthly sales target (R)">

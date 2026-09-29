@@ -16,7 +16,10 @@ export default function Products() {
   const load = () => {
     const params = new URLSearchParams();
     if (q) params.set('q', q);
-    params.set('active', 'true'); // discontinued/excluded items stay hidden from the catalogue
+    // No active filter: discontinued run-out stock (active = 0) must stay
+    // visible and badged red, not vanish - a rep searching for it needs to see
+    // that it exists and why it can't be ordered. Ordering is blocked
+    // server-side regardless (orders/quotes resolve lines with active = 1).
     api.get(`/products?${params}`).then(setRows).catch(console.error);
   };
 
@@ -63,7 +66,13 @@ export default function Products() {
                       </div>
                     )}
                   </td>
-                  <td className="td"><Badge color={p.active ? '#16a34a' : '#64748b'}>{p.active ? 'active' : 'inactive'}</Badge></td>
+                  <td className="td">
+                    {p.discontinued
+                      ? <Badge color="#dc2626">discontinued</Badge>
+                      : !p.list_price
+                        ? <Badge color="#dc2626">no price set</Badge>
+                        : <Badge color={p.active ? '#16a34a' : '#64748b'}>{p.active ? 'active' : 'inactive'}</Badge>}
+                  </td>
                 </tr>
               ))}
             </Table>

@@ -3,32 +3,46 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { createSqliteDbx, createMssqlDbx } from './dbx.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// DB_BACKEND=mssql runs entirely on SQL Server: no SQLite file is opened or
+// created, `db` is null, and only the async `dbx` facade exists. Anything still
+// using the synchronous `db` (the one-off admin/seed scripts) is SQLite-only.
+const useSqlite = (process.env.DB_BACKEND || 'sqlite').toLowerCase() !== 'mssql';
 const configuredPath = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
   : path.join(__dirname, 'data', 'fieldsales.db');
 const dataDir = path.dirname(configuredPath);
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (useSqlite && !fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 export const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 export const DB_PATH = configuredPath;
-export const db = new Database(configuredPath);
+export const db = useSqlite ? new Database(configuredPath) : null;
 
 // Releases the file lock on the live database - only ever used right before a
 // restore replaces the file wholesale, followed immediately by process exit
 // (see backup.js). Anything else querying `db` after this call will throw.
 export function closeDb() {
-  db.close();
+  db?.close();
 }
+if (useSqlite) {
 // Tuning for many concurrent reps hitting a single SQLite file:
 db.pragma('journal_mode = WAL');       // concurrent readers while one writer commits
 db.pragma('foreign_keys = ON');
 db.pragma('synchronous = NORMAL');     // safe with WAL, much faster writes
 db.pragma('busy_timeout = 5000');      // wait (not error) if the DB is briefly write-locked
-db.pragma('cache_size = -20000');      // ~20MB page cache per connection
+// 256MB - was 20MB, which couldn't hold syspro_customer_pricing (4.47M rows)
+// plus its primary-key index. Rows arrive from SYSPRO in view order, not
+// primary-key order, so upserting them was a mostly-random-access pattern
+// against that table; with the working set far bigger than the cache, nearly
+// every upsert faulted out to disk. Measured on production: 4.47M rows took
+// 80 minutes to write (see [sync] log lines) against a sub-2-minute fetch -
+// that gap is this, not the write batching (already tuned - see BATCH_SIZE in
+// sync.js). Paired with sorting rows before upsert in runSync.
+db.pragma('cache_size = -262144');
 db.pragma('mmap_size = 268435456');    // 256MB memory-mapped I/O for faster reads
 db.pragma('wal_autocheckpoint = 1000');
 db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
@@ -49,6 +63,15 @@ for (const stmt of [
   'ALTER TABLE users ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)',
   'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 1',
   'ALTER TABLE products ADD COLUMN pack_weight_kg REAL',
+  'ALTER TABLE products ADD COLUMN conv_factor_alt_uom REAL',
+  'ALTER TABLE products ADD COLUMN discontinued INTEGER DEFAULT 0',
+  // The customer's own PO / reference for an order - see orders in schema.sql.
+  'ALTER TABLE orders ADD COLUMN customer_order_no TEXT',
+  // Delivery store on an invoice line - differs from the invoice's billed
+  // customer under central/head-office billing. See invoices.routes.js.
+  'ALTER TABLE invoice_items ADD COLUMN delivery_customer_id INTEGER REFERENCES customers(id)',
+  'ALTER TABLE invoice_items ADD COLUMN delivery_customer_code TEXT',
+  'CREATE INDEX IF NOT EXISTS idx_invoice_items_delivery_customer ON invoice_items(delivery_customer_id)',
   "ALTER TABLE visits ADD COLUMN check_in_type TEXT DEFAULT 'onsite'",
   'ALTER TABLE visits ADD COLUMN check_in_address TEXT',
   'ALTER TABLE orders ADD COLUMN signature TEXT',
@@ -70,7 +93,46 @@ for (const stmt of [
   'ALTER TABLE form_templates ADD COLUMN notify_email TEXT',
   'ALTER TABLE users ADD COLUMN documents_last_viewed_at TEXT',
   'ALTER TABLE users ADD COLUMN reset_token_hash TEXT',
-  'ALTER TABLE users ADD COLUMN reset_token_expires TEXT'
+  'ALTER TABLE users ADD COLUMN reset_token_expires TEXT',
+  // Bumped whenever a password changes, and carried in the JWT - see signToken
+  // in auth.js. Invalidates every session issued before the change, so a stolen
+  // token dies with the password reset rather than outliving it by 12 hours.
+  'ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0',
+  'ALTER TABLE sync_runs ADD COLUMN rows_skipped INTEGER DEFAULT 0',
+  // Existing rows predate the Orders/Technical split - they were all Orders
+  // recipients (the only list that existed), so the default is correct for them.
+  "ALTER TABLE email_recipients ADD COLUMN category TEXT NOT NULL DEFAULT 'orders'",
+  // R1-044: which pricing tier produced a line's unit_price (see PRICE_SOURCES
+  // below) - stored at submit time so "why is this price what it is" can
+  // still be answered on an already-submitted order/quote, not just live in
+  // the builder. NULL on rows created before this column existed.
+  'ALTER TABLE order_items ADD COLUMN price_source TEXT',
+  'ALTER TABLE quote_items ADD COLUMN price_source TEXT',
+  // Branch-scoped order email recipients - NULL means "every branch" (kept
+  // for any existing recipient not yet assigned to one, and for a genuinely
+  // company-wide address like a general manager).
+  'ALTER TABLE email_recipients ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)',
+  // Ship-to address fields from SYSPRO ARCustomer
+  'ALTER TABLE customers ADD COLUMN ship_to_name TEXT',
+  'ALTER TABLE customers ADD COLUMN ship_to_address TEXT',
+  'ALTER TABLE customers ADD COLUMN ship_to_city TEXT',
+  'ALTER TABLE customers ADD COLUMN ship_to_postcode TEXT',
+  // Covering index for products.routes.js's "all pricing for this customer"
+  // lookup (WHERE customer_code = ?, the /products/for-customer/:id hot path
+  // reps hit on every order/quote capture). syspro_customer_pricing is a
+  // ~13M-row table; its PRIMARY KEY(customer_code, product_code) is a plain
+  // (non-WITHOUT ROWID) index, so a SELECT * against it does one extra
+  // random-access rowid lookup per matched row - scattered across a 1GB+
+  // table, that alone measured ~340ms cold-cache for one customer. Naming
+  // every selected column here lets SQLite satisfy the query straight from
+  // the index (COVERING INDEX in EXPLAIN QUERY PLAN, no rowid lookup at all)
+  // - measured ~1ms with this index in place. One-time build cost is the
+  // trade-off: expect it to take a while (tens of seconds locally; longer on
+  // a slower disk) the first time this runs against an existing 13M-row table.
+  `CREATE INDEX IF NOT EXISTS idx_pricing_customer_covering ON syspro_customer_pricing(
+    customer_code, product_code, contract_price, buying_group_price, price_code_price,
+    contract_start_date, contract_end_date, buying_group_start_date, buying_group_end_date
+  )`
 ]) {
   try { db.exec(stmt); } catch { /* column already exists */ }
 }
@@ -96,6 +158,38 @@ try {
     WHERE (total IS NULL OR total = 0) AND (subtotal + vat_amount) > 0
   `);
 } catch { /* invoices table may not exist yet on a fresh db */ }
+}
+
+// Async facade over the database - see dbx.js. New/migrated code should use
+// `await dbx.prepare(...)` instead of the synchronous `db` above, so the backend
+// can move from SQLite to SQL Server (DB_BACKEND=mssql) one caller at a time.
+// `dbx` is a live binding: initDb() swaps it to the SQL Server backend.
+export let dbx = useSqlite ? createSqliteDbx(db) : null;
+
+// Call once at startup, before serving requests. A no-op on SQLite. On SQL
+// Server it opens the connection pool. NOTE: do not enable DB_BACKEND=mssql
+// until every caller of the synchronous `db` (including the helpers below)
+// has moved to dbx - they still read the SQLite file.
+let initialised = false;
+export async function initDb() {
+  if (initialised) return;
+  initialised = true;
+  if (useSqlite) return;
+  const { default: sql } = await import('mssql');
+  const pool = await new sql.ConnectionPool({
+    server: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT) || 1433,
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    // The API server keeps idle connections for 30s; anything else (admin scripts,
+    // tests) lets them go after 1s so the process exits when its work is done
+    // instead of hanging on the pool for half a minute.
+    pool: { max: Number(process.env.DB_POOL_MAX) || 10, min: 0, idleTimeoutMillis: /(^|[\/])index\.js$/.test(process.argv[1] || '') ? 30000 : 1000 },
+    options: { encrypt: process.env.DB_ENCRYPT === '1', trustServerCertificate: true }
+  }).connect();
+  dbx = createMssqlDbx(pool, sql);
+}
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -135,6 +229,24 @@ export function logActivity(userId, action, entityType, entityId, detail = null)
 }
 
 export const VAT_RATE = 0.15;
+
+// R1-028: 2-decimal-place monetary rounding, shared by every money calculation
+// (order/quote line totals, VAT, price breaks) so the whole app rounds the
+// same way in one place instead of several independently-drifting copies.
+//
+// Plain `Math.round(n * 100) / 100` misrounds at exact half-cent boundaries
+// because those values cannot be represented exactly in IEEE-754 double
+// precision - e.g. 1287.225 is actually stored as 1287.2249999999999..., so
+// Math.round rounds it DOWN to 1287.22 instead of the expected 1287.23.
+// Confirmed live: ~2% of randomly generated realistic order totals hit this
+// in testing. The 1e-9 nudge corrects the representation error - it is far
+// smaller than the gap between any two real cent values (0.01, i.e. 1 once
+// scaled by 100), so it can never falsely push a genuine value across a
+// boundary, only correct the artefact of the value's own storage.
+export function round2(n) {
+  const sign = n < 0 ? -1 : 1;
+  return sign * Math.round(Math.abs(n) * 100 + 1e-9) / 100;
+}
 
 // Today as 'YYYY-MM-DD' in the server's local time. `new Date().toISOString()`
 // converts through UTC first, which silently shifts the date whenever the
@@ -229,12 +341,21 @@ export function activeRules() {
 }
 
 // SYSPRO's catalogue price (products.list_price) is a per-KG price, not a
-// per-unit/per-pack price - confirmed against real data (e.g. a 25kg bag
-// priced per kg, not per bag). The real selling price for one unit is
-// list_price * the pack's weight in kg. pack_weight_kg is parsed once at
-// sync time (see packWeightKg below) and stored, not re-derived per request.
+// per-unit/per-pack price. conv_factor_alt_uom is SYSPRO's own ConvFactAltUom,
+// read straight from InvMaster - it replaces packWeightKg()'s string-parse of
+// pack_size, which mispriced products whose stocking UOM text doesn't equal the
+// selling-unit factor (see docs/sql/vw_FS_Products-ConvFactAltUom.sql).
+// Falls back to pack_weight_kg for products not yet re-synced.
 export function productUnitPrice(product) {
-  return product.list_price * (product.pack_weight_kg || 1);
+  // R1-025/027/028: SYSPRO prices per kg; this scales to a per-selling-unit
+  // price by the conversion factor, which can produce many decimal places
+  // (e.g. 79.94 x 5.76 = 460.4544). Rounded to cents here, at the source,
+  // rather than left to accumulate through every later multiplication by
+  // quantity - a real invoicing system never charges a fraction of a cent per
+  // unit, and rounding only the LINE TOTAL later (as orders/quotes already do)
+  // is not equivalent: qty x an unrounded unit price can differ from qty x the
+  // properly-rounded unit price by a growing amount as qty increases.
+  return round2(product.list_price * (product.conv_factor_alt_uom || product.pack_weight_kg || 1));
 }
 
 // Parses a pack_size like "BAG 25KG", "BUCKET 2.7", "CARTON12.5", "EACH 500G",
@@ -255,9 +376,11 @@ export function packWeightKg(packSize) {
 // One-time backfill: products synced/created before pack_weight_kg existed
 // have it NULL. Parse it from their existing pack_size text so the fix takes
 // effect immediately, not just for the next sync.
+if (useSqlite) {
 for (const p of db.prepare("SELECT id, pack_size FROM products WHERE pack_weight_kg IS NULL AND pack_size IS NOT NULL").all()) {
   const kg = packWeightKg(p.pack_size);
   if (kg) db.prepare('UPDATE products SET pack_weight_kg = ? WHERE id = ?').run(kg, p.id);
+}
 }
 
 function rulePrice(rule, unitPrice) {
@@ -276,7 +399,7 @@ export function priceBreaks(product, rules = null) {
   const unitPrice = productUnitPrice(product);
   const breaks = new Map([[0, { min_qty: 0, price: unitPrice, rule_name: null }]]);
   for (const rule of applicable) {
-    const price = Math.round(rulePrice(rule, unitPrice) * 100) / 100;
+    const price = round2(rulePrice(rule, unitPrice));
     const key = rule.min_qty || 0;
     const existing = breaks.get(key);
     if (!existing || price < existing.price) breaks.set(key, { min_qty: key, price, rule_name: rule.name });
@@ -289,11 +412,43 @@ export function priceBreaks(product, rules = null) {
   return sorted;
 }
 
-// Effective unit price: customer contract price wins outright; otherwise the
-// best rule price for the quantity; otherwise list price * pack weight.
-export function effectivePrice(customerId, productId, qty = 1) {
+// R1-044: which tier actually produced a price, for the "why is this price
+// what it is" label shown to reps and printed onto order/quote lines. One
+// decision tree shared by effectivePrice() (price only, used everywhere
+// pricing is computed) and effectivePriceDetail() (price + source, used
+// where the source needs to be stored/displayed) - duplicating this logic
+// risks the two silently drifting apart on which price wins.
+//
+// PRICE_SOURCES values double as both the internal tag stored on order/quote
+// lines and (via PRICE_SOURCE_LABELS) the human label shown for it.
+export const PRICE_SOURCES = {
+  CONTRACT: 'contract',
+  BUYING_GROUP: 'buying_group',
+  PRICE_CODE: 'price_code',
+  CUSTOMER_PRICE: 'customer_price',
+  QTY_BREAK: 'qty_break',
+  G_PRICE: 'g_price',
+  MANUAL_OVERRIDE: 'manual_override'
+};
+
+export const PRICE_SOURCE_LABELS = {
+  [PRICE_SOURCES.CONTRACT]: 'Contract Price',
+  [PRICE_SOURCES.BUYING_GROUP]: 'Buying Group Price',
+  [PRICE_SOURCES.PRICE_CODE]: 'Price Code',
+  [PRICE_SOURCES.CUSTOMER_PRICE]: 'Customer Price',
+  [PRICE_SOURCES.QTY_BREAK]: 'Quantity Break',
+  [PRICE_SOURCES.G_PRICE]: 'G Price',
+  [PRICE_SOURCES.MANUAL_OVERRIDE]: 'Manual Override'
+};
+
+// Effective unit price and which tier produced it: SYSPRO contract price wins
+// outright, then SYSPRO buying-group, then SYSPRO price-code; otherwise a
+// RouteOne-side fixed customer price; otherwise the best qty-break rule price
+// for the quantity; otherwise list price * pack weight (G Price - SYSPRO's
+// normal selling price with no negotiated tier in play).
+function effectivePriceDetail(customerId, productId, qty = 1) {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId);
-  if (!product) return 0;
+  if (!product) return { price: 0, source: null };
   const customer = db.prepare('SELECT code FROM customers WHERE id = ?').get(customerId);
   if (customer) {
     const syspro = db.prepare(`
@@ -313,15 +468,35 @@ export function effectivePrice(customerId, productId, qty = 1) {
         inWindow(syspro.buying_group_start_date, syspro.buying_group_end_date)
         ? syspro.buying_group_price : null;
       const perKgPrice = contractPrice ?? groupPrice ?? syspro.price_code_price;
-      if (perKgPrice != null) return perKgPrice * (product.pack_weight_kg || 1);
+      // Rounded to cents for the same reason as productUnitPrice() above - this
+      // is the actual contract/buying-group/price-code unit price a rep is
+      // quoted and that gets multiplied by quantity on the order line.
+      if (perKgPrice != null) {
+        const source = contractPrice != null ? PRICE_SOURCES.CONTRACT
+          : groupPrice != null ? PRICE_SOURCES.BUYING_GROUP
+          : PRICE_SOURCES.PRICE_CODE;
+        return { price: round2(perKgPrice * (product.conv_factor_alt_uom || product.pack_weight_kg || 1)), source };
+      }
     }
   }
   const contract = db.prepare(
     'SELECT price FROM customer_prices WHERE customer_id = ? AND product_id = ?'
   ).get(customerId, productId);
-  if (contract) return contract.price;
+  if (contract) return { price: contract.price, source: PRICE_SOURCES.CUSTOMER_PRICE };
   const applicable = priceBreaks(product).filter((b) => qty >= b.min_qty);
-  return applicable.length ? applicable[applicable.length - 1].price : productUnitPrice(product);
+  if (applicable.length) {
+    const best = applicable[applicable.length - 1];
+    return { price: best.price, source: best.min_qty > 0 ? PRICE_SOURCES.QTY_BREAK : PRICE_SOURCES.G_PRICE };
+  }
+  return { price: productUnitPrice(product), source: PRICE_SOURCES.G_PRICE };
+}
+
+export function effectivePrice(customerId, productId, qty = 1) {
+  return effectivePriceDetail(customerId, productId, qty).price;
+}
+
+export function effectivePriceSource(customerId, productId, qty = 1) {
+  return effectivePriceDetail(customerId, productId, qty).source;
 }
 
 export function adjustOrderStock(orderId, direction) {
@@ -340,3 +515,6 @@ export function adjustOrderStock(orderId, direction) {
     if (order.warehouse_id) updateWarehouse.run(delta, item.product_id, order.warehouse_id);
   }
 }
+
+// Connect before any importer runs - modules like auth.js read settings at load.
+await initDb();
