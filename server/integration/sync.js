@@ -518,7 +518,46 @@ const invoiceLineBulkBuild = async (rows, ctx) => {
   };
 };
 
+const STOCK_COLUMNS = [
+  { name: 'product_id', type: 'int' },
+  { name: 'warehouse_id', type: 'int' },
+  { name: 'qty_available', type: 'float' }
+];
+
+// Mirrors upsertStock: a code with no synced product is a row error; a row with no
+// branch has nowhere to record a quantity and is skipped.
+const stockBulkBuild = async (rows, ctx) => {
+  for (const code of new Set(rows.map((r) => r.warehouse_code).filter(Boolean))) {
+    await warehouseForCode(code, dbx, ctx);
+  }
+  const warehouses = await warehouseIds(ctx);
+  const products = await productIds(ctx);
+  return (row) => {
+    const productId = products.get(codeKey(row.code));
+    if (productId == null) throw new Error(`Stock row for unknown product code ${row.code}`);
+    if (!row.warehouse_code) return null;
+    return { product_id: productId, warehouse_id: warehouses.get(codeKey(row.warehouse_code)), qty_available: num(row.qty_available) };
+  };
+};
+
+// products.stock_qty is the sum over branches (per-row upsertStock re-sums it for
+// each row). Done once for the whole table after the bulk load, touching only
+// products whose total is actually out of date.
+const refreshStockTotals = (conn) => conn.prepare(`
+  UPDATE p SET stock_qty = s.total
+  FROM products p
+  JOIN (SELECT product_id, SUM(qty_available) AS total FROM product_stock GROUP BY product_id) s ON s.product_id = p.id
+  WHERE p.stock_qty IS NULL OR p.stock_qty <> s.total
+`).run();
+
 const BULK_UPSERT = {
+  stock: {
+    table: 'product_stock',
+    columns: STOCK_COLUMNS,
+    keys: ['product_id', 'warehouse_id'],
+    build: stockBulkBuild,
+    after: refreshStockTotals
+  },
   customer_pricing: {
     table: 'syspro_customer_pricing',
     columns: PRICING_COLUMNS,
@@ -701,9 +740,10 @@ export async function runSync(entity, { provider = null } = {}) {
         for (const row of rows) await applyRow(row, tx);
       });
     } else if (BULK_UPSERT[entity] && dbx.bulkUpsert) {
-      const { build, ...spec } = BULK_UPSERT[entity];
+      const { build, after, ...spec } = BULK_UPSERT[entity];
       const bulkRows = await mapBulk(BULK_UPSERT[entity]);
       const { inserted, updated } = await dbx.bulkUpsert(spec.table, { ...spec, rows: bulkRows });
+      if (after) await after(dbx);
       // "upserted" means read and applied. Unchanged rows are deliberately not
       // rewritten (see dbx.bulkUpsert), so the split is logged, not reported.
       upserted = bulkRows.length;
