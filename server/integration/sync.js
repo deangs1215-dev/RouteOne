@@ -583,9 +583,62 @@ const BULK_UPSERT = {
   }
 };
 
+// rep_sales / customer_sales accumulate by SUM within a run (several source rows
+// land on one rep-month or customer-month). Per row that is an upsert with
+// `sales_value = sales_value + ?`; in bulk the same totals are summed in memory
+// and inserted once per key, into the freshly cleared table.
+const MONTHLY_SALES_COLUMNS = (keyColumn) => [
+  keyColumn,
+  { name: 'month', type: 'nvarchar(7)', nullable: false },
+  { name: 'sales_value', type: 'float', nullable: false }
+];
+const sumByKey = (keyColumnName) => (rows) => {
+  const totals = new Map();
+  for (const r of rows) {
+    const key = `${r[keyColumnName]}|${r.month}`;
+    const t = totals.get(key);
+    if (t) t.sales_value += r.sales_value;
+    else totals.set(key, { ...r });
+  }
+  return [...totals.values()];
+};
+
+// Mirrors upsertRepSales: no matching rep, or no year/month, is a skip.
+const repSalesBulkBuild = async (rows, ctx) => {
+  const reps = await repIds(ctx);
+  return (row) => {
+    const branch = String(row.CustomerBranch ?? '').trim();
+    const repCode = String(row['Customer SalesPerson'] ?? '').trim();
+    const repId = branch && repCode ? reps.get(`${branch}|${repCode}`) : null;
+    if (!repId) return null;
+    if (!row.TrnYear || !row.TrnMonth) return null;
+    return { rep_id: repId, month: `${row.TrnYear}-${String(row.TrnMonth).padStart(2, '0')}`, sales_value: num(row.NSV) };
+  };
+};
+
+// Mirrors upsertCustomerSales: keyed on the customer CODE (kept even when no
+// customer by that code is synced yet).
+const customerSalesBulkBuild = async () => (row) => {
+  const code = String(row.customer_code ?? '').trim();
+  if (!code || !row.trn_year || !row.trn_month) return null;
+  return { customer_code: code, month: `${row.trn_year}-${String(row.trn_month).padStart(2, '0')}`, sales_value: num(row.nsv) };
+};
+
 // Wipe-and-reload entities: the clear and the bulk load share one transaction, so
 // readers never see the table half-filled.
 const BULK_INSERT = {
+  rep_sales: {
+    table: 'rep_monthly_sales',
+    columns: MONTHLY_SALES_COLUMNS({ name: 'rep_id', type: 'int', nullable: false }),
+    build: repSalesBulkBuild,
+    aggregate: sumByKey('rep_id')
+  },
+  customer_sales: {
+    table: 'customer_monthly_sales',
+    columns: MONTHLY_SALES_COLUMNS({ name: 'customer_code', type: 'nvarchar(20)', nullable: false }),
+    build: customerSalesBulkBuild,
+    aggregate: sumByKey('customer_code')
+  },
   invoice_lines: { table: 'invoice_items', columns: INVOICE_ITEM_COLUMNS, build: invoiceLineBulkBuild }
 };
 
@@ -732,9 +785,12 @@ export async function runSync(entity, { provider = null } = {}) {
     if (CLEAR_BEFORE_SYNC[entity] && BULK_INSERT[entity] && dbx.bulkInsert) {
       const spec = BULK_INSERT[entity];
       const bulkRows = await mapBulk(spec);
+      // "upserted" counts source rows applied (as the per-row path does), even
+      // when an aggregate folds several of them into one stored row.
+      const toInsert = spec.aggregate ? spec.aggregate(bulkRows) : bulkRows;
       await dbx.transaction(async (tx) => {
         await CLEAR_BEFORE_SYNC[entity](tx);
-        await tx.bulkInsert(spec.table, { columns: spec.columns, rows: bulkRows });
+        await tx.bulkInsert(spec.table, { columns: spec.columns, rows: toInsert });
       });
       upserted = bulkRows.length;
     } else if (CLEAR_BEFORE_SYNC[entity]) {
