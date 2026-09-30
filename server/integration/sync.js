@@ -658,7 +658,10 @@ export async function runSync(entity, { provider = null } = {}) {
     // index instead, so cache_size (see db.js) actually gets reused across
     // consecutive rows rather than thrashing. Cheap relative to the write it
     // is fixing: a JS sort of ~4.5M plain objects is seconds, not minutes.
-    if (SORT_KEYS[entity]) {
+    // Not needed (and not free: ~4.5M localeCompare-ing rows) when the bulk path
+    // takes the rows - that joins a staging table on the key, so input order is
+    // irrelevant.
+    if (SORT_KEYS[entity] && !(BULK_UPSERT[entity] && dbx.bulkUpsert)) {
       const [keyA, keyB] = SORT_KEYS[entity];
       rows.sort((a, b) => {
         const c = String(a[keyA]).localeCompare(String(b[keyA]));
