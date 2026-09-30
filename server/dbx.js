@@ -213,11 +213,28 @@ export function createMssqlDbx(pool, sql) {
       if (count !== params.length) {
         throw new Error(`dbx: ${count} placeholders but ${params.length} params in: ${text}`);
       }
-      const req = request();
-      params.forEach((v, i) => req.input(`p${i}`, v === undefined ? null : v));
       let result;
       try {
-        result = await req.query(q);
+        // SQL Server picks one side of a lock cycle as the "deadlock victim" (error
+        // 1205) and rolls its statement back. A single statement outside a
+        // transaction is safe to simply run again - this is what turned a screen
+        // that happened to load while a sync committed into an error page. Inside a
+        // transaction the whole unit is gone, so that case is left to the caller.
+        for (let attempt = 1; ; attempt++) {
+          const req = request();
+          params.forEach((v, i) => req.input(`p${i}`, v === undefined ? null : v));
+          try {
+            result = await req.query(q);
+            break;
+          } catch (err) {
+            const n = err.number ?? err.originalError?.number ?? err.originalError?.info?.number;
+            if (n === 1205 && target === pool && attempt < 4) {
+              await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+              continue;
+            }
+            throw err;
+          }
+        }
       } catch (err) {
         // Say which statement failed - the driver's message alone rarely does.
         err.message = `${err.message} [sql: ${text.replace(/\s+/g, ' ').trim().slice(0, 240)}] [params: ${JSON.stringify(params).slice(0, 200)}]`;

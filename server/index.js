@@ -189,6 +189,18 @@ app.use((err, req, res, next) => {
   if (err.code === 'SQLITE_BUSY') {
     return res.status(503).json({ error: 'Sync in progress - please try again in a few minutes' });
   }
+  // SQL Server equivalents. 245/8114/8115 are "cannot convert/overflow" - what a
+  // junk id in the URL (`/users/undefined`) becomes once it reaches an INT column;
+  // SQLite answered those with a plain 404, so it is a client error, not a 500.
+  // 1205 (deadlock victim, after dbx's own retries) and request/connect timeouts
+  // are transient contention, e.g. a screen opened while a big sync commits.
+  const n = err.number ?? err.originalError?.number ?? err.originalError?.info?.number;
+  if (n === 245 || n === 8114 || n === 8115) {
+    return res.status(400).json({ error: 'Invalid value in the request' });
+  }
+  if (n === 1205 || err.code === 'ETIMEOUT' || err.code === 'ETIMEDOUT' || err.code === 'ESOCKET') {
+    return res.status(503).json({ error: 'The system is busy - please try again in a moment' });
+  }
   res.status(500).json({ error: 'Internal server error' });
 });
 

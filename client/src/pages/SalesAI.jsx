@@ -16,6 +16,11 @@ export default function SalesAI() {
   const [customers, setCustomers] = useState(null);
   const [actions, setActions] = useState(null);
   const [segFilter, setSegFilter] = useState('');
+  // The list is every customer (~12,000 on production), already sorted by risk. Drawing
+  // them all made the page a million characters of DOM - slow to open, and heavy on a
+  // phone - so show the riskiest first and let the user ask for more.
+  const PAGE = 200;
+  const [limit, setLimit] = useState(PAGE);
 
   useEffect(() => {
     api.get('/intel/customers').then(setCustomers).catch(console.error);
@@ -26,7 +31,8 @@ export default function SalesAI() {
 
   const segments = {};
   for (const c of customers) segments[c.segment] = (segments[c.segment] || 0) + 1;
-  const shown = segFilter ? customers.filter((c) => c.segment === segFilter) : customers;
+  const filtered = segFilter ? customers.filter((c) => c.segment === segFilter) : customers;
+  const shown = filtered.slice(0, limit);
 
   return (
     <div className="space-y-6">
@@ -40,7 +46,7 @@ export default function SalesAI() {
         {Object.entries(SEGMENT_COLORS).map(([seg, color]) => (
           <button key={seg}
             className={`card p-3 text-left transition ${segFilter === seg ? 'ring-2 ring-brand-500' : 'hover:shadow'}`}
-            onClick={() => setSegFilter(segFilter === seg ? '' : seg)}>
+            onClick={() => { setSegFilter(segFilter === seg ? '' : seg); setLimit(PAGE); }}>
             <div className="text-2xl font-bold" style={{ color }}>{segments[seg] || 0}</div>
             <div className="text-xs font-medium text-slate-600">{seg}</div>
           </button>
@@ -83,6 +89,12 @@ export default function SalesAI() {
               </tr>
             ))}
           </Table>
+          {filtered.length > shown.length && (
+            <div className="flex items-center justify-between border-t border-slate-100 px-3 py-2 text-xs text-slate-500">
+              <span>Showing {shown.length.toLocaleString()} of {filtered.length.toLocaleString()} customers, highest risk first</span>
+              <button className="btn-secondary" onClick={() => setLimit(limit + PAGE * 2)}>Show more</button>
+            </div>
+          )}
         </Card>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { isConstraintViolation } from '../dbx.js';
+import { isConstraintViolation, isUniqueViolation } from '../dbx.js';
 import { dbx, getLocalDateISO } from '../db.js';
 import { logActivity } from '../dbh.js';
 import { passwordIsStrong, requireRole, scopeForUser } from '../auth.js';
@@ -152,8 +152,11 @@ router.post('/users', requireRole('admin', 'manager'), async (req, res) => {
     `).run(b.name, b.email, bcrypt.hashSync(b.password, 12), b.phone || null, b.role_id, b.customer_id || null, b.rep_code || null, b.warehouse_id || null, b.sales_target || 0,
       b.home_address || null, b.home_lat ?? null, b.home_lng ?? null);
     res.json({ id: info.lastInsertRowid });
-  } catch {
-    res.status(400).json({ error: 'Email already in use' });
+  } catch (e) {
+    // Only a duplicate email is the caller's mistake; anything else (a bad role id,
+    // a timeout, a constraint) must surface as itself, not as "Email already in use".
+    if (isUniqueViolation(e)) return res.status(400).json({ error: 'Email already in use' });
+    throw e;
   }
 });
 
