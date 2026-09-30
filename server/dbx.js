@@ -224,7 +224,15 @@ export function createMssqlDbx(pool, sql) {
         throw err;
       }
       for (const row of result.recordset ?? []) {
-        for (const key in row) if (row[key] instanceof Date) row[key] = dateToText(row[key]);
+        for (const key in row) {
+          // A query that selects two columns of the same name (`SELECT v.*, ... AS
+          // status`) gets an ARRAY of both values from the SQL Server driver, where
+          // SQLite silently keeps the last one. The routes were written against
+          // SQLite, so keep SQLite's behaviour: the later column wins. (No real
+          // column holds an array, so this can only be the duplicate-name case.)
+          if (Array.isArray(row[key])) row[key] = row[key][row[key].length - 1];
+          if (row[key] instanceof Date) row[key] = dateToText(row[key]);
+        }
       }
       return result;
     }

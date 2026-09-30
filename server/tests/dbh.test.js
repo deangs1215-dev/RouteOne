@@ -21,6 +21,16 @@ test('setSetting upserts and getSetting reads it back', async () => {
   assert.equal((await dbx.prepare('SELECT COUNT(*) AS n FROM settings WHERE [key] = ?').get('t_k')).n, 1);
 });
 
+// Regression: GET /visits does `SELECT v.*, ... AS status`, two columns named status.
+// SQL Server's driver returns an array for that, which blanked the Visits page
+// (status.replace is not a function). SQLite keeps the last one; so must we.
+test('a query with two same-named columns returns the later one, not an array', async () => {
+  const row = await dbx.prepare("SELECT 'completed' AS status, 'missed' AS status").get();
+  assert.equal(row.status, 'missed');
+  const rows = await dbx.prepare("SELECT 1 AS id, 'a' AS tag, 'b' AS tag").all();
+  assert.deepEqual(rows, [{ id: 1, tag: 'b' }]);
+});
+
 test('nextNumber is sequential and gives concurrent callers distinct numbers', async () => {
   assert.equal(await h.nextNumber('TST'), 'TST-00001');
   assert.equal(await h.nextNumber('TST'), 'TST-00002');
