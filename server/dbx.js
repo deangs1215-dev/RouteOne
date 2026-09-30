@@ -257,7 +257,23 @@ export function createMssqlDbx(pool, sql) {
           }
         };
       },
-      exec: async (text) => { await request().batch(text); }
+      exec: async (text) => { await request().batch(text); },
+      // Bulk-load plain rows into an existing table (SQL Server only; callers check
+      // `dbx.bulkInsert` exists). Inside dbx.transaction it joins that transaction,
+      // so a clear-then-reload stays atomic. Identity and default columns are simply
+      // left out of `columns`. Chunked so one huge load doesn't build one huge packet.
+      //   columns: [{ name, type, nullable? }]  type as for bulkUpsert
+      async bulkInsert(table, { columns, rows, chunkSize = 50000 }) {
+        for (let start = 0; start < rows.length; start += chunkSize) {
+          const end = Math.min(start + chunkSize, rows.length);
+          const t = new sql.Table(table);
+          t.create = false;
+          for (const c of columns) t.columns.add(c.name, bulkType(c.type), { nullable: c.nullable ?? true });
+          for (let i = start; i < end; i++) t.rows.add(...columns.map((c) => rows[i][c.name] ?? null));
+          await request().bulk(t);
+        }
+        return { inserted: rows.length };
+      }
     };
     return self;
   };
@@ -291,14 +307,23 @@ export function createMssqlDbx(pool, sql) {
   // nothing - no data pages, no index maintenance. Each chunk is its own
   // transaction, so memory and log growth stay bounded and a failure loses at
   // most the current chunk. Returns { inserted, updated }.
-  async function bulkUpsert(table, { columns, keys, now = [], rows, chunkSize = 50000 }) {
+  //
+  // Per-column update rules, for tables where a plain overwrite is not right
+  // (all three are T-SQL fragments that may use the aliases t = existing row,
+  // s = staged row, and are identifiers/constants in our own code, never input):
+  //   keepExisting: columns updated as COALESCE(s.col, t.col) - a NULL from the
+  //                 source leaves the stored value alone
+  //   updateExpr:   { col: 'expr' } replaces the new value for an UPDATE
+  //   insertExpr:   { col: 'expr' } replaces the value for an INSERT
+  async function bulkUpsert(table, { columns, keys, now = [], rows, chunkSize = 50000, keepExisting = [], updateExpr = {}, insertExpr = {} }) {
     const q = (c) => `[${c}]`;
     const valueCols = columns.filter((c) => !keys.includes(c.name));
     if (!valueCols.length) throw new Error('dbx.bulkUpsert: no non-key columns');
     const colList = columns.map((c) => q(c.name)).join(', ');
     const onKeys = (a, b) => keys.map((k) => `${a}.${q(k)} = ${b}.${q(k)}`).join(' AND ');
+    const newValue = (name) => updateExpr[name] ?? (keepExisting.includes(name) ? `COALESCE(s.${q(name)}, t.${q(name)})` : `s.${q(name)}`);
     // NULL-safe "is different": EXCEPT treats two NULLs as equal.
-    const differs = `EXISTS (SELECT ${valueCols.map((c) => `s.${q(c.name)}`).join(', ')} EXCEPT SELECT ${valueCols.map((c) => `t.${q(c.name)}`).join(', ')})`;
+    const differs = `EXISTS (SELECT ${valueCols.map((c) => newValue(c.name)).join(', ')} EXCEPT SELECT ${valueCols.map((c) => `t.${q(c.name)}`).join(', ')})`;
     // Temp tables belong to the pooled connection, not the transaction, so they
     // outlive the commit and would collide with the next chunk on the same
     // connection - hence the drop before create and again after use.
@@ -308,12 +333,12 @@ export function createMssqlDbx(pool, sql) {
       ;WITH d AS (SELECT ROW_NUMBER() OVER (PARTITION BY ${keys.map(q).join(', ')} ORDER BY __ord DESC) AS rn FROM #stage)
       DELETE FROM d WHERE rn > 1`;
     const update = `
-      UPDATE t SET ${valueCols.map((c) => `t.${q(c.name)} = s.${q(c.name)}`).concat(now.map((c) => `t.${q(c)} = SYSUTCDATETIME()`)).join(', ')}
+      UPDATE t SET ${valueCols.map((c) => `t.${q(c.name)} = ${newValue(c.name)}`).concat(now.map((c) => `t.${q(c)} = SYSUTCDATETIME()`)).join(', ')}
       FROM ${table} t JOIN #stage s ON ${onKeys('t', 's')}
       WHERE ${differs}`;
     const insert = `
       INSERT INTO ${table} (${colList}${now.length ? ', ' + now.map(q).join(', ') : ''})
-      SELECT ${columns.map((c) => `s.${q(c.name)}`).join(', ')}${now.length ? ', ' + now.map(() => 'SYSUTCDATETIME()').join(', ') : ''}
+      SELECT ${columns.map((c) => insertExpr[c.name] ?? `s.${q(c.name)}`).join(', ')}${now.length ? ', ' + now.map(() => 'SYSUTCDATETIME()').join(', ') : ''}
       FROM #stage s
       WHERE NOT EXISTS (SELECT 1 FROM ${table} t WHERE ${onKeys('t', 's')})`;
 

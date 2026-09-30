@@ -119,7 +119,7 @@ CREATE TABLE customers (
   ship_to_name NVARCHAR(255),
   ship_to_address NVARCHAR(MAX),
   ship_to_city NVARCHAR(100),
-  ship_to_postcode NVARCHAR(20),
+  ship_to_postcode NVARCHAR(50),
   created_at DATETIME DEFAULT SYSUTCDATETIME()
 );
 GO

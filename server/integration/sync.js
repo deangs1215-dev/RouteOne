@@ -39,25 +39,67 @@ export const matchRep = async (warehouseCode, repCode, conn = dbx) => {
   return rep?.id ?? null;
 };
 
+// Per-run lookup tables. Every row used to cost its own SELECTs (warehouse,
+// rep, customer, product, invoice) - on SQL Server each is a network round trip,
+// which is what made an invoice_lines run take ~24 minutes. Each table is loaded
+// once per run, on first use, into a Map keyed by code. `ctx` belongs to one
+// runSync call, so concurrent runs of different entities never share or clobber
+// each other's maps. Keys drop trailing spaces to match SQL Server's `=`, which
+// ignores them.
+const codeKey = (v) => String(v ?? '').trimEnd();
+const loadOnce = (ctx, name, load) => (ctx[name] ??= load());
+const idMap = async (text, codeCol) =>
+  new Map((await dbx.prepare(text).all()).map((r) => [codeKey(r[codeCol]), r.id]));
+const warehouseIds = (ctx) => loadOnce(ctx, 'warehouses', () => idMap('SELECT id, code FROM warehouses', 'code'));
+const customerIds = (ctx) => loadOnce(ctx, 'customers', () => idMap('SELECT id, code FROM customers', 'code'));
+const productIds = (ctx) => loadOnce(ctx, 'products', () => idMap('SELECT id, code FROM products', 'code'));
+const invoiceIds = (ctx) => loadOnce(ctx, 'invoices', () => idMap('SELECT id, number FROM invoices', 'number'));
+// Same rule as matchRep (active rep, trimmed branch + rep code), resolved from memory.
+// First user wins when two share a pair, matching matchRep's LIMIT-less .get().
+const repIds = (ctx) => loadOnce(ctx, 'reps', async () => {
+  const reps = await dbx.prepare(`
+    SELECT u.id, u.rep_code, w.code AS warehouse_code
+    FROM users u
+    JOIN roles r ON r.id = u.role_id
+    JOIN warehouses w ON w.id = u.warehouse_id
+    WHERE r.name = 'rep' AND u.active = 1
+    ORDER BY u.id
+  `).all();
+  const map = new Map();
+  for (const u of reps) {
+    const key = `${String(u.warehouse_code).trim()}|${String(u.rep_code ?? '').trim()}`;
+    if (!map.has(key)) map.set(key, u.id);
+  }
+  return map;
+});
+const matchRepCached = async (ctx, warehouseCode, repCode) => {
+  const branch = String(warehouseCode ?? '').trim();
+  const code = String(repCode ?? '').trim();
+  if (!branch || !code) return null;
+  return (await repIds(ctx)).get(`${branch}|${code}`) ?? null;
+};
+
 // Some customers reference a branch code that's missing from vw_FS_Warehouses
 // (e.g. branch 30) - rather than dropping those customers from every sync, a
 // placeholder warehouse is created for the code. If the view is later fixed
 // to include it, the next warehouses sync just updates this stub's name.
-const warehouseForCode = async (code, conn) => {
+const warehouseForCode = async (code, conn, ctx = {}) => {
   if (!code) return null;
-  let warehouse = await conn.prepare('SELECT id FROM warehouses WHERE code = ?').get(code);
-  if (!warehouse) {
+  const ids = await warehouseIds(ctx);
+  let id = ids.get(codeKey(code));
+  if (id == null) {
     const info = await conn.prepare('INSERT INTO warehouses (code, name) VALUES (?, ?)').run(code, `Branch ${code} (unmapped)`);
-    warehouse = { id: info.lastInsertRowid };
+    id = info.lastInsertRowid;
+    ids.set(codeKey(code), id);
   }
-  return warehouse;
+  return { id };
 };
 
-const upsertCustomer = async (row, conn) => {
+const upsertCustomer = async (row, conn, ctx = {}) => {
   const existing = await conn.prepare('SELECT id FROM customers WHERE code = ?').get(row.code);
   const onHoldStatus = row.on_hold ? 'on_hold' : 'active';
-  const warehouse = await warehouseForCode(row.warehouse_code, conn);
-  const repId = await matchRep(row.warehouse_code, row.rep_code, conn);
+  const warehouse = await warehouseForCode(row.warehouse_code, conn, ctx);
+  const repId = await matchRepCached(ctx, row.warehouse_code, row.rep_code);
   if (existing) {
     // ERP is the master for financial fields AND for rep ownership - a customer
     // reassigned in SYSPRO follows on the next sync, so the old rep stops seeing
@@ -137,10 +179,11 @@ const upsertProduct = async (row, conn) => {
 // Stock arrives one row per (product, branch) so the Products page can show a
 // per-warehouse breakdown; products.stock_qty is kept as the summed total for
 // code that only needs a single number (order capture, low-stock warnings).
-const upsertStock = async (row, conn) => {
-  const product = await conn.prepare('SELECT id FROM products WHERE code = ?').get(row.code);
-  if (!product) throw new Error(`Stock row for unknown product code ${row.code}`);
-  const warehouse = await warehouseForCode(row.warehouse_code, conn);
+const upsertStock = async (row, conn, ctx = {}) => {
+  const productId = (await productIds(ctx)).get(codeKey(row.code));
+  if (productId == null) throw new Error(`Stock row for unknown product code ${row.code}`);
+  const product = { id: productId };
+  const warehouse = await warehouseForCode(row.warehouse_code, conn, ctx);
   if (warehouse) {
     await conn.upsert('product_stock', {
       keys: { product_id: product.id, warehouse_id: warehouse.id },
@@ -151,8 +194,8 @@ const upsertStock = async (row, conn) => {
   await conn.prepare('UPDATE products SET stock_qty = ? WHERE id = ?').run(total, product.id);
 };
 
-const upsertInvoice = async (row, conn) => {
-  const customer = await conn.prepare('SELECT id FROM customers WHERE code = ?').get(row.customer_code);
+const upsertInvoice = async (row, conn, ctx = {}) => {
+  const customer = { id: (await customerIds(ctx)).get(codeKey(row.customer_code)) };
   const subtotal = row.subtotal ?? 0;
   const vat = row.vat_amount ?? 0;
   // SYSPRO's InvoiceValue occasionally comes through as 0 even when the
@@ -228,16 +271,6 @@ const pricingBulkRow = (row) => {
   };
 };
 
-const BULK_UPSERT = {
-  customer_pricing: {
-    table: 'syspro_customer_pricing',
-    columns: PRICING_COLUMNS,
-    keys: ['customer_code', 'product_code'],
-    now: ['synced_at'],
-    mapRow: pricingBulkRow
-  }
-};
-
 const upsertCustomerPricing = (row, conn) => {
   return conn.upsert('syspro_customer_pricing', {
     keys: { customer_code: toSafeValue(row.customer_code), product_code: toSafeValue(row.product_code) },
@@ -268,8 +301,8 @@ const upsertCustomerPricing = (row, conn) => {
 // Returns false (not undefined) when a row is deliberately skipped - lets
 // runSync count "skipped, no match" separately from "matched and written"
 // instead of both silently counting as a plain success.
-const upsertRepSales = async (row, conn) => {
-  const repId = await matchRep(row.CustomerBranch, row['Customer SalesPerson'], conn);
+const upsertRepSales = async (row, conn, ctx = {}) => {
+  const repId = await matchRepCached(ctx, row.CustomerBranch, row['Customer SalesPerson']);
   if (!repId) return false;
   const year = row.TrnYear;
   const month = row.TrnMonth;
@@ -306,28 +339,15 @@ const upsertCustomerSales = async (row, conn) => {
 // so this table is fully wiped and rebuilt each run (see CLEAR_BEFORE_SYNC)
 // rather than upserted. A row whose invoice isn't synced yet (outside the
 // header view's own window, or a sync-order hiccup) is skipped, not an error.
-// Code -> customers.id, memoised for the duration of one sync run. The lines
-// view is ~285k rows over 90 days and the same store repeats across many of
-// them, so a per-row lookup would be a quarter-million redundant queries.
-// Cleared at the start of each run (see CLEAR_BEFORE_SYNC) so a customer synced
-// later in the day is picked up rather than cached as missing forever.
-let deliveryCustomerCache = new Map();
-const deliveryCustomerId = async (code, conn) => {
-  if (!code) return null;
-  if (deliveryCustomerCache.has(code)) return deliveryCustomerCache.get(code);
-  const id = (await conn.prepare('SELECT id FROM customers WHERE code = ?').get(code))?.id ?? null;
-  deliveryCustomerCache.set(code, id);
-  return id;
-};
-
-// dbx caches prepared statements by SQL text, so these are parsed once however
-// many times this runs (~270k times per invoice_lines sync, inside one atomic
-// transaction - preparing per row once stretched that to a 57-68s freeze on
-// production).
-const upsertInvoiceLine = async (row, conn) => {
-  const invoice = await conn.prepare('SELECT id FROM invoices WHERE number = ?').get(row.invoice_number);
-  if (!invoice) return false;
-  const product = await conn.prepare('SELECT id FROM products WHERE code = ?').get(row.product_code);
+// Invoice, product and customer ids come from the per-run lookup maps above. The
+// lines view is ~285k rows over 90 days and the same invoice, product and store
+// repeat across many of them, so per-row lookups were ~850k redundant queries.
+// The maps are per run (ctx), so a customer synced later in the day is picked up
+// on the next run rather than cached as missing forever.
+const upsertInvoiceLine = async (row, conn, ctx = {}) => {
+  const invoiceId = (await invoiceIds(ctx)).get(codeKey(row.invoice_number));
+  if (invoiceId == null) return false;
+  const productId = (await productIds(ctx)).get(codeKey(row.product_code)) ?? null;
   // The store the goods went to. Under central billing this differs from the
   // invoice's own customer (PICK N PAY RETAILERS billed, OAKDENE delivered) and
   // it is what the rep is actually assigned to - see invoices.routes.js.
@@ -335,12 +355,199 @@ const upsertInvoiceLine = async (row, conn) => {
   // customer; scoping then falls back to the billed customer alone, i.e. the
   // behaviour before this change.
   const deliveryCode = row.delivery_customer_code ?? null;
+  const deliveryId = deliveryCode ? (await customerIds(ctx)).get(codeKey(deliveryCode)) ?? null : null;
+  // dbx caches prepared statements by SQL text, so this is parsed once however
+  // many times it runs.
   await conn.prepare(`
     INSERT INTO invoice_items (invoice_id, product_id, product_code, delivery_customer_id, delivery_customer_code, qty, unit_price, line_total)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(invoice.id, product?.id ?? null, row.product_code,
-    await deliveryCustomerId(deliveryCode, conn), deliveryCode,
+  `).run(invoiceId, productId, row.product_code, deliveryId, deliveryCode,
     row.qty ?? 0, row.unit_price ?? 0, row.line_total ?? 0);
+};
+
+// --- Bulk loads (SQL Server) ---------------------------------------------------
+// The per-row upserters above cost 2-4 network round trips per row on SQL Server
+// (an UPDATE, then an INSERT when nothing matched, plus lookups), which made the
+// big entities take minutes to hours. On SQL Server the large entities are instead
+// mapped in memory and written with a handful of set-based statements (see
+// dbx.bulkUpsert / dbx.bulkInsert). SQLite keeps the per-row path - it is a local
+// file, so that is already fast - and both paths are covered by the same tests.
+//
+// `build(rows, ctx)` loads what it needs and returns mapRow(row) -> staged row,
+// null for a row that is deliberately skipped, or throws for a bad row (counted
+// as a row error, exactly as a failed per-row upsert is).
+const num = (v) => {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
+};
+const text = (v) => {
+  if (v === null || v === undefined) return null;
+  const s = String(v);
+  return s === '' ? null : s;
+};
+
+const CUSTOMER_COLUMNS = [
+  { name: 'code', type: 'nvarchar(20)' },
+  { name: 'name', type: 'nvarchar(255)' },
+  { name: 'contact_name', type: 'nvarchar(255)' },
+  { name: 'phone', type: 'nvarchar(20)' },
+  { name: 'email', type: 'nvarchar(255)' },
+  { name: 'address', type: 'nvarchar(max)' },
+  { name: 'city', type: 'nvarchar(100)' },
+  { name: 'ship_to_name', type: 'nvarchar(255)' },
+  { name: 'ship_to_address', type: 'nvarchar(max)' },
+  { name: 'ship_to_city', type: 'nvarchar(100)' },
+  { name: 'ship_to_postcode', type: 'nvarchar(50)' },
+  { name: 'credit_limit', type: 'float' },
+  { name: 'balance', type: 'float' },
+  { name: 'payment_terms', type: 'nvarchar(50)' },
+  { name: 'warehouse_id', type: 'int' },
+  { name: 'rep_id', type: 'int' },
+  { name: 'status', type: 'nvarchar(20)' }
+];
+
+// Mirrors upsertCustomer: SYSPRO owns name, credit and balance (overwritten) and
+// rep ownership; contact details, ship-to, terms, branch and rep only replace what
+// is stored when SYSPRO actually supplies a value (COALESCE), and a customer
+// closed in RouteOne stays closed. A new customer gets the same defaults.
+const customerBulkBuild = async (rows, ctx) => {
+  // Branch codes the customer view references but the warehouse view lacks get a
+  // placeholder first, so every staged warehouse_id resolves.
+  for (const code of new Set(rows.map((r) => r.warehouse_code).filter(Boolean))) {
+    await warehouseForCode(code, dbx, ctx);
+  }
+  const warehouses = await warehouseIds(ctx);
+  const reps = await repIds(ctx);
+  return (row) => {
+    const code = text(row.code);
+    const name = text(row.name);
+    if (!code || !name) throw new Error(`Customer row is missing its code or name (code ${row.code})`);
+    const branch = String(row.warehouse_code ?? '').trim();
+    const repCode = String(row.rep_code ?? '').trim();
+    return {
+      code, name,
+      contact_name: text(row.contact_name), phone: text(row.phone), email: text(row.email),
+      address: text(row.address), city: text(row.city),
+      ship_to_name: text(row.ship_to_name), ship_to_address: text(row.ship_to_address),
+      ship_to_city: text(row.ship_to_city), ship_to_postcode: text(row.ship_to_postcode),
+      credit_limit: num(row.credit_limit), balance: num(row.balance),
+      payment_terms: text(row.payment_terms),
+      warehouse_id: row.warehouse_code ? warehouses.get(codeKey(row.warehouse_code)) ?? null : null,
+      rep_id: branch && repCode ? reps.get(`${branch}|${repCode}`) ?? null : null,
+      status: row.on_hold ? 'on_hold' : 'active'
+    };
+  };
+};
+
+const INVOICE_COLUMNS = [
+  { name: 'number', type: 'nvarchar(20)' },
+  { name: 'customer_id', type: 'int' },
+  { name: 'customer_code', type: 'nvarchar(20)' },
+  { name: 'order_number', type: 'nvarchar(50)' },
+  { name: 'invoice_date', type: 'nvarchar(10)' },
+  { name: 'due_date', type: 'nvarchar(10)' },
+  { name: 'subtotal', type: 'float' },
+  { name: 'vat_amount', type: 'float' },
+  { name: 'total', type: 'float' },
+  { name: 'amount_paid', type: 'float' },
+  { name: 'balance', type: 'float' },
+  { name: 'status', type: 'nvarchar(20)' }
+];
+
+// Same derivations as upsertInvoice (total from subtotal + VAT when SYSPRO's is 0;
+// status from the balance and due date when SYSPRO supplies none).
+const invoiceBulkBuild = async (rows, ctx) => {
+  const customers = await customerIds(ctx);
+  const today = getTodayISO();
+  return (row) => {
+    const number = text(row.number);
+    const invoiceDate = text(toSafeValue(row.invoice_date));
+    const customerCode = text(row.customer_code);
+    if (!number || !invoiceDate || !customerCode) {
+      throw new Error(`Invoice row is missing its number, customer or date (number ${row.number})`);
+    }
+    const subtotal = num(row.subtotal);
+    const vat = num(row.vat_amount);
+    let total = num(row.total);
+    if (!(total > 0) && (subtotal + vat) > 0) total = Math.round((subtotal + vat) * 100) / 100;
+    const paid = num(row.amount_paid);
+    const balance = row.balance == null ? total - paid : num(row.balance);
+    const dueDate = text(toSafeValue(row.due_date));
+    let status = text(row.status);
+    if (!status) {
+      if (balance <= 0.005) status = 'paid';
+      else if (dueDate && dueDate < today) status = 'overdue';
+      else status = 'outstanding';
+    }
+    return {
+      number, customer_id: customers.get(codeKey(customerCode)) ?? null, customer_code: customerCode,
+      order_number: text(row.order_number), invoice_date: invoiceDate, due_date: dueDate,
+      subtotal, vat_amount: vat, total, amount_paid: paid, balance, status
+    };
+  };
+};
+
+const INVOICE_ITEM_COLUMNS = [
+  { name: 'invoice_id', type: 'int', nullable: false },
+  { name: 'product_id', type: 'int' },
+  { name: 'product_code', type: 'nvarchar(20)', nullable: false },
+  { name: 'delivery_customer_id', type: 'int' },
+  { name: 'delivery_customer_code', type: 'nvarchar(20)' },
+  { name: 'qty', type: 'float', nullable: false },
+  { name: 'unit_price', type: 'float', nullable: false },
+  { name: 'line_total', type: 'float', nullable: false }
+];
+
+// Mirrors upsertInvoiceLine: a line whose invoice isn't synced is skipped.
+const invoiceLineBulkBuild = async (rows, ctx) => {
+  const invoices = await invoiceIds(ctx);
+  const products = await productIds(ctx);
+  const customers = await customerIds(ctx);
+  return (row) => {
+    const invoiceId = invoices.get(codeKey(row.invoice_number));
+    if (invoiceId == null) return null;
+    const productCode = text(row.product_code);
+    if (!productCode) throw new Error(`Invoice line on ${row.invoice_number} has no product code`);
+    const deliveryCode = text(row.delivery_customer_code);
+    return {
+      invoice_id: invoiceId, product_id: products.get(codeKey(productCode)) ?? null, product_code: productCode,
+      delivery_customer_id: deliveryCode ? customers.get(codeKey(deliveryCode)) ?? null : null,
+      delivery_customer_code: deliveryCode,
+      qty: num(row.qty), unit_price: num(row.unit_price), line_total: num(row.line_total)
+    };
+  };
+};
+
+const BULK_UPSERT = {
+  customer_pricing: {
+    table: 'syspro_customer_pricing',
+    columns: PRICING_COLUMNS,
+    keys: ['customer_code', 'product_code'],
+    now: ['synced_at'],
+    build: async () => pricingBulkRow
+  },
+  customers: {
+    table: 'customers',
+    columns: CUSTOMER_COLUMNS,
+    keys: ['code'],
+    keepExisting: ['contact_name', 'phone', 'email', 'address', 'city', 'ship_to_name', 'ship_to_address',
+      'ship_to_city', 'ship_to_postcode', 'payment_terms', 'warehouse_id', 'rep_id'],
+    updateExpr: { status: "CASE WHEN t.[status] = 'closed' THEN 'closed' ELSE s.[status] END" },
+    insertExpr: { payment_terms: "COALESCE(s.[payment_terms], '30 days')" },
+    build: customerBulkBuild
+  },
+  invoices: {
+    table: 'invoices',
+    columns: INVOICE_COLUMNS,
+    keys: ['number'],
+    build: invoiceBulkBuild
+  }
+};
+
+// Wipe-and-reload entities: the clear and the bulk load share one transaction, so
+// readers never see the table half-filled.
+const BULK_INSERT = {
+  invoice_lines: { table: 'invoice_items', columns: INVOICE_ITEM_COLUMNS, build: invoiceLineBulkBuild }
 };
 
 const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, invoice_lines: upsertInvoiceLine, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales, customer_sales: upsertCustomerSales };
@@ -352,10 +559,7 @@ const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, prod
 const CLEAR_BEFORE_SYNC = {
   rep_sales: (conn) => conn.prepare('DELETE FROM rep_monthly_sales').run(),
   customer_sales: (conn) => conn.prepare('DELETE FROM customer_monthly_sales').run(),
-  invoice_lines: async (conn) => {
-    await conn.prepare('DELETE FROM invoice_items').run();
-    deliveryCustomerCache = new Map();  // don't carry stale "not found" entries between runs
-  }
+  invoice_lines: (conn) => conn.prepare('DELETE FROM invoice_items').run()
 };
 
 // Entities worth sorting before upsert, keyed by their destination table's
@@ -427,16 +631,44 @@ export async function runSync(entity, { provider = null } = {}) {
     let skipped = 0;
     const errors = [];
 
+    // Lookup maps shared by every row of THIS run (see warehouseIds et al.).
+    const ctx = {};
+
     const applyRow = async (row, conn) => {
       try {
         // An upserter returning false means "deliberately skipped, not an
         // error" (e.g. rep_sales rows with no matching rep) - counted
         // separately so a sync full of silent skips doesn't read as success.
-        if (await UPSERTERS[entity](row, conn) === false) skipped += 1;
+        if (await UPSERTERS[entity](row, conn, ctx) === false) skipped += 1;
         else upserted += 1;
       } catch (e) {
         errors.push(e.message);
       }
+    };
+
+    // Maps every row for a bulk load. Skips and bad rows are counted exactly as the
+    // per-row path counts them. A value too long for its column is rejected here, as
+    // a row error - left to the database it would fail the whole staged chunk
+    // instead of just that row.
+    const mapBulk = async (spec) => {
+      const mapRow = await spec.build(rows, ctx);
+      const limits = spec.columns
+        .map((c) => [c.name, /^nvarchar\((\d+)\)$/i.exec(c.type)])
+        .filter(([, m]) => m)
+        .map(([name, m]) => [name, Number(m[1])]);
+      const mapped = [];
+      for (const row of rows) {
+        try {
+          const out = mapRow(row);
+          if (!out) { skipped += 1; continue; }
+          const over = limits.find(([name, max]) => out[name] != null && String(out[name]).length > max);
+          if (over) throw new Error(`${entity} ${out[spec.columns[0].name]}: ${over[0]} is longer than ${over[1]} characters`);
+          mapped.push(out);
+        } catch (e) {
+          errors.push(e.message);
+        }
+      }
+      return mapped;
     };
 
     // Row writes must be batched into transactions - committing each row
@@ -455,19 +687,22 @@ export async function runSync(entity, { provider = null } = {}) {
     // reader mid-run would see missing or half-summed totals. Those stay in a
     // single atomic transaction - they are small enough (thousands of rows,
     // not millions) that the blocking window is short.
-    if (CLEAR_BEFORE_SYNC[entity]) {
+    if (CLEAR_BEFORE_SYNC[entity] && BULK_INSERT[entity] && dbx.bulkInsert) {
+      const spec = BULK_INSERT[entity];
+      const bulkRows = await mapBulk(spec);
+      await dbx.transaction(async (tx) => {
+        await CLEAR_BEFORE_SYNC[entity](tx);
+        await tx.bulkInsert(spec.table, { columns: spec.columns, rows: bulkRows });
+      });
+      upserted = bulkRows.length;
+    } else if (CLEAR_BEFORE_SYNC[entity]) {
       await dbx.transaction(async (tx) => {
         await CLEAR_BEFORE_SYNC[entity](tx);
         for (const row of rows) await applyRow(row, tx);
       });
     } else if (BULK_UPSERT[entity] && dbx.bulkUpsert) {
-      const { mapRow, ...spec } = BULK_UPSERT[entity];
-      const bulkRows = [];
-      for (const row of rows) {
-        const mapped = mapRow(row);
-        if (mapped) bulkRows.push(mapped);
-        else skipped += 1;
-      }
+      const { build, ...spec } = BULK_UPSERT[entity];
+      const bulkRows = await mapBulk(BULK_UPSERT[entity]);
       const { inserted, updated } = await dbx.bulkUpsert(spec.table, { ...spec, rows: bulkRows });
       // "upserted" means read and applied. Unchanged rows are deliberately not
       // rewritten (see dbx.bulkUpsert), so the split is logged, not reported.
