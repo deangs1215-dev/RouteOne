@@ -186,15 +186,17 @@ async function createOrder(user, b, res) {
         // explicitly ticks the box on the capture screen.
         if (b.send_to_customer === true && await getSetting('email_confirm_customer', '1') === '1') {
           const confirmDraft = await buildOrderConfirmationEmail(orderId);
-          if (b.send_to_rep !== true) confirmDraft.cc_addr = null;
+          // The rep's copy is sent separately below (it carries the internal
+          // order notes, which the customer must not see), so no CC here.
+          confirmDraft.cc_addr = null;
           sendEmail(confirmDraft).catch((e) => console.error('Confirmation email failed:', e.message));
-        } else if (b.send_to_rep === true) {
-          // R1: "Send a copy to me" was only ever honoured as a CC on the
-          // customer email above - if the rep didn't also tick "Customer" (or
-          // the customer has no email, or customer confirmations are switched
-          // off), ticking this box silently did nothing. Send the rep their
-          // own copy directly in that case, not as a CC.
-          const repDraft = await buildOrderConfirmationEmail(orderId);
+        }
+        // "Send a copy to me": the rep's own email, always direct (not a CC on the
+        // customer's - that one has no notes). Includes the order notes in bold so
+        // the rep sees what was captured. Sent whether or not the customer is
+        // also ticked, off, or has no email address.
+        if (b.send_to_rep === true) {
+          const repDraft = await buildOrderConfirmationEmail(orderId, { includeNotes: true });
           if (repDraft.cc_addr) {
             sendEmail({ ...repDraft, cc_addr: null, to_addr: repDraft.cc_addr })
               .catch((e) => console.error('Rep copy email failed:', e.message));
@@ -331,7 +333,7 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
       to_addr: order.rep_email,
       cc_addr: null,
       subject: `Order confirmation: ${order.number} — ${order.customer_name}`,
-      body_html: await wrap('Order confirmation', `<p>Your order <b>${order.number}</b> for <b>${esc(order.customer_name)}</b> has been confirmed.</p>${docTable(items, order)}`)
+      body_html: await wrap('Order confirmation', `<p>Your order <b>${order.number}</b> for <b>${esc(order.customer_name)}</b> has been confirmed.</p>${notesHtml(order)}${docTable(items, order)}`)
     });
   }
 

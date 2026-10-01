@@ -274,7 +274,11 @@ export async function buildOrderEmail(orderId) {
 }
 
 // Customer-facing order confirmation - friendly wording, no internal jargon.
-export async function buildOrderConfirmationEmail(orderId) {
+// The order notes are internal (the customer only ever sees the delivery
+// instructions), so they are left out by default. includeNotes: true is for the
+// rep's own copy, where the notes must show - bold, in the highlighted box - so
+// the rep sees exactly what was captured.
+export async function buildOrderConfirmationEmail(orderId, { includeNotes = false } = {}) {
   const order = await loadDoc('order', orderId);
   if (!order) throw new Error('Order not found');
   const items = await dbx.prepare(`
@@ -307,7 +311,7 @@ export async function buildOrderConfirmationEmail(orderId) {
       ${order.customer_order_no ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Your order no.</td><td><b>${esc(order.customer_order_no)}</b></td></tr>` : ''}
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Placed</td><td>${order.order_date}</td></tr>
     </table>
-    ${notesHtml(order, { includeNotes: false })}
+    ${notesHtml(order, { includeNotes })}
     ${customerBlockHtml(order)}
     ${docTable(items, order)}
     ${repContact}`;

@@ -60,6 +60,27 @@ test('order and quote emails build from real rows', async () => {
   assert.equal(spread.to_addr, 'extra@x.co');
 });
 
+test('order notes: bold in internal and rep-copy emails, never in the customer email', async () => {
+  await dbx.prepare("UPDATE orders SET notes = 'Deliver before 10am - gate code 4417', delivery_instructions = 'Back entrance' WHERE id = ?").run(ids.order);
+  try {
+    // Internal recipients always see the notes, in the bold highlighted box.
+    const internal = await email.buildOrderEmail(ids.order);
+    assert.match(internal.body_html, /Deliver before 10am - gate code 4417/);
+    assert.match(internal.body_html, /font-weight:bold[^>]*>Deliver before 10am/);
+    // The rep's own copy asks for them explicitly.
+    const repCopy = await email.buildOrderConfirmationEmail(ids.order, { includeNotes: true });
+    assert.match(repCopy.body_html, /Deliver before 10am - gate code 4417/);
+    assert.match(repCopy.body_html, /font-weight:bold[^>]*>Deliver before 10am/);
+    // The customer's confirmation stays notes-free - internal - but keeps the
+    // delivery instructions, which are meant for them.
+    const customer = await email.buildOrderConfirmationEmail(ids.order);
+    assert.doesNotMatch(customer.body_html, /gate code 4417/);
+    assert.match(customer.body_html, /Back entrance/);
+  } finally {
+    await dbx.prepare('UPDATE orders SET notes = NULL, delivery_instructions = NULL WHERE id = ?').run(ids.order);
+  }
+});
+
 test('support ticket, digest, sync digest and credential emails build', async () => {
   complete(await email.buildSupportTicketEmail(ids.ticket), 'ticket');
   complete(await email.buildRepDigestEmail({ id: ids.rep, name: 'Rita Rep', email: 'rita@x.co' },
