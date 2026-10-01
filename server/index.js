@@ -82,6 +82,7 @@ app.use((req, res, next) => {
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline' https://unpkg.com",
+    // Map tiles (see client/src/mapTiles.js - change both together).
     "img-src 'self' data: blob: https://*.openstreetmap.org",
     "connect-src 'self' https://router.project-osrm.org https://*.openstreetmap.org",
     "font-src 'self' data:",

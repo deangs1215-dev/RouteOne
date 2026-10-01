@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { getPosition } from '../api';
+import { TILE_URL, TILE_OPTIONS } from '../mapTiles';
 
 export default function LocationPicker({ value, onChange, height = 320 }) {
   const containerRef = useRef(null);
@@ -42,9 +43,7 @@ export default function LocationPicker({ value, onChange, height = 320 }) {
   useEffect(() => {
     if (mapRef.current) return;
     const map = L.map(containerRef.current, { scrollWheelZoom: true });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
+    L.tileLayer(TILE_URL, TILE_OPTIONS).addTo(map);
     mapRef.current = map;
 
     // Clicking anywhere on the map drops/moves the pin there.

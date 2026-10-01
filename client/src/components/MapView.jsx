@@ -5,6 +5,7 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { TILE_URL, TILE_OPTIONS } from '../mapTiles';
 
 export default function MapView({ markers = [], line = null, height = 380, fitMarkers = null, lineDashed = true }) {
   const containerRef = useRef(null);
@@ -14,9 +15,7 @@ export default function MapView({ markers = [], line = null, height = 380, fitMa
   useEffect(() => {
     if (!mapRef.current) {
       mapRef.current = L.map(containerRef.current, { scrollWheelZoom: true });
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors'
-      }).addTo(mapRef.current);
+      L.tileLayer(TILE_URL, TILE_OPTIONS).addTo(mapRef.current);
       layerRef.current = L.layerGroup().addTo(mapRef.current);
     }
     const layer = layerRef.current;
