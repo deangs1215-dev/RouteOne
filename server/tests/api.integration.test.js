@@ -774,3 +774,86 @@ test('monthly history serves a chosen calendar year and lists the years with sal
   assert.equal(mine.body.reps.length, 1);
   assert.equal(mine.body.reps[0].rep_id, repId);
 });
+
+// "Pin this location": a rep standing at the customer records its real position. That confirmed pin
+// is the location every map, route and check-in distance check uses, and it outranks any other.
+test('rep pin: the confirmed location is used by the customer, route and check-in code', async () => {
+  const repCookie = await login(fixture.reps[0].email);
+  const adminCookie = await login(fixture.admin.email);
+  const mine = fixture.customers[0].id;
+  const notMine = fixture.customers[1].id;
+  const pinPath = (id) => `/api/customers/${id}/pin-location`;
+  const read = async (id, cookie = adminCookie) => (await request(`/api/customers/${id}`, { cookie })).body;
+
+  // start clean: no pin; an old lat/lng of 0,0 (the prospect placeholder) counts as no location
+  await dbx.prepare('UPDATE customers SET onsite_lat = NULL, onsite_lng = NULL, lat = 0, lng = 0 WHERE id = ?').run(mine);
+  let c = await read(mine);
+  assert.equal(c.geo_source, null);
+  assert.equal(c.map_lat, null);
+
+  // an older lat/lng is used - but flagged as not confirmed
+  await dbx.prepare('UPDATE customers SET lat = -33.9, lng = 18.4 WHERE id = ?').run(mine);
+  c = await read(mine);
+  assert.equal(c.geo_source, 'other');
+  assert.equal(c.map_lat, -33.9);
+
+  // refusals: junk positions, and another rep's customer
+  for (const body of [{}, { lat: 0, lng: 0 }, { lat: 91, lng: 10 }, { lat: 'x', lng: 10 }]) {
+    const bad = await request(pinPath(mine), { method: 'POST', cookie: repCookie, origin: allowedOrigin, body });
+    assert.equal(bad.response.status, 400, JSON.stringify(body));
+  }
+  const denied = await request(pinPath(notMine), { method: 'POST', cookie: repCookie, origin: allowedOrigin, body: { lat: -26.2, lng: 28.04 } });
+  assert.equal(denied.response.status, 403);
+
+  // the rep pins their own customer
+  const ok = await request(pinPath(mine), { method: 'POST', cookie: repCookie, origin: allowedOrigin, body: { lat: -26.2041, lng: 28.0473, accuracy: 8.4, method: 'gps' } });
+  assert.equal(ok.response.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.geo_source, 'rep_pin');
+  c = await read(mine, repCookie);
+  assert.equal(c.geo_source, 'rep_pin');
+  assert.equal(c.map_lat, -26.2041);                       // the pin beats the older -33.9
+  assert.equal(c.map_lng, 28.0473);
+  assert.equal(c.pin_info.accuracy_m, 8);
+  assert.ok(c.pin_info.by_name && c.pin_info.at, 'who and when are recorded');
+
+  // the customer list (maps) and route stops carry the same location
+  const list = (await request('/api/customers?scope=all', { cookie: repCookie })).body.find((x) => x.id === mine);
+  assert.equal(list.map_lat, -26.2041);
+  assert.equal(list.geo_source, 'rep_pin');
+  const today = new Date().toISOString().slice(0, 10);
+  const stop = await request('/api/routes/stops', { method: 'POST', cookie: repCookie, origin: allowedOrigin, body: { rep_id: fixture.reps[0].id, customer_id: mine, date: today } });
+  assert.equal(stop.response.status < 300, true, JSON.stringify(stop.body));
+  const route = (await request(`/api/routes?rep_id=${fixture.reps[0].id}&date=${today}`, { cookie: repCookie })).body;
+  const stopRow = route.find((r) => r.id === stop.body.id);   // the stop this test just created
+  assert.ok(stopRow, `route has the new stop ${JSON.stringify(stop.body)}`);
+  assert.equal(stopRow.customer_lat, -26.2041);
+  assert.equal(stopRow.customer_geo_source, 'rep_pin');
+
+  // check-in at the pinned spot measures ~0 m from the customer; it used to compare against nothing
+  const visitId = stopRow.id;
+  const checkIn = await request('/api/visits/check-in', { method: 'POST', cookie: repCookie, origin: allowedOrigin, body: { visit_id: visitId, lat: -26.2041, lng: 28.0473, check_in_type: 'onsite' } });
+  assert.equal(checkIn.response.status, 200, JSON.stringify(checkIn.body));
+  const row = await dbx.prepare('SELECT check_in_distance_m FROM visits WHERE id = ?').get(visitId);
+  assert.ok(row.check_in_distance_m != null && row.check_in_distance_m < 5, `check-in distance ${row.check_in_distance_m}`);
+  await dbx.prepare("UPDATE visits SET status = 'completed', check_out_at = datetime('now') WHERE id = ?").run(visitId);
+
+  // the offline snapshot carries the location too
+  const snap = (await request('/api/sync/snapshot', { cookie: repCookie })).body;
+  assert.equal(snap.customers.find((x) => x.id === mine).map_lat, -26.2041);
+
+  // the form's "remove pin" (both null) really clears it now; a half-pin is refused
+  const half = await request(`/api/customers/${mine}/details`, { method: 'PUT', cookie: repCookie, origin: allowedOrigin, body: { onsite_lat: -26.2 } });
+  assert.equal(half.response.status, 400);
+  const cleared = await request(`/api/customers/${mine}/details`, { method: 'PUT', cookie: repCookie, origin: allowedOrigin, body: { onsite_lat: null, onsite_lng: null } });
+  assert.equal(cleared.response.status, 200, JSON.stringify(cleared.body));
+  c = await read(mine);
+  assert.equal(c.geo_source, 'other', 'falls back to the older lat/lng once the pin is removed');
+  assert.equal(c.map_lat, -33.9);
+
+  // an office user can pin; DELETE removes a pin set through the button
+  await request(pinPath(mine), { method: 'POST', cookie: adminCookie, origin: allowedOrigin, body: { lat: -25.7, lng: 28.2, method: 'map' } });
+  assert.equal((await read(mine)).geo_source, 'rep_pin');
+  const removed = await request(pinPath(mine), { method: 'DELETE', cookie: repCookie, origin: allowedOrigin });
+  assert.equal(removed.response.status, 200);
+  assert.equal((await read(mine)).geo_source, 'other');
+});

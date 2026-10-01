@@ -27,6 +27,7 @@ export default function LiveMap() {
   const markers = [
     ...coverage.map((c) => ({
       lat: c.lat, lng: c.lng,
+      hollow: c.geo_source !== 'rep_pin',     // approximate (not confirmed by a rep on site)
       color: visitedToday.has(c.id) ? '#16a34a' : c.overdue ? '#dc2626' : '#64748b',
       radius: 8,
       popup: `<b>${c.name}</b><br/>${c.city || ''}<br/>Rep: ${c.rep_name || '—'}<br/>` +

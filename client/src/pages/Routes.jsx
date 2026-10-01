@@ -142,11 +142,13 @@ export default function RoutesPage() {
   const mine = [];
   const others = [];
   for (const c of allCustomers) {
-    if (c.lat == null || c.lng == null || routeCustomerIds.has(c.id)) continue;
+    // map_lat/map_lng: the rep-confirmed pin if there is one, else the older lat/lng (server-side rule, geo.js)
+    if (c.map_lat == null || c.map_lng == null || routeCustomerIds.has(c.id)) continue;
+    const hollow = c.geo_source !== 'rep_pin';
     if (String(c.rep_id) === String(repId)) {
-      mine.push({ lat: c.lat, lng: c.lng, popup: c.name, color: '#16a34a', radius: 5 });
+      mine.push({ lat: c.map_lat, lng: c.map_lng, popup: c.name, color: '#16a34a', radius: 5, hollow });
     } else {
-      others.push({ lat: c.lat, lng: c.lng, popup: `${c.name} (${c.rep_name || 'other rep'})`, color: '#ef4444', radius: 5 });
+      others.push({ lat: c.map_lat, lng: c.map_lng, popup: `${c.name} (${c.rep_name || 'other rep'})`, color: '#ef4444', radius: 5, hollow });
     }
   }
 
@@ -271,6 +273,7 @@ export default function RoutesPage() {
             <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded-full bg-brand-600" /> On route</span>
             <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: '#16a34a' }} /> This rep's accounts</span>
             <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: '#ef4444' }} /> Other reps' accounts</span>
+            <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded-full border-2 border-dashed border-slate-400" /> Approximate location (solid = pinned on site)</span>
           </div>
           {hasStart && <p className="mt-2 text-xs text-slate-400">🏠 {startLabel}{start.home_address ? ` — ${start.home_address}` : ''}</p>}
           {!hasStart && <p className="mt-2 text-xs text-slate-400">No start point yet — set a home/office address for this rep under Users, or it'll use their first GPS ping of the day.</p>}

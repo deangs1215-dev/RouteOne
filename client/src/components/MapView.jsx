@@ -1,4 +1,6 @@
-// Thin Leaflet wrapper. Markers: [{ lat, lng, label, color, radius, popup }].
+// Thin Leaflet wrapper. Markers: [{ lat, lng, label, color, radius, popup, hollow }].
+// hollow: drawn as a faint dashed ring - a location that is only approximate, as opposed to a pin
+// a rep confirmed on site (solid).
 // Polyline (optional): ordered [lat, lng] pairs for the route line.
 // fitMarkers (optional): subset of points to fit the viewport to — use it when
 // some markers (e.g. other reps' customers) shouldn't pull the zoom wide.
@@ -28,7 +30,8 @@ export default function MapView({ markers = [], line = null, height = 380, fitMa
         color: m.color || '#1a7ea8',
         weight: 2,
         fillColor: m.color || '#1a7ea8',
-        fillOpacity: 0.5
+        fillOpacity: m.hollow ? 0.1 : 0.5,
+        dashArray: m.hollow ? '3 3' : null
       }).addTo(layer);
       if (m.popup) marker.bindPopup(m.popup);
       if (m.label != null) {

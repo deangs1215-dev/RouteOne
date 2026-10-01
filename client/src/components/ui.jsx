@@ -38,6 +38,18 @@ export function GradeBadge({ grade }) {
   return <Badge color={colors[grade] || '#64748b'}>Grade {grade}</Badge>;
 }
 
+// Hover (or tap / keyboard focus) explainer. `tip` is the popover content.
+export function Tip({ tip, children, className = '' }) {
+  return (
+    <span className={`group relative inline-block cursor-help ${className}`} tabIndex={0}>
+      {children}
+      <span role="tooltip" className="pointer-events-none invisible absolute left-0 top-full z-50 mt-1.5 w-72 max-w-[80vw] rounded-lg bg-slate-800 px-3 py-2 text-left text-xs font-normal normal-case leading-snug text-white opacity-0 shadow-lg transition group-hover:visible group-hover:opacity-100 group-focus:visible group-focus:opacity-100">
+        {tip}
+      </span>
+    </span>
+  );
+}
+
 export function Card({ title, actions, children, className = '' }) {
   return (
     <div className={`card ${className}`}>
@@ -83,7 +95,7 @@ export function Table({ headers, children, empty, emptyIcon }) {
           <tr>{headers.map((h, i) => {
             const label = typeof h === 'string' ? h : h.label;
             const align = typeof h === 'string' ? 'left' : h.align;
-            return <th key={i} className={`th ${align === 'right' ? 'text-right' : ''}`}>{label}</th>;
+            return <th key={i} className="th" style={align === 'right' ? { textAlign: 'right' } : undefined}>{label}</th>;
           })}</tr>
         </thead>
         <tbody className="divide-y divide-slate-100">{children}</tbody>

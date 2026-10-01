@@ -6,6 +6,13 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { getPosition } from '../api';
 import { TILE_URL, TILE_OPTIONS } from '../mapTiles';
+import markerIcon from 'leaflet/dist/images/marker-icon.png';
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+import markerShadow from 'leaflet/dist/images/marker-shadow.png';
+
+// Leaflet works out its default pin image from the stylesheet's location, which a bundler breaks -
+// the pin showed as a broken image with the word "Marker". Point it at the bundled files instead.
+L.Icon.Default.mergeOptions({ iconUrl: markerIcon, iconRetinaUrl: markerIcon2x, shadowUrl: markerShadow });
 
 export default function LocationPicker({ value, onChange, height = 320 }) {
   const containerRef = useRef(null);

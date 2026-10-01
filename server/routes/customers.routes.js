@@ -2,8 +2,24 @@ import { Router } from 'express';
 import { dbx } from '../db.js';
 import { nextNumber, logActivity } from '../dbh.js';
 import { requireRole, scopeForUser } from '../auth.js';
+import { geoColumns, parseCoordinates } from '../geo.js';
 
 const router = Router();
+
+// Latest "pin_location" audit entry for a customer: who set the confirmed pin, when, and how
+// accurate the phone said the fix was. null if the pin predates the audit entries.
+async function pinInfo(customerId) {
+  const row = await dbx.prepare(`
+    SELECT a.created_at, a.detail, u.name AS by_name
+    FROM activity_log a LEFT JOIN users u ON u.id = a.user_id
+    WHERE a.entity_type = 'customer' AND a.entity_id = ? AND a.action = 'pin_location'
+    ORDER BY a.id DESC LIMIT 1
+  `).get(customerId);
+  if (!row) return null;
+  let detail = {};
+  try { detail = JSON.parse(row.detail || '{}'); } catch { /* old or odd entry */ }
+  return { by_name: row.by_name, at: row.created_at, accuracy_m: detail.accuracy_m ?? null, method: detail.method ?? null };
+}
 
 router.get('/customers', async (req, res) => {
   const { q, status, rep_id, scope: scopeParam } = req.query;
@@ -21,6 +37,7 @@ router.get('/customers', async (req, res) => {
   const rows = await dbx.prepare(`
     SELECT c.*, u.name AS rep_name,
       w.code AS warehouse_code, w.name AS warehouse_name,
+      ${geoColumns('c')},
       CASE WHEN c.rep_id = ? THEN 1 ELSE 0 END AS is_mine,
       (SELECT MAX(order_date) FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled') AS last_order_at,
       (SELECT MAX(check_in_at) FROM visits v WHERE v.customer_id = c.id) AS last_visit_at
@@ -36,7 +53,8 @@ router.get('/customers', async (req, res) => {
 router.get('/customers/:id', async (req, res) => {
   const customer = await dbx.prepare(`
     SELECT c.*, u.name AS rep_name,
-      w.code AS warehouse_code, w.name AS warehouse_name
+      w.code AS warehouse_code, w.name AS warehouse_name,
+      ${geoColumns('c')}
     FROM customers c
     LEFT JOIN users u ON u.id = c.rep_id
     LEFT JOIN warehouses w ON w.id = c.warehouse_id
@@ -46,6 +64,9 @@ router.get('/customers/:id', async (req, res) => {
   if (scopeForUser(req.user).isRep && customer.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your customer' });
   }
+
+  // Who confirmed the pin, and when (from the audit log - no extra columns needed).
+  customer.pin_info = customer.geo_source === 'rep_pin' ? await pinInfo(customer.id) : null;
 
   customer.contacts = await dbx.prepare('SELECT * FROM customer_contacts WHERE customer_id = ?').all(customer.id);
   customer.recent_orders = await dbx.prepare(`
@@ -294,6 +315,18 @@ router.put('/customers/:id/details', async (req, res) => {
   if (scopeForUser(req.user).isRep && existing.rep_id !== req.user.id) {
     return res.status(403).json({ error: 'Not your customer' });
   }
+  // The confirmed pin. A body that names onsite_lat/lng sets it - or CLEARS it when both are null
+  // (the form's "remove pin"; the old `?? existing` quietly kept the pin, so it could never be removed).
+  let pinLat = existing.onsite_lat;
+  let pinLng = existing.onsite_lng;
+  if ('onsite_lat' in b || 'onsite_lng' in b) {
+    if (b.onsite_lat === null && b.onsite_lng === null) { pinLat = null; pinLng = null; }
+    else {
+      const pin = parseCoordinates(b.onsite_lat, b.onsite_lng);
+      if (!pin) return res.status(400).json({ error: 'The pin needs a valid latitude and longitude' });
+      pinLat = pin.lat; pinLng = pin.lng;
+    }
+  }
   await dbx.prepare(`
     UPDATE customers SET classification = ?, visit_frequency = ?, notes = ?, lat = ?, lng = ?,
       onsite_name = ?, onsite_phone = ?, onsite_address = ?, onsite_lat = ?, onsite_lng = ?,
@@ -303,14 +336,52 @@ router.put('/customers/:id/details', async (req, res) => {
     b.classification ?? existing.classification, b.visit_frequency ?? existing.visit_frequency,
     b.notes ?? existing.notes, b.lat ?? existing.lat, b.lng ?? existing.lng,
     b.onsite_name ?? existing.onsite_name, b.onsite_phone ?? existing.onsite_phone,
-    b.onsite_address ?? existing.onsite_address, b.onsite_lat ?? existing.onsite_lat,
-    b.onsite_lng ?? existing.onsite_lng,
+    b.onsite_address ?? existing.onsite_address, pinLat,
+    pinLng,
     b.onsite_contact ?? existing.onsite_contact, b.onsite_cell ?? existing.onsite_cell,
     b.onsite_pricelist ?? existing.onsite_pricelist, b.onsite_vat ?? existing.onsite_vat,
     req.params.id
   );
   await logActivity(req.user.id, 'update', 'customer', req.params.id, { via: 'rep_details' });
+  // Keep who/when for the pin (shown on the customer screen) whichever way it was set.
+  if (pinLat !== existing.onsite_lat || pinLng !== existing.onsite_lng) {
+    if (pinLat == null) await logActivity(req.user.id, 'pin_removed', 'customer', req.params.id);
+    else await logActivity(req.user.id, 'pin_location', 'customer', req.params.id, { lat: pinLat, lng: pinLng, method: 'details_form' });
+  }
   res.json(await dbx.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id));
+});
+
+// One-tap "Pin this location": the rep is standing at the customer (GPS), or has tapped the spot on
+// the map, and that becomes the customer's CONFIRMED location - the one every map, route and the
+// check-in distance check use. It always outranks any other source, and the SYSPRO sync never
+// touches it. Reps can pin their own customers; office roles can pin any.
+router.post('/customers/:id/pin-location', async (req, res) => {
+  const b = req.body || {};
+  const customer = await dbx.prepare('SELECT id, rep_id FROM customers WHERE id = ?').get(req.params.id);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  if (scopeForUser(req.user).isRep && customer.rep_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your customer' });
+  }
+  const pin = parseCoordinates(b.lat, b.lng);
+  if (!pin) return res.status(400).json({ error: 'A valid location is required' });
+  const acc = Number(b.accuracy);
+  const accuracy = b.accuracy != null && Number.isFinite(acc) && acc >= 0 ? Math.round(acc) : null;
+  const method = b.method === 'map' ? 'map' : 'gps';
+  await dbx.prepare('UPDATE customers SET onsite_lat = ?, onsite_lng = ? WHERE id = ?').run(pin.lat, pin.lng, customer.id);
+  await logActivity(req.user.id, 'pin_location', 'customer', customer.id, { lat: pin.lat, lng: pin.lng, accuracy_m: accuracy, method });
+  res.json({ ok: true, map_lat: pin.lat, map_lng: pin.lng, geo_source: 'rep_pin', pin_info: await pinInfo(customer.id) });
+});
+
+// Removes the confirmed pin (the customer falls back to any other location, or none).
+router.delete('/customers/:id/pin-location', async (req, res) => {
+  const customer = await dbx.prepare('SELECT id, rep_id FROM customers WHERE id = ?').get(req.params.id);
+  if (!customer) return res.status(404).json({ error: 'Customer not found' });
+  if (scopeForUser(req.user).isRep && customer.rep_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your customer' });
+  }
+  await dbx.prepare('UPDATE customers SET onsite_lat = NULL, onsite_lng = NULL WHERE id = ?').run(customer.id);
+  await logActivity(req.user.id, 'pin_removed', 'customer', customer.id);
+  res.json({ ok: true });
 });
 
 router.post('/customers/:id/contacts', async (req, res) => {

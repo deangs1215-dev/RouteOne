@@ -11,6 +11,7 @@ import DatePicker from '../components/DatePicker';
 import TaskCreateModal from '../components/TaskCreateModal';
 import TaskRescheduleModal from '../components/TaskRescheduleModal';
 import CustomerNotes from '../components/CustomerNotes';
+import PinLocation from '../components/PinLocation';
 import { useAuth } from '../auth';
 import { queueWrite } from '../offline';
 import { MobileHeader } from './MobileApp';
@@ -414,6 +415,9 @@ export default function RepCustomer({ base = '/mobile' }) {
               <a href={`tel:${(c.onsite_phone || c.phone).replace(/\s/g, '')}`} className="btn-secondary px-3">📞</a>
             )}
           </div>
+
+          {/* Where the customer really is - a rep pins it on site; maps and route planning use it. */}
+          <PinLocation customer={c} onChanged={load} />
 
           {/* Onsite details — rep-captured, used when SYSPRO's info is wrong. */}
           {(() => {

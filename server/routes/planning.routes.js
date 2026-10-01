@@ -1,6 +1,7 @@
 // Phase 3: route planning, visit-frequency coverage, rep locations, rep KPIs.
 import { Router } from 'express';
 import { dbx, distanceM, getTodayISO } from '../db.js';
+import { geoLat, geoLng, geoSource } from '../geo.js';
 import { logActivity, mapLimit, repTargetLookup } from '../dbh.js';
 import { requireRole, scopeForUser, userCanAccessCustomer } from '../auth.js';
 
@@ -17,7 +18,8 @@ router.get('/routes', async (req, res) => {
   const date = req.query.date || getTodayISO();
   if (!repId) return res.status(400).json({ error: 'rep_id is required' });
   const visits = await dbx.prepare(`
-    SELECT v.*, c.name AS customer_name, c.address, c.city, c.lat AS customer_lat, c.lng AS customer_lng,
+    SELECT v.*, c.name AS customer_name, c.address, c.city,
+      ${geoLat('c')} AS customer_lat, ${geoLng('c')} AS customer_lng, ${geoSource('c')} AS customer_geo_source,
       c.visit_frequency, c.classification,
       (SELECT COUNT(*) FROM orders o WHERE o.visit_id = v.id) AS order_count
     FROM visits v JOIN customers c ON c.id = v.customer_id
@@ -128,7 +130,7 @@ router.post('/routes/optimize', async (req, res) => {
   const date = b.date || getTodayISO();
   if (!repId) return res.status(400).json({ error: 'rep_id is required' });
   const stops = await dbx.prepare(`
-    SELECT v.id, c.lat, c.lng FROM visits v JOIN customers c ON c.id = v.customer_id
+    SELECT v.id, ${geoLat('c')} AS lat, ${geoLng('c')} AS lng FROM visits v JOIN customers c ON c.id = v.customer_id
     WHERE v.rep_id = ? AND date(v.planned_date) = date(?) AND v.status = 'planned'
   `).all(repId, date);
   if (stops.length < 2) return res.json({ ok: true, order: stops.map((s) => s.id) });
@@ -167,7 +169,8 @@ router.get('/coverage', async (req, res) => {
   const where = scope.isRep ? 'AND c.rep_id = ?' : '';
   const params = scope.isRep ? [req.user.id] : [];
   const rows = await dbx.prepare(`
-    SELECT c.id, c.name, c.city, c.classification, c.visit_frequency, c.lat, c.lng,
+    SELECT c.id, c.name, c.city, c.classification, c.visit_frequency,
+      ${geoLat('c')} AS lat, ${geoLng('c')} AS lng, ${geoSource('c')} AS geo_source,
       u.name AS rep_name, c.rep_id,
       (SELECT MAX(v.check_in_at) FROM visits v WHERE v.customer_id = c.id AND v.status = 'completed') AS last_visit_at,
       (SELECT COUNT(*) FROM visits v WHERE v.customer_id = c.id AND v.status = 'planned' AND date(v.planned_date) >= date('now')) AS upcoming_planned

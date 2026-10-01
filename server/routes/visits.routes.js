@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { dbx, saveDataUrl, deleteUploadedFile, distanceM, getTodayISO } from '../db.js';
 import { logActivity, repMonthTarget } from '../dbh.js';
 import { scopeForUser, userCanAccessCustomer } from '../auth.js';
+import { geoLat, geoLng, geoSource } from '../geo.js';
 import { customerIntel, buildActions } from './intelligence.routes.js';
 
 const router = Router();
@@ -98,11 +99,12 @@ router.post('/visits/check-in', async (req, res) => {
     return res.status(403).json({ error: 'Not your visit' });
   }
   if (visit.check_in_at) return res.status(400).json({ error: 'Already checked in' });
-  // onsite: GPS is checked against the customer's SYSPRO pin. onsite_manual /
+  // onsite: GPS is checked against the customer's location - the rep-confirmed pin if there is one,
+  // otherwise the older lat/lng (see geo.js). onsite_manual /
   // offsite: the rep is knowingly at a different address, so that comparison
   // doesn't apply - the rep-entered address is stored instead.
   const checkInType = ['onsite', 'onsite_manual', 'offsite'].includes(b.check_in_type) ? b.check_in_type : 'onsite';
-  const customer = await dbx.prepare('SELECT lat, lng FROM customers WHERE id = ?').get(visit.customer_id);
+  const customer = await dbx.prepare(`SELECT ${geoLat('c')} AS lat, ${geoLng('c')} AS lng FROM customers c WHERE c.id = ?`).get(visit.customer_id);
   const dist = checkInType === 'onsite' ? distanceM(b.lat, b.lng, customer?.lat, customer?.lng) : null;
   await dbx.prepare(`
     UPDATE visits SET status = 'in_progress', check_in_at = datetime('now'),
@@ -250,7 +252,8 @@ router.get('/visits/:id/summary', async (req, res) => {
 // digest email can reuse it directly without an HTTP round-trip.
 export async function buildDaySummary(repId, date) {
   const visits = await dbx.prepare(`
-    SELECT v.*, c.name AS customer_name, c.code AS customer_code, c.address, c.city, c.lat AS customer_lat, c.lng AS customer_lng,
+    SELECT v.*, c.name AS customer_name, c.code AS customer_code, c.address, c.city,
+      ${geoLat('c')} AS customer_lat, ${geoLng('c')} AS customer_lng,
       (SELECT COUNT(*) FROM orders o WHERE o.visit_id = v.id) AS order_count,
       (SELECT COUNT(*) FROM tasks t WHERE t.customer_id = c.id AND t.assigned_to = ? AND t.status = 'open') AS open_task_count,
       (SELECT COUNT(*) FROM tasks t WHERE t.customer_id = c.id AND t.assigned_to = ? AND t.status = 'open' AND t.follow_up_date < date('now')) AS overdue_task_count,

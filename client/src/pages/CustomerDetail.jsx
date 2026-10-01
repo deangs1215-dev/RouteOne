@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime } from '../api';
-import { Card, Stat, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge, OrderStatusBadge, VisitStatusBadge, QuoteStatusBadge } from '../components/ui';
+import { Card, Stat, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge, Tip, OrderStatusBadge, VisitStatusBadge, QuoteStatusBadge } from '../components/ui';
 import VisitSummary from '../components/VisitSummary';
 import CustomerNotes from '../components/CustomerNotes';
 import LocationPicker from '../components/LocationPicker';
+import PinLocation from '../components/PinLocation';
 import { CustomerModal } from './Customers';
 import { useAuth } from '../auth';
+import { SEGMENT_HELP, RISK_HELP, RFM_HELP } from '../intelHelp';
 
 export default function CustomerDetail() {
   const { id } = useParams();
@@ -87,7 +89,9 @@ export default function CustomerDetail() {
             <InfoRow label="Grade" value={c.classification} />
             <InfoRow label="Rep" value={c.rep_name} />
             <InfoRow label="Visit frequency" value={c.visit_frequency} />
-            <InfoRow label="GPS pin" value={c.lat != null ? `${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}` : null} />
+            <InfoRow label="Location" value={c.map_lat != null
+              ? `${c.map_lat.toFixed(5)}, ${c.map_lng.toFixed(5)} (${c.geo_source === 'rep_pin' ? 'confirmed by a rep' : 'approximate'})`
+              : null} />
             <InfoRow label="Notes" value={c.notes} />
             {(c.onsite_name || c.onsite_phone || c.onsite_address || c.onsite_lat) && (
               <>
@@ -100,6 +104,8 @@ export default function CustomerDetail() {
               </>
             )}
           </dl>
+          {/* Office view: GPS is the office's own position here, so only "choose on map" is offered. */}
+          <PinLocation customer={c} onChanged={load} allowGps={false} />
         </Card>
       </div>
 
@@ -116,9 +122,9 @@ export default function CustomerDetail() {
       {intel && (
         <Card title="Sales intelligence">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-            <span>Segment: <Badge color="#8b5cf6">{intel.segment}</Badge></span>
-            <span>Churn risk: <b className={intel.risk_score >= 70 ? 'text-red-600' : intel.risk_score >= 40 ? 'text-amber-600' : 'text-emerald-600'}>{intel.risk_score}/100</b></span>
-            <span className="text-slate-500">Last invoice {intel.last_invoice_at ? `${intel.recency_days}d ago` : 'never'} · buys ~every {intel.cycle_days}d · R·F·M {intel.r_score}·{intel.f_score}·{intel.m_score}</span>
+            <span>Segment: <Tip tip={SEGMENT_HELP[intel.segment]}><Badge color="#8b5cf6">{intel.segment}</Badge></Tip></span>
+            <span><Tip tip={RISK_HELP}>Churn risk:</Tip> <b className={intel.risk_score >= 70 ? 'text-red-600' : intel.risk_score >= 40 ? 'text-amber-600' : 'text-emerald-600'}>{intel.risk_score}/100</b></span>
+            <span className="text-slate-500">Last invoice {intel.last_invoice_at ? `${intel.recency_days}d ago` : 'never'} · buys ~every {intel.cycle_days}d · <Tip tip={RFM_HELP}>R·F·M</Tip> {intel.r_score}·{intel.f_score}·{intel.m_score}</span>
             {intel.decline_pct > 0 && <span className="text-red-600">▼ spend down {intel.decline_pct}% vs prior quarter</span>}
           </div>
           {(intel.suggested_products.length > 0 || intel.lapsed_products.length > 0) && (

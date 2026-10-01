@@ -5,6 +5,7 @@ import { Router } from 'express';
 import { dbx, priceBreaks } from '../db.js';
 import { activeRules } from '../dbh.js';
 import { scopeForUser, withoutCostFields } from '../auth.js';
+import { geoColumns } from '../geo.js';
 
 const router = Router();
 
@@ -14,7 +15,7 @@ router.get('/sync/snapshot', async (req, res) => {
   const repParams = scope.isRep ? [req.user.id] : [];
 
   const customers = await dbx.prepare(`
-    SELECT c.*,
+    SELECT c.*, ${geoColumns('c')},
       (SELECT MAX(order_date) FROM orders o WHERE o.customer_id = c.id AND o.status != 'cancelled') AS last_order_at
     FROM customers c
     ${repFilter} ORDER BY c.name
