@@ -1,5 +1,5 @@
 // Small shared UI primitives used across all pages.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { GRADE_HELP } from '../intelHelp';
 
@@ -72,6 +72,50 @@ export function PasswordInput({ className = 'input', ...props }) {
         className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-slate-400 hover:text-slate-700">
         <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
       </button>
+    </div>
+  );
+}
+
+// Dropdown with a checkbox per option, so several can be picked at once. `options` is
+// [{ value, label }]; `selected` is an array of values; an empty selection means "all".
+export function MultiSelect({ label, options, selected, onChange, allLabel = 'All' }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const esc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', esc);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', esc); };
+  }, [open]);
+
+  const toggle = (v) => onChange(selected.includes(v) ? selected.filter((x) => x !== v) : [...selected, v]);
+  const summary = selected.length === 0 ? allLabel
+    : selected.length <= 2 ? options.filter((o) => selected.includes(o.value)).map((o) => o.label).join(', ')
+    : `${selected.length} selected`;
+
+  return (
+    <div className="relative" ref={ref}>
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-haspopup="listbox" aria-expanded={open}
+        className="input flex min-w-[220px] items-center justify-between gap-2 text-left hover:border-slate-400">
+        <span className="truncate"><span className="text-slate-400">{label}: </span>{summary}</span>
+        <span className="text-[10px] text-slate-400">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="absolute left-0 z-30 mt-1 max-h-72 w-full min-w-[240px] overflow-y-auto rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+          <button type="button" onClick={() => onChange([])}
+            className="w-full rounded-md px-2 py-1.5 text-left text-xs font-semibold text-brand-600 hover:bg-slate-100">
+            {allLabel} (clear selection)
+          </button>
+          {options.map((o) => (
+            <label key={o.value} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-slate-100">
+              <input type="checkbox" checked={selected.includes(o.value)} onChange={() => toggle(o.value)} />
+              <span className="truncate">{o.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

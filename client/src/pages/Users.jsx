@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, fmtR } from '../api';
-import { Card, Table, Modal, Field, Spinner, ErrorNote, Badge, PasswordInput } from '../components/ui';
+import { Card, Table, Modal, Field, Spinner, ErrorNote, Badge, PasswordInput, MultiSelect } from '../components/ui';
 import { useAuth } from '../auth';
 
 export default function Users() {
@@ -14,6 +14,7 @@ export default function Users() {
   const [budgetsOpen, setBudgetsOpen] = useState(null); // null | user row with role info
   const [sendingLoginDetails, setSendingLoginDetails] = useState(null); // user id being sent details to
   const [sendMessage, setSendMessage] = useState(''); // success/error message
+  const [branchFilter, setBranchFilter] = useState([]); // warehouse ids (or 'none'); empty = every branch
 
   const isAdmin = user.role === 'admin';
 
@@ -49,6 +50,12 @@ export default function Users() {
     }
   }, [rows]);
 
+  // A user is in a branch if it is their own, or (managers) one they are responsible for.
+  const inBranch = (u, id) => (id === 'none' ? !u.warehouse_id && !(u.manager_warehouses || []).length
+    : u.warehouse_id === id || (u.manager_warehouses || []).includes(id));
+  const shown = rows && (branchFilter.length === 0 ? rows : rows.filter((u) => branchFilter.some((id) => inBranch(u, id))));
+  const branchOptions = [...warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` })), { value: 'none', label: 'No branch' }];
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -62,10 +69,15 @@ export default function Users() {
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-3">
+        <MultiSelect label="Branch" options={branchOptions} selected={branchFilter} onChange={setBranchFilter} allLabel="All branches" />
+        {rows && branchFilter.length > 0 && <span className="text-sm text-slate-500">{shown.length} of {rows.length} users</span>}
+      </div>
+
       <Card>
         {!rows ? <Spinner /> : (
-          <Table headers={['Name', 'Email', 'Role', 'Code', 'Branch', 'Target', 'Status', '']} empty={rows.length === 0 && 'No users.'}>
-            {rows.map((u) => (
+          <Table headers={['Name', 'Email', 'Role', 'Code', 'Branch', 'Target', 'Status', '']} empty={shown.length === 0 && 'No users in the selected branches.'}>
+            {shown.map((u) => (
               <tr key={u.id} className={`hover:bg-slate-50 ${isAdmin ? 'cursor-pointer' : ''}`} onClick={() => isAdmin && setEditing(u)}>
                 <td className="td font-medium">{u.name}</td>
                 <td className="td text-slate-500">{u.email}</td>
