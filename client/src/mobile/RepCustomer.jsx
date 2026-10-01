@@ -1127,9 +1127,6 @@ export default function RepCustomer({ base = '/mobile' }) {
               <div className="flex justify-between"><span className="text-slate-400">Due date</span><span>{fmtDate(timelineInvoice.due_date)}</span></div>
             )}
             <div className="flex justify-between"><span className="text-slate-400">Total</span><span className="font-semibold">{fmtR(timelineInvoice.total)}</span></div>
-            {timelineInvoice.balance > 0 && (
-              <div className="flex justify-between text-red-600"><span>Outstanding</span><span className="font-semibold">{fmtR(timelineInvoice.balance)}</span></div>
-            )}
             {timelineInvoice.status && (
               <div className="flex justify-between"><span className="text-slate-400">Status</span>
                 <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${

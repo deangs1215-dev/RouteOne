@@ -13,3 +13,10 @@ export const SEGMENT_HELP = {
 export const RISK_HELP = 'Churn risk (0-100): how likely this customer is to stop buying. Built from how overdue they are against their normal buying cycle (up to 45), how far spend has dropped versus the previous quarter (up to 35) and whether they had missed visits in the last 90 days (20). 70+ is high, 40-69 medium, under 40 low. Never invoiced scores 85.';
 
 export const RFM_HELP = 'R·F·M scores, each 1-5 (5 is best). R = Recency: how recently they were invoiced compared with their normal buying cycle. F = Frequency: number of invoices in the last 180 days. M = Monetary: how much they spent in the last 180 days, ranked against all customers.';
+
+// Customer grade (A/B/C) is set by hand on the customer record - there is no automatic rule behind it.
+export const GRADE_HELP = {
+  A: 'Top account. Highest value to the business - visit most often and protect the relationship.',
+  B: 'Standard account. Steady buyer with room to grow - visit on the normal cycle.',
+  C: 'Smaller or occasional account. Lowest priority for visits - keep in touch without over-investing time.'
+};

@@ -1,59 +1,107 @@
 import { Router } from 'express';
 import { isConstraintViolation, isUniqueViolation } from '../dbx.js';
 import { dbx, getLocalDateISO } from '../db.js';
-import { logActivity } from '../dbh.js';
+import { logActivity, repTargetLookup } from '../dbh.js';
 import { passwordIsStrong, requireRole, scopeForUser } from '../auth.js';
 import { buildLoginDetailsEmail, sendEmail } from '../integration/email.js';
 import bcrypt from 'bcryptjs';
 
 const router = Router();
 
+// ---- Dashboard helpers --------------------------------------------------------
+
+const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Calendar boundaries for the dashboard, computed here (not in SQL) so they are
+// identical on SQLite and SQL Server and can be passed as plain parameters.
+function dashboardDates() {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const today = iso(now);
+  const dow = (now.getDay() + 6) % 7; // Monday = 0
+  const q0 = m - (m % 3);
+  const prevDays = new Date(y, m, 0).getDate();
+  return {
+    today,
+    weekStart: iso(new Date(y, m, now.getDate() - dow)), weekEnd: iso(new Date(y, m, now.getDate() - dow + 6)),
+    monthStart: iso(new Date(y, m, 1)), monthEnd: iso(new Date(y, m + 1, 0)),
+    quarterStart: iso(new Date(y, q0, 1)), quarterEnd: iso(new Date(y, q0 + 3, 0)),
+    quarterStartMonth: iso(new Date(y, q0, 1)).slice(0, 7),
+    curMonth: today.slice(0, 7), monthNum: m + 1,
+    prevMonthStart: iso(new Date(y, m - 1, 1)),
+    prevMonthEnd: iso(new Date(y, m, 0)),
+    prevMonth: iso(new Date(y, m - 1, 1)).slice(0, 7),
+    // Same day-of-month last month, clamped for short months (31 Mar vs 28 Feb).
+    prevSameDay: iso(new Date(y, m - 1, Math.min(now.getDate(), prevDays))),
+    lastYearMonth: `${y - 1}-${String(m + 1).padStart(2, '0')}`,
+    cutoff30: iso(new Date(y, m, now.getDate() - 30)),
+    day: now.getDate(), daysInMonth: new Date(y, m + 1, 0).getDate()
+  };
+}
+
+const RANGES = ['today', 'week', 'mtd', 'qtd'];
+
 router.get('/dashboard', async (req, res) => {
   const scope = scopeForUser(req.user);
+  const isRep = scope.isRep;
   const repId = req.user.id;
+  const range = RANGES.includes(req.query.range) ? req.query.range : 'mtd';
+  const d = dashboardDates();
+  const since = { today: d.today, week: d.weekStart, mtd: d.monthStart, qtd: d.quarterStart }[range];
+  const until = { today: d.today, week: d.weekEnd, mtd: d.monthEnd, qtd: d.quarterEnd }[range];
+  const rp = isRep ? [repId] : [];
 
-  // sales_mtd is SYSPRO's actual invoiced sales for this month (rep_monthly_sales,
-  // synced from vw_FS_RepSalesByMonth) - same source as Rep KPIs "vs target".
-  // Everything else here (orders/visits/customers) stays RouteOne-native, since
-  // rep_monthly_sales is a monthly total only - no daily or per-order detail.
-  const stats = scope.isRep ? await dbx.prepare(`
-    SELECT
-      (SELECT COALESCE(sales_value, 0) FROM rep_monthly_sales WHERE rep_id = ? AND month = strftime('%Y-%m', 'now')) AS sales_mtd,
-      (SELECT COUNT(*) FROM orders WHERE rep_id = ? AND date(order_date) = date('now') AND status != 'cancelled') AS orders_today,
-      (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(check_in_at) = date('now') AND status = 'completed') AS visits_today,
-      (SELECT COUNT(*) FROM visits WHERE rep_id = ? AND date(planned_date) = date('now') AND status = 'planned') AS visits_pending,
-      (SELECT COUNT(*) FROM customers WHERE rep_id = ? AND status = 'active') AS active_customers,
-      (SELECT COALESCE(AVG(total), 0) FROM orders WHERE rep_id = ? AND order_date >= date('now', '-30 days') AND status != 'cancelled') AS avg_order_value
-  `).get(repId, repId, repId, repId, repId, repId) : await dbx.prepare(`
-    SELECT
-      (SELECT COALESCE(SUM(sales_value), 0) FROM rep_monthly_sales WHERE month = strftime('%Y-%m', 'now')) AS sales_mtd,
-      (SELECT COUNT(*) FROM orders WHERE date(order_date) = date('now') AND status != 'cancelled') AS orders_today,
-      (SELECT COUNT(*) FROM visits WHERE date(check_in_at) = date('now') AND status = 'completed') AS visits_today,
-      (SELECT COUNT(*) FROM visits WHERE date(planned_date) = date('now') AND status = 'planned') AS visits_pending,
-      (SELECT COUNT(*) FROM customers WHERE status = 'active') AS active_customers,
-      (SELECT COALESCE(AVG(total), 0) FROM orders WHERE order_date >= date('now', '-30 days') AND status != 'cancelled') AS avg_order_value
-  `).get();
+  // Sales per rep for the chosen range. Month and quarter use SYSPRO's monthly rep totals
+  // (rep_monthly_sales, same source as Rep KPIs); today/week have no monthly equivalent, so
+  // they come from synced invoices (ex-VAT subtotal), rep resolved via the billed customer.
+  const salesRows = (range === 'today' || range === 'week')
+    ? await dbx.prepare(`
+        SELECT c.rep_id, COALESCE(SUM(i.subtotal), 0) AS s
+        FROM invoices i JOIN customers c ON c.id = i.customer_id
+        WHERE i.invoice_date >= ? ${isRep ? 'AND c.rep_id = ?' : ''}
+        GROUP BY c.rep_id
+      `).all(since, ...rp)
+    : await dbx.prepare(`
+        SELECT rep_id, COALESCE(SUM(sales_value), 0) AS s
+        FROM rep_monthly_sales
+        WHERE month >= ? AND month <= ? ${isRep ? 'AND rep_id = ?' : ''}
+        GROUP BY rep_id
+      `).all(range === 'qtd' ? d.quarterStartMonth : d.curMonth, d.curMonth, ...rp);
+  const salesOf = new Map(salesRows.map((r) => [r.rep_id, r.s]));
+  const salesTotal = salesRows.reduce((sum, r) => sum + (r.s || 0), 0);
 
-  // "Sales by rep" leaderboard doesn't apply to a single rep's own dashboard.
-  const salesByRep = scope.isRep ? [] : await dbx.prepare(`
+  const counts = await dbx.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM orders WHERE order_date >= ? AND status != 'cancelled' ${isRep ? 'AND rep_id = ?' : ''}) AS orders,
+      (SELECT COUNT(*) FROM visits WHERE check_in_at >= ? AND status = 'completed' ${isRep ? 'AND rep_id = ?' : ''}) AS visits,
+      (SELECT COUNT(*) FROM visits WHERE planned_date >= ? AND planned_date <= ? AND status = 'planned' ${isRep ? 'AND rep_id = ?' : ''}) AS visits_pending,
+      (SELECT COUNT(*) FROM customers WHERE status = 'active' ${isRep ? 'AND rep_id = ?' : ''}) AS active_customers,
+      (SELECT COALESCE(AVG(total), 0) FROM orders WHERE order_date >= ? AND status != 'cancelled' ${isRep ? 'AND rep_id = ?' : ''}) AS avg_order_value
+  `).get(since, ...rp, since, ...rp, d.today > since ? d.today : since, until, ...rp, ...rp, d.cutoff30, ...rp);
+  const stats = { sales: salesTotal, ...counts };
+
+  // "Sales by rep" leaderboard doesn't apply to a single rep's own dashboard. The target is
+  // the rep's budget for the current calendar month (flat sales_target as fallback), so it
+  // is only meaningful - and only shown - for the month view.
+  const budgetOf = await repTargetLookup(d.monthNum);
+  const repRows = await dbx.prepare(`
     SELECT u.id, u.name, u.sales_target,
-      COALESCE((SELECT sales_value FROM rep_monthly_sales rm WHERE rm.rep_id = u.id AND rm.month = strftime('%Y-%m', 'now')), 0) AS sales_mtd,
-      COUNT(DISTINCT CASE WHEN o.order_date >= date('now', 'start of month') AND o.status != 'cancelled' THEN o.id END) AS orders_mtd,
-      (SELECT COUNT(*) FROM visits v WHERE v.rep_id = u.id AND v.check_in_at >= date('now', 'start of month') AND v.status = 'completed') AS visits_mtd
-    FROM users u
-    LEFT JOIN orders o ON o.rep_id = u.id
-    JOIN roles r ON r.id = u.role_id
-    WHERE r.name = 'rep' AND u.active = 1
-    GROUP BY u.id, u.name, u.sales_target ORDER BY sales_mtd DESC
-  `).all();
+      (SELECT COUNT(*) FROM orders o WHERE o.rep_id = u.id AND o.order_date >= ? AND o.status != 'cancelled') AS orders_mtd,
+      (SELECT COUNT(*) FROM visits v WHERE v.rep_id = u.id AND v.check_in_at >= ? AND v.status = 'completed') AS visits_mtd
+    FROM users u JOIN roles r ON r.id = u.role_id
+    WHERE r.name = 'rep' AND u.active = 1 ${isRep ? 'AND u.id = ?' : ''}
+  `).all(since, since, ...rp);
+  const salesByRep = isRep ? [] : repRows
+    .map((r) => ({ id: r.id, name: r.name, sales_mtd: salesOf.get(r.id) || 0, sales_target: budgetOf(r, d.monthNum) || 0, orders_mtd: r.orders_mtd, visits_mtd: r.visits_mtd }))
+    .sort((a, b) => b.sales_mtd - a.sales_mtd);
 
   const topCustomers = await dbx.prepare(`
     SELECT c.id, c.name, c.city, COALESCE(SUM(o.total), 0) AS sales_mtd, COUNT(o.id) AS orders_mtd
     FROM customers c
-    JOIN orders o ON o.customer_id = c.id AND o.order_date >= date('now', 'start of month') AND o.status != 'cancelled'
-    ${scope.isRep ? 'WHERE o.rep_id = ?' : ''}
+    JOIN orders o ON o.customer_id = c.id AND o.order_date >= ? AND o.status != 'cancelled'
+    ${isRep ? 'WHERE o.rep_id = ?' : ''}
     GROUP BY c.id, c.name, c.city ORDER BY sales_mtd DESC LIMIT 8
-  `).all(...(scope.isRep ? [repId] : []));
+  `).all(since, ...rp);
 
   // Customers with no order in 30+ days - the "at risk" list.
   const atRisk = await dbx.prepare(`
@@ -61,18 +109,34 @@ router.get('/dashboard', async (req, res) => {
     FROM customers c
     LEFT JOIN orders o ON o.customer_id = c.id AND o.status != 'cancelled'
     LEFT JOIN users u ON u.id = c.rep_id
-    WHERE c.status = 'active' ${scope.isRep ? 'AND c.rep_id = ?' : ''}
+    WHERE c.status = 'active' ${isRep ? 'AND c.rep_id = ?' : ''}
     GROUP BY c.id, c.name, c.city, u.name
     HAVING MAX(o.order_date) IS NULL OR MAX(o.order_date) < date('now', '-30 days')
     ORDER BY last_order_at LIMIT 8
-  `).all(...(scope.isRep ? [repId] : []));
+  `).all(...rp);
+
+  // Active customers with no completed visit in 30+ days (or ever). Visits and orders drift
+  // apart - a customer can keep ordering by phone while nobody has called in.
+  const noVisitFrom = `
+    FROM customers c
+    LEFT JOIN visits v ON v.customer_id = c.id AND v.status = 'completed'
+    LEFT JOIN users u ON u.id = c.rep_id
+    WHERE c.status = 'active' ${isRep ? 'AND c.rep_id = ?' : ''}
+    GROUP BY c.id, c.name, c.city, u.name
+    HAVING MAX(v.check_in_at) IS NULL OR MAX(v.check_in_at) < ?`;
+  const noVisit = await dbx.prepare(`
+    SELECT c.id, c.name, c.city, u.name AS rep_name, MAX(v.check_in_at) AS last_visit_at
+    ${noVisitFrom}
+    ORDER BY CASE WHEN MAX(v.check_in_at) IS NULL THEN 1 ELSE 0 END, MAX(v.check_in_at) LIMIT 8
+  `).all(...rp, d.cutoff30);
+  const noVisitCount = (await dbx.prepare(`SELECT COUNT(*) AS n FROM (SELECT c.id ${noVisitFrom}) x`).get(...rp, d.cutoff30)).n;
 
   const recentOrders = await dbx.prepare(`
     SELECT o.id, o.number, o.total, o.status, o.order_date, c.name AS customer_name, u.name AS rep_name
     FROM orders o JOIN customers c ON c.id = o.customer_id LEFT JOIN users u ON u.id = o.rep_id
-    ${scope.isRep ? 'WHERE o.rep_id = ?' : ''}
+    ${isRep ? 'WHERE o.rep_id = ?' : ''}
     ORDER BY o.order_date DESC LIMIT 10
-  `).all(...(scope.isRep ? [repId] : []));
+  `).all(...rp);
 
   // Sourced from invoices (SYSPRO's actual invoiced sales, synced from
   // vw_FS_Invoices) rather than RouteOne's own orders table - reps capturing
@@ -86,17 +150,112 @@ router.get('/dashboard', async (req, res) => {
   // with sales.
   const salesByDay = await dbx.prepare(`
     SELECT i.invoice_date AS day, COALESCE(SUM(i.total), 0) AS total
-    FROM invoices i ${scope.isRep ? 'JOIN customers c ON c.id = i.customer_id' : ''}
-    WHERE i.invoice_date >= date('now', '-14 days') ${scope.isRep ? 'AND c.rep_id = ?' : ''}
+    FROM invoices i ${isRep ? 'JOIN customers c ON c.id = i.customer_id' : ''}
+    WHERE i.invoice_date >= date('now', '-14 days') ${isRep ? 'AND c.rep_id = ?' : ''}
     GROUP BY i.invoice_date
-  `).all(...(scope.isRep ? [repId] : []));
+  `).all(...rp);
   const salesByDayMap = Object.fromEntries(salesByDay.map((r) => [r.day, r.total]));
   const salesTrend = Array.from({ length: 14 }, (_, i) => {
     const day = getLocalDateISO(i - 13);
     return { day, total: salesByDayMap[day] || 0 };
   });
 
-  res.json({ stats, salesByRep, topCustomers, atRisk, recentOrders, salesTrend });
+  // --- Sales pace: this month so far vs the same stretch of last month, where it is heading,
+  // and how that compares with target. The delta compares invoices to invoices (same source and
+  // VAT basis both sides); the projection and target use SYSPRO's monthly rep totals like the
+  // Sales tile. rep_monthly_sales only has whole months, hence "last month" / "last year" are
+  // full-month totals shown for context rather than like-for-like.
+  const invSum = async (from, to) => Number((await dbx.prepare(`
+    SELECT COALESCE(SUM(i.subtotal), 0) AS s
+    FROM invoices i ${isRep ? 'JOIN customers c ON c.id = i.customer_id' : ''}
+    WHERE i.invoice_date >= ? AND i.invoice_date <= ? ${isRep ? 'AND c.rep_id = ?' : ''}
+  `).get(from, to, ...rp)).s);
+  const monthSum = async (month) => Number((await dbx.prepare(`
+    SELECT COALESCE(SUM(sales_value), 0) AS s FROM rep_monthly_sales WHERE month = ? ${isRep ? 'AND rep_id = ?' : ''}
+  `).get(month, ...rp)).s);
+  const mtdByRep = new Map((await dbx.prepare(`
+    SELECT rep_id, COALESCE(SUM(sales_value), 0) AS s FROM rep_monthly_sales WHERE month = ? ${isRep ? 'AND rep_id = ?' : ''} GROUP BY rep_id
+  `).all(d.curMonth, ...rp)).map((r) => [r.rep_id, r.s]));
+  const mtdTotal = [...mtdByRep.values()].reduce((a, b) => a + b, 0);
+  const invNow = await invSum(d.monthStart, d.today);
+  const invPrev = await invSum(d.prevMonthStart, d.prevSameDay);
+  // Budget only covers the reps that have one, so measure only those reps' sales against it
+  // (see the matching comment in intelligence.routes.js).
+  let target = 0, targetSales = 0, budgetedReps = 0;
+  for (const r of repRows) {
+    const t = budgetOf(r, d.monthNum) || 0;
+    if (t > 0) { target += t; targetSales += mtdByRep.get(r.id) || 0; budgetedReps += 1; }
+  }
+  const pace = (v) => (v / d.day) * d.daysInMonth;
+  const salesPace = {
+    mtd: mtdTotal,
+    delta_pct: invPrev > 0 ? Math.round(((invNow - invPrev) / invPrev) * 100) : null,
+    last_month_total: await monthSum(d.prevMonth),
+    last_year_month_total: await monthSum(d.lastYearMonth),
+    day: d.day, days_in_month: d.daysInMonth,
+    projected: Math.round(pace(mtdTotal)),
+    target: Math.round(target), target_sales: Math.round(targetSales), target_projected: Math.round(pace(targetSales)),
+    budgeted_reps: budgetedReps, total_reps: repRows.length
+  };
+
+  // --- Quotes sent and still waiting on the customer, oldest first.
+  const quoteWhere = `WHERE q.status = 'sent' ${isRep ? 'AND q.rep_id = ?' : ''}`;
+  const quoteSummary = await dbx.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(q.total), 0) AS total_value FROM quotes q ${quoteWhere}`).get(...rp);
+  const quoteRows = await dbx.prepare(`
+    SELECT q.id, q.number, q.total, q.quote_date, q.valid_until, c.name AS customer_name, u.name AS rep_name
+    FROM quotes q JOIN customers c ON c.id = q.customer_id LEFT JOIN users u ON u.id = q.rep_id
+    ${quoteWhere} ORDER BY q.quote_date LIMIT 8
+  `).all(...rp);
+  const openQuotes = { count: quoteSummary.n, value: Number(quoteSummary.total_value), rows: quoteRows };
+
+  // --- Product movers, from invoice line detail. SYSPRO's line view only reaches back 30 days
+  // (docs/sql/vw_FS_InvoiceLines.sql), so month-on-month is not possible; instead: best sellers
+  // over those 30 days, and products that sold in the older half of the window (days 15-30)
+  // but not in the last 14 days. A rep sees lines billed to or delivered to their customers.
+  const lineRows = (from, to) => dbx.prepare(`
+    SELECT ii.product_code, MAX(p.name) AS name, SUM(ii.qty) AS qty, SUM(ii.line_total) AS sales
+    FROM invoice_items ii
+    JOIN invoices i ON i.id = ii.invoice_id
+    LEFT JOIN customers c ON c.id = i.customer_id
+    LEFT JOIN customers dc ON dc.id = ii.delivery_customer_id
+    LEFT JOIN products p ON p.id = ii.product_id
+    WHERE i.invoice_date >= ? AND i.invoice_date <= ? ${isRep ? 'AND (c.rep_id = ? OR dc.rep_id = ?)' : ''}
+    GROUP BY ii.product_code
+    ORDER BY SUM(ii.line_total) DESC
+  `).all(from, to, ...(isRep ? [repId, repId] : []));
+  const recentLines = await lineRows(getLocalDateISO(-13), d.today);
+  const olderLines = await lineRows(d.cutoff30, getLocalDateISO(-14));
+  const soldRecently = new Set(recentLines.map((r) => r.product_code));
+  const last30 = await lineRows(d.cutoff30, d.today);
+  const productMovers = {
+    top: last30.filter((r) => r.sales > 0).slice(0, 8),
+    quiet: olderLines.filter((r) => r.sales > 0 && !soldRecently.has(r.product_code)).slice(0, 8)
+  };
+
+  // --- Team today (managers/admins): who is out, who is at the branch, who has not started.
+  let teamToday = null;
+  if (!isRep) {
+    const planned = await dbx.prepare(`SELECT rep_id, COUNT(*) AS n FROM visits WHERE planned_date = ? GROUP BY rep_id`).all(d.today);
+    const done = await dbx.prepare(`SELECT rep_id, COUNT(*) AS n, MAX(check_in_at) AS last_at FROM visits WHERE date(check_in_at) = ? AND status = 'completed' GROUP BY rep_id`).all(d.today);
+    const live = await dbx.prepare(`SELECT v.rep_id, c.name AS customer_name, v.check_in_at FROM visits v JOIN customers c ON c.id = v.customer_id WHERE v.status = 'in_progress' AND date(v.check_in_at) = ?`).all(d.today);
+    const branch = await dbx.prepare(`SELECT rep_id, clock_in_at FROM branch_clock_ins WHERE clock_out_at IS NULL AND date(clock_in_at) = ?`).all(d.today);
+    const by = (rows) => new Map(rows.map((r) => [r.rep_id, r]));
+    const [pl, dn, lv, br] = [by(planned), by(done), by(live), by(branch)];
+    teamToday = repRows.map((r) => ({
+      id: r.id, name: r.name,
+      planned: pl.get(r.id)?.n || 0,
+      completed: dn.get(r.id)?.n || 0,
+      last_check_in_at: dn.get(r.id)?.last_at || null,
+      on_visit: lv.get(r.id)?.customer_name || null,
+      on_visit_since: lv.get(r.id)?.check_in_at || null,
+      at_branch_since: br.get(r.id)?.clock_in_at || null
+    })).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  res.json({
+    range, stats, salesByRep, topCustomers, atRisk, recentOrders, salesTrend,
+    salesPace, openQuotes, productMovers, teamToday, noVisit: { count: noVisitCount, rows: noVisit }
+  });
 });
 
 // --- User admin (kept here to avoid a separate module for Phase 1) ---

@@ -186,6 +186,19 @@ test('health, security headers, authentication cookie, and cross-site blocking',
   const dashboard = await request('/api/dashboard', { cookie });
   assert.equal(dashboard.response.status, 200);
   assert.equal(dashboard.response.headers.get('cache-control'), 'no-store');
+  // Every date range answers, and the widgets a rep sees are present (team view is manager-only).
+  for (const range of ['today', 'week', 'mtd', 'qtd']) {
+    const r = await request(`/api/dashboard?range=${range}`, { cookie });
+    assert.equal(r.response.status, 200, range);
+    assert.equal(r.body.range, range);
+    for (const key of ['stats', 'salesPace', 'openQuotes', 'productMovers', 'noVisit']) assert.ok(r.body[key], `${range} ${key}`);
+    assert.equal(r.body.teamToday, null);
+  }
+  // The admin view adds the team panel and covers every rep.
+  const adminDash = await request('/api/dashboard?range=week', { cookie: await login(fixture.admin.email) });
+  assert.equal(adminDash.response.status, 200);
+  assert.ok(Array.isArray(adminDash.body.teamToday));
+  assert.ok(Array.isArray(adminDash.body.salesByRep));
 
   const crossSite = await request('/api/locations', {
     method: 'POST',

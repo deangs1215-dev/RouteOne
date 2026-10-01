@@ -1,5 +1,7 @@
 // Small shared UI primitives used across all pages.
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { GRADE_HELP } from '../intelHelp';
 
 export function Badge({ color = '#64748b', children }) {
   return (
@@ -35,7 +37,25 @@ export function QuoteStatusBadge({ status }) {
 
 export function GradeBadge({ grade }) {
   const colors = { A: '#16a34a', B: '#0ea5e9', C: '#64748b' };
-  return <Badge color={colors[grade] || '#64748b'}>Grade {grade}</Badge>;
+  return (
+    <Tip tip={<GradeHelp grade={grade} />}>
+      <Badge color={colors[grade] || '#64748b'}>Grade {grade}</Badge>
+    </Tip>
+  );
+}
+
+// Hover text for a customer grade: this grade in bold, then the full A/B/C scale.
+function GradeHelp({ grade }) {
+  return (
+    <div className="space-y-1.5">
+      <div className="font-semibold">Customer grade</div>
+      {Object.entries(GRADE_HELP).map(([g, text]) => (
+        <div key={g} className={g === grade ? 'font-semibold' : 'opacity-70'}>
+          <span className="mr-1">Grade {g}:</span>{text}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 // Hover (or tap / keyboard focus) explainer. `tip` is the popover content.
@@ -64,14 +84,17 @@ export function Card({ title, actions, children, className = '' }) {
   );
 }
 
-export function Stat({ label, value, sub, accent = 'text-slate-900' }) {
-  return (
-    <div className="card p-4">
+export function Stat({ label, value, sub, accent = 'text-slate-900', to }) {
+  const body = (
+    <>
       <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
       <div className={`mt-1 text-2xl font-bold ${accent}`}>{value}</div>
       {sub && <div className="mt-0.5 text-xs text-slate-400">{sub}</div>}
-    </div>
+    </>
   );
+  // With `to`, the whole tile is a link and lifts on hover.
+  if (to) return <Link to={to} className="card block p-4 transition duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md">{body}</Link>;
+  return <div className="card p-4">{body}</div>;
 }
 
 // Friendly "nothing here" state — icon + message, reused by Table below and

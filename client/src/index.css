@@ -189,10 +189,39 @@ html[data-theme] .th { @apply text-muted; }
   padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
 }
 .btn { @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed; }
-.btn-primary { @apply btn bg-brand-600 text-white hover:bg-brand-700; }
-.btn-secondary { @apply btn bg-white border border-slate-300 text-slate-700 hover:bg-slate-50; }
-.btn-danger { @apply btn bg-red-600 text-white hover:bg-red-700; }
+.btn-primary { @apply btn bg-brand-600 text-white hover:bg-brand-700 hover:shadow-md active:translate-y-px; }
+.btn-secondary { @apply btn bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 hover:border-slate-400 hover:shadow-sm active:translate-y-px; }
+.btn-danger { @apply btn bg-red-600 text-white hover:bg-red-700 hover:shadow-md active:translate-y-px; }
 .input { @apply w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 bg-white; }
 .label { @apply block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1; }
 .th { @apply px-3 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide; }
 .td { @apply px-3 py-2.5 text-sm; }
+
+/* ---------------------------------------------------------------------------
+   Desktop hover affordances: anything clickable reacts under the mouse.
+
+   Scoped to html:not([data-theme]) so the themed mobile rep app is untouched, and to
+   (hover: hover) so touch screens never get a "stuck" hover state after a tap.
+   Elements that already define their own hover: styling (sidebar, .btn-*) are left alone.
+--------------------------------------------------------------------------- */
+@media (hover: hover) {
+  html:not([data-theme]) button:not(:disabled),
+  html:not([data-theme]) [role='button'],
+  html:not([data-theme]) select,
+  html:not([data-theme]) summary { cursor: pointer; }
+
+  html:not([data-theme]) button,
+  html:not([data-theme]) tr.cursor-pointer > td { transition: background-color 150ms ease, filter 150ms ease, box-shadow 150ms ease, color 150ms ease; }
+
+  /* Plain text buttons (Edit, remove, tabs, toggles...): soft grey wash. */
+  html:not([data-theme]) button:not(:disabled):not([class*='btn']):not([class*='bg-']):not([class*='hover:']):hover {
+    background-color: rgb(226 232 240 / 0.7);
+    border-radius: 0.375rem;
+  }
+  /* Coloured custom buttons with no hover style of their own: slight darken. */
+  html:not([data-theme]) button:not(:disabled):not([class*='btn']):not([class*='hover:'])[class*='bg-']:hover {
+    filter: brightness(0.94);
+  }
+  /* Clickable table rows: clearly highlighted, whole row. */
+  html:not([data-theme]) tr.cursor-pointer:hover > td { background-color: rgb(226 232 240 / 0.6); }
+}
