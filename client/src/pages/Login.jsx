@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../auth';
-import { ErrorNote } from '../components/ui';
+import { ErrorNote, PasswordInput } from '../components/ui';
 
 export default function Login() {
   const { login } = useAuth();
@@ -44,7 +44,7 @@ export default function Login() {
           </div>
           <div>
             <label className="label">Password</label>
-            <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+            <PasswordInput className="input" value={password} onChange={(e) => setPassword(e.target.value)} required />
           </div>
           <button className="btn-primary w-full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
           <Link to="/forgot-password" className="block text-center text-sm text-slate-500 hover:underline">Forgot your password?</Link>

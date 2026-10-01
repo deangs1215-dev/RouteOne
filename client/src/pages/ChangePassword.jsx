@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../auth';
-import { ErrorNote } from '../components/ui';
+import { ErrorNote, PasswordInput } from '../components/ui';
 
 export default function ChangePassword() {
   const { changePassword, logout } = useAuth();
@@ -32,22 +32,22 @@ export default function ChangePassword() {
       <form onSubmit={submit} className="card w-full max-w-md space-y-4 p-6">
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Choose a new password</h1>
-          <p className="mt-1 text-sm text-slate-500">Use at least 12 characters. This is required before continuing.</p>
+          <p className="mt-1 text-sm text-slate-500">Use at least 9 characters, with a capital letter and a number. This is required before continuing.</p>
         </div>
         <ErrorNote error={error} />
         <div>
           <label className="label">Current password</label>
-          <input className="input" type="password" autoComplete="current-password"
+          <PasswordInput className="input" autoComplete="current-password"
             value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} required autoFocus />
         </div>
         <div>
           <label className="label">New password</label>
-          <input className="input" type="password" minLength={9} maxLength={128} autoComplete="new-password"
+          <PasswordInput className="input" minLength={9} maxLength={128} autoComplete="new-password"
             value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />
         </div>
         <div>
           <label className="label">Confirm new password</label>
-          <input className="input" type="password" minLength={9} maxLength={128} autoComplete="new-password"
+          <PasswordInput className="input" minLength={9} maxLength={128} autoComplete="new-password"
             value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required />
         </div>
         <button className="btn-primary w-full" disabled={busy}>

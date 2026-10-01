@@ -870,3 +870,33 @@ test('rep pin: the confirmed location is used by the customer, route and check-i
   assert.equal(removed.response.status, 200);
   assert.equal((await read(mine)).geo_source, 'other');
 });
+
+test('forgot-password emails a link that resets the password, once', async () => {
+  const rep = fixture.reps[1];
+  const before = await dbx.prepare('SELECT password_hash, token_version FROM users WHERE id = ?').get(rep.id);
+  try {
+    const asked = await request('/api/auth/forgot-password', { method: 'POST', origin: allowedOrigin, body: { email: rep.email } });
+    assert.equal(asked.response.status, 200, JSON.stringify(asked.body));
+    // sendEmail is fire-and-forget in the route; give it a moment to log the message.
+    let mail;
+    for (let i = 0; i < 40 && !mail; i += 1) {
+      mail = await dbx.prepare("SELECT body_html, to_addr FROM email_log WHERE kind = 'password_reset' AND ref_id = ? ORDER BY id DESC LIMIT 1").get(rep.id);
+      if (!mail) await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(mail, 'no reset email was logged');
+    const token = /reset-password\?token=([0-9a-f]{64})/.exec(mail.body_html)?.[1];
+    assert.ok(token, 'reset email has no token link');
+
+    const weak = await request('/api/auth/reset-password', { method: 'POST', origin: allowedOrigin, body: { token, new_password: 'short' } });
+    assert.equal(weak.response.status, 400);
+    const newPassword = 'Fresh-Pass-2026';
+    const done = await request('/api/auth/reset-password', { method: 'POST', origin: allowedOrigin, body: { token, new_password: newPassword } });
+    assert.equal(done.response.status, 200, JSON.stringify(done.body));
+    await login(rep.email, newPassword);
+    const reused = await request('/api/auth/reset-password', { method: 'POST', origin: allowedOrigin, body: { token, new_password: 'Another-Pass-2026' } });
+    assert.equal(reused.response.status, 400, 'a reset link must only work once');
+  } finally {
+    await dbx.prepare('UPDATE users SET password_hash = ?, token_version = ?, reset_token_hash = NULL, reset_token_expires = NULL WHERE id = ?')
+      .run(before.password_hash, before.token_version, rep.id);
+  }
+});

@@ -58,6 +58,24 @@ function GradeHelp({ grade }) {
   );
 }
 
+// Password field with an eye button to reveal what has been typed. Takes the same props as an <input>.
+export function PasswordInput({ className = 'input', ...props }) {
+  const [shown, setShown] = useState(false);
+  const icon = shown
+    ? <path d="M3 3l18 18M10.6 10.6a2 2 0 002.8 2.8M9.9 5.1A9.7 9.7 0 0112 5c5 0 8.5 4.5 9.5 7a11.8 11.8 0 01-3 4.2M6.6 6.6A11.9 11.9 0 002.5 12c1 2.5 4.5 7 9.5 7 1.6 0 3-.4 4.3-1" />
+    : <><path d="M2.5 12C3.5 9.5 7 5 12 5s8.5 4.5 9.5 7c-1 2.5-4.5 7-9.5 7s-8.5-4.5-9.5-7z" /><circle cx="12" cy="12" r="3" /></>;
+  return (
+    <div className="relative">
+      <input {...props} type={shown ? 'text' : 'password'} className={`${className} pr-10`} />
+      <button type="button" onClick={() => setShown((v) => !v)} tabIndex={-1}
+        aria-label={shown ? 'Hide password' : 'Show password'} title={shown ? 'Hide password' : 'Show password'}
+        className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-slate-400 hover:text-slate-700">
+        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
+      </button>
+    </div>
+  );
+}
+
 // Hover (or tap / keyboard focus) explainer. `tip` is the popover content.
 export function Tip({ tip, children, className = '' }) {
   return (

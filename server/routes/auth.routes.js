@@ -129,7 +129,7 @@ router.post('/reset-password', async (req, res) => {
   if (!user) return res.status(400).json({ error: 'Invalid or expired reset link' });
 
   if (!passwordIsStrong(newPassword)) {
-    return res.status(400).json({ error: 'Use at least 12 characters and avoid common passwords' });
+    return res.status(400).json({ error: 'Password must be at least 9 characters, contain a capital letter and a number' });
   }
   // token_version + 1 ends every existing session for this account. A reset is
   // the one moment where that is the whole point: whoever prompted it may be
@@ -150,7 +150,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Current password is incorrect' });
   }
   if (!passwordIsStrong(newPassword)) {
-    return res.status(400).json({ error: 'Use at least 12 characters and avoid common passwords' });
+    return res.status(400).json({ error: 'Password must be at least 9 characters, contain a capital letter and a number' });
   }
   if (await bcrypt.compare(newPassword, req.user.password_hash)) {
     return res.status(400).json({ error: 'New password must be different' });
