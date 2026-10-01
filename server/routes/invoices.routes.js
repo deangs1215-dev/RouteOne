@@ -82,6 +82,7 @@ router.get('/invoices/:id', async (req, res) => {
   // across invoices, so that fallback is never treated as authoritative.
   let items = await dbx.prepare(`
     SELECT ii.product_code, ii.qty, ii.unit_price, ii.line_total, p.name AS product_name, p.uom,
+      p.conv_factor_alt_uom, p.pack_weight_kg,
       ii.delivery_customer_code, dc.name AS delivery_customer_name
     FROM invoice_items ii
     LEFT JOIN products p ON p.id = ii.product_id
@@ -100,13 +101,20 @@ router.get('/invoices/:id', async (req, res) => {
     const order = await dbx.prepare('SELECT id FROM orders WHERE number = ?').get(invoice.order_number);
     if (order) {
       items = await dbx.prepare(`
-        SELECT i.product_name, i.qty, i.uom, i.unit_price, i.line_total, p.code AS product_code
+        SELECT i.product_name, i.qty, i.uom, i.unit_price, i.line_total, p.code AS product_code,
+          p.conv_factor_alt_uom, p.pack_weight_kg
         FROM order_items i LEFT JOIN products p ON p.id = i.product_id
         WHERE i.order_id = ?
       `).all(order.id);
       itemsSource = 'order';
     }
   }
+  // Price per kg = selling-unit price / kg per unit (same weight rule as productUnitPrice
+  // in db.js). Null when the product has no known weight.
+  items = items.map(({ conv_factor_alt_uom, pack_weight_kg, ...it }) => {
+    const kg = conv_factor_alt_uom || pack_weight_kg;
+    return { ...it, kg_price: kg > 0 && it.unit_price != null ? Math.round((it.unit_price / kg) * 100) / 100 : null };
+  });
   res.json({ ...invoice, items, items_source: itemsSource, is_group_billed: isGroupBilled, delivery_stores: deliveryStores });
 });
 

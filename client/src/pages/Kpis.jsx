@@ -143,10 +143,9 @@ const ACCENTS = [
 ];
 
 function QuarterlyHistory({ history, year, onYear }) {
-  const { quarters, rows, totals, maxMonth } = buildQuarters(history.year, history.reps);
+  const { quarters, totals, maxMonth } = buildQuarters(history.year, history.reps);
   const years = history.years;
   const at = years.indexOf(history.year);
-  const money = (v) => (v > 0 ? fmtR(v) : <span className="text-slate-300">—</span>);
 
   return (
     <div className="space-y-4">
@@ -212,54 +211,6 @@ function QuarterlyHistory({ history, year, onYear }) {
         })}
       </div>
 
-      {/* Every rep, quarter by quarter */}
-      <Card title={`Sales by rep — ${history.year}`}>
-        {rows.length === 0 ? <div className="py-6 text-center text-sm text-slate-400">No reps found.</div> : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full border-separate border-spacing-0 text-sm">
-              <thead>
-                <tr>
-                  <th rowSpan={2} className="th sticky left-0 z-10 border-b border-slate-200 bg-white align-bottom">Rep</th>
-                  {quarters.map((qt, i) => (
-                    <th key={qt.q} colSpan={4} className={`border-b-2 px-3 py-2 text-center text-xs font-extrabold uppercase tracking-wider ${ACCENTS[i].head} ${ACCENTS[i].text} ${ACCENTS[i].soft}`}>
-                      Q{qt.q}
-                    </th>
-                  ))}
-                  <th rowSpan={2} className="th border-b border-slate-200 bg-slate-50 text-right align-bottom">{history.year}</th>
-                </tr>
-                <tr>
-                  {quarters.map((qt, i) => (
-                    [...qt.labels.map((l) => <th key={`${qt.q}-${l}`} className="th border-b border-slate-200 text-right">{l}</th>),
-                      <th key={`${qt.q}-t`} className={`th border-b border-slate-200 text-right ${ACCENTS[i].text} ${ACCENTS[i].cell}`}>Q{qt.q} total</th>]
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.rep_id} className="group">
-                    <td className="td sticky left-0 z-10 border-b border-slate-100 bg-white font-medium group-hover:bg-slate-50">{r.name}</td>
-                    {r.quarters.map((qv, i) => (
-                      [...qv.values.map((v, m) => <td key={`${i}-${m}`} className="td whitespace-nowrap border-b border-slate-100 text-right text-slate-600 group-hover:bg-slate-50">{money(v)}</td>),
-                        <td key={`${i}-t`} className={`td whitespace-nowrap border-b border-slate-100 text-right font-semibold text-slate-800 ${ACCENTS[i].cell}`}>{money(qv.total)}</td>]
-                    ))}
-                    <td className="td whitespace-nowrap border-b border-slate-100 bg-slate-50 text-right font-bold">{fmtR(r.total)}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr>
-                  <td className="td sticky left-0 z-10 border-t-2 border-slate-300 bg-white font-extrabold">All reps</td>
-                  {totals.quarters.map((qv, i) => (
-                    [...qv.values.map((v, m) => <td key={`${i}-${m}`} className="td whitespace-nowrap border-t-2 border-slate-300 text-right font-semibold text-slate-700">{money(v)}</td>),
-                      <td key={`${i}-t`} className={`td whitespace-nowrap border-t-2 border-slate-300 text-right font-extrabold text-slate-900 ${ACCENTS[i].cell}`}>{money(qv.total)}</td>]
-                  ))}
-                  <td className="td whitespace-nowrap border-t-2 border-slate-300 bg-slate-100 text-right font-extrabold">{fmtR(totals.total)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
-      </Card>
       <div className="text-[11px] text-slate-400">
         Actual invoiced sales from SYSPRO. Arrows compare a finished quarter with the one before it; the current quarter is still in progress.
       </div>

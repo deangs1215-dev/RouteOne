@@ -59,8 +59,8 @@ export default function Products() {
                     {p.stock_by_warehouse?.some((s) => s.qty_available > 0) && (
                       <div className="mt-0.5 flex flex-wrap gap-x-1.5 gap-y-0.5 text-[11px] text-slate-400">
                         {p.stock_by_warehouse.filter((s) => s.qty_available > 0).map((s) => (
-                          <span key={s.warehouse_code} title={s.warehouse_name}>
-                            {s.warehouse_code}: {s.qty_available}
+                          <span key={s.warehouse_code} title={`${s.warehouse_code} · ${s.warehouse_name}`}>
+                            {s.qty_available}
                           </span>
                         ))}
                       </div>

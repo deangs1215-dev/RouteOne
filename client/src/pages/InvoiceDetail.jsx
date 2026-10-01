@@ -59,7 +59,7 @@ export default function InvoiceDetail() {
               : 'This invoice has no linked order, so no line-item breakdown is available.'}
           </div>
         ) : (
-          <Table headers={['Product', { label: 'Qty', align: 'right' }, { label: 'Unit price', align: 'right' }, { label: 'Total', align: 'right' }]}>
+          <Table headers={['Product', { label: 'Qty', align: 'right' }, { label: 'Kg price', align: 'right' }, { label: 'Unit price', align: 'right' }, { label: 'Total', align: 'right' }]}>
             {invoice.items.map((it, idx) => (
               <tr key={idx} className="hover:bg-slate-50">
                 <td className="td">
@@ -70,6 +70,7 @@ export default function InvoiceDetail() {
                   )}
                 </td>
                 <td className="td text-right text-slate-500">{it.qty} {it.uom || ''}</td>
+                <td className="td text-right text-slate-500">{it.kg_price != null ? fmtR(it.kg_price) : '—'}</td>
                 <td className="td text-right text-slate-500">{fmtR(it.unit_price)}</td>
                 <td className="td text-right font-medium">{fmtR(it.line_total)}</td>
               </tr>
@@ -83,7 +84,6 @@ export default function InvoiceDetail() {
           <div className="flex justify-between"><span className="text-slate-500">Subtotal</span><span>{fmtR(invoice.subtotal)}</span></div>
           <div className="flex justify-between"><span className="text-slate-500">VAT</span><span>{fmtR(invoice.vat_amount)}</span></div>
           <div className="flex justify-between font-bold border-t border-slate-100 pt-1 mt-1"><span>Total</span><span>{fmtR(invoice.total)}</span></div>
-          <div className="flex justify-between text-slate-500"><span>Paid</span><span>{fmtR(invoice.amount_paid)}</span></div>
           <div className="flex justify-between font-medium"><span>Balance</span><span>{fmtR(invoice.balance)}</span></div>
         </div>
       </Card>
