@@ -3,7 +3,8 @@
 // rules, no black box: RFM segmentation, churn risk scores, next actions,
 // and product suggestions per customer.
 import { Router } from 'express';
-import { dbx } from '../db.js';
+import { dbx, getLocalDateISO } from '../db.js';
+import { repTargetLookup } from '../dbh.js';
 import { requireRole, scopeForUser } from '../auth.js';
 
 const router = Router();
@@ -219,9 +220,45 @@ router.get('/analytics', requireRole('admin', 'manager', 'office', 'rep'), async
   `).all(...repParam);
   const salesMap = Object.fromEntries(salesByMonth.map((r) => [r.month, r.sales]));
   const ordersMap = Object.fromEntries(ordersByMonth.map((r) => [r.month, r.orders]));
-  const monthly = [...new Set([...salesByMonth.map((r) => r.month), ...ordersByMonth.map((r) => r.month)])]
+
+  // Budget per month = the monthly budgets of the active reps who HAVE one (rep_budgets, falling
+  // back to the rep's flat sales target) - the same figure the Rep KPIs use. A rep sees only their
+  // own. "Achieved" compares like with like: only those budgeted reps' sales are measured against
+  // their budget. Comparing everyone's sales with a budget that covers only some of the reps (on
+  // production, 3 of 46) would show a meaningless thousand-percent figure, and sales from reps who
+  // have since left would inflate it too. Every month from January to now is listed, so a month
+  // with a budget but no sales yet still shows.
+  const reps = await dbx.prepare(`
+    SELECT u.id, u.sales_target FROM users u JOIN roles r ON r.id = u.role_id
+    WHERE r.name = 'rep' AND u.active = 1 ${scope.isRep ? 'AND u.id = ?' : ''}
+  `).all(...repParam);
+  const thisMonth = getLocalDateISO().slice(0, 7);
+  // rep_budgets is keyed by calendar month NUMBER (1-12, repeating each year), not 'YYYY-MM'.
+  const budgetOf = await repTargetLookup(Number(thisMonth.slice(5, 7)));
+  const salesByRepMonth = new Map((await dbx.prepare(`
+    SELECT rep_id, month, COALESCE(SUM(sales_value), 0) AS sales
+    FROM rep_monthly_sales
+    WHERE month >= strftime('%Y-01', 'now') ${scope.isRep ? 'AND rep_id = ?' : ''}
+    GROUP BY rep_id, month
+  `).all(...repParam)).map((r) => [`${r.rep_id}:${r.month}`, r.sales]));
+  const year = thisMonth.slice(0, 4);
+  const ytdMonths = Array.from({ length: Number(thisMonth.slice(5, 7)) }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`);
+  const monthly = [...new Set([...ytdMonths, ...salesByMonth.map((r) => r.month), ...ordersByMonth.map((r) => r.month)])]
     .sort()
-    .map((month) => ({ month, sales: salesMap[month] || 0, orders: ordersMap[month] || 0 }));
+    .map((month) => {
+      let budget = 0, budgetSales = 0, budgetedReps = 0;
+      for (const rep of reps) {
+        const target = budgetOf(rep, Number(month.slice(5, 7))) || 0;
+        if (target > 0) { budget += target; budgetedReps += 1; budgetSales += salesByRepMonth.get(`${rep.id}:${month}`) || 0; }
+      }
+      budget = Math.round(budget);
+      // achieved_pct is null when there is no budget to measure against (never a divide-by-zero)
+      return {
+        month, sales: salesMap[month] || 0, orders: ordersMap[month] || 0,
+        budget, budget_sales: budgetSales, budgeted_reps: budgetedReps, total_reps: reps.length,
+        achieved_pct: budget > 0 ? Math.round((budgetSales / budget) * 100) : null
+      };
+    });
 
   const topProducts = await dbx.prepare(`
     SELECT p.code, p.name, SUM(i.qty) AS units, SUM(i.line_total) AS revenue,

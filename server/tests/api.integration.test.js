@@ -693,3 +693,84 @@ test('crawl: every GET route answers without a server error', { skip: !(process.
   console.log(`crawl: ${paths.size} paths, ${visited} requests, ${failures.length} server errors`);
   assert.deepEqual(failures, []);
 });
+
+// Analytics "Monthly sales" shows each month's budget and % achieved. A rep sees only their own
+// budget; the figure is the rep_budgets row for the month (falling back to the flat target).
+test('analytics monthly sales carries the budget and the percentage achieved', async () => {
+  const repCookie = await login(fixture.reps[0].email);
+  const adminCookie = await login(fixture.admin.email);
+  const repId = fixture.reps[0].id;
+  const month = `${new Date().getFullYear()}-01`;
+  // rep_budgets is keyed by calendar month NUMBER (1 = January), repeating every year.
+  await dbx.prepare('DELETE FROM rep_budgets WHERE rep_id = ? AND [month] = 1').run(repId);
+  await dbx.prepare('DELETE FROM rep_monthly_sales WHERE rep_id = ? AND [month] = ?').run(repId, month);
+  await dbx.prepare('INSERT INTO rep_budgets (rep_id, [month], budget) VALUES (?, 1, 1000)').run(repId);
+  await dbx.prepare('INSERT INTO rep_monthly_sales (rep_id, [month], sales_value) VALUES (?, ?, 800)').run(repId, month);
+
+  const mine = await request('/api/analytics', { cookie: repCookie });
+  assert.equal(mine.response.status, 200, JSON.stringify(mine.body));
+  const jan = mine.body.monthly.find((m) => m.month === month);
+  assert.ok(jan, 'January is listed');
+  assert.equal(jan.budget, 1000);
+  assert.equal(jan.achieved_pct, 80);
+  assert.equal(jan.sales, 800);
+  assert.equal(jan.budgeted_reps, 1);
+  assert.equal(jan.budget_sales, 800);
+  // every month from January to now is present, each with the fields the chart needs
+  assert.ok(mine.body.monthly.every((m) => 'budget' in m && 'achieved_pct' in m));
+  // a month with no budget at all reports null, never a divide-by-zero
+  assert.ok(mine.body.monthly.every((m) => m.budget > 0 || m.achieved_pct === null));
+
+  const all = await request('/api/analytics', { cookie: adminCookie });
+  const janAll = all.body.monthly.find((m) => m.month === month);
+  assert.ok(janAll.budget >= 1000, 'the company budget includes this rep and any others');
+  assert.equal(typeof janAll.achieved_pct, 'number');
+  // Only reps who have a budget are measured: a second rep with sales but NO budget must not
+  // push the percentage up (comparing all sales to a partial budget would show thousands of %).
+  const other = fixture.reps[1].id;
+  await dbx.prepare('DELETE FROM rep_budgets WHERE rep_id = ? AND [month] = 1').run(other);
+  await dbx.prepare('UPDATE users SET sales_target = 0 WHERE id = ?').run(other);
+  await dbx.prepare('DELETE FROM rep_monthly_sales WHERE rep_id = ? AND [month] = ?').run(other, month);
+  await dbx.prepare('INSERT INTO rep_monthly_sales (rep_id, [month], sales_value) VALUES (?, ?, 5000000)').run(other, month);
+  const again = (await request('/api/analytics', { cookie: adminCookie })).body.monthly.find((m) => m.month === month);
+  assert.equal(again.budget_sales, janAll.budget_sales, 'a rep with no budget is not counted against the budget');
+  assert.ok(again.achieved_pct < 1000, `percentage stays sane, got ${again.achieved_pct}`);
+});
+
+// Rep KPIs "Monthly history" is shown in calendar quarters. It returns one calendar year Jan-Dec:
+// the current year by default, any plausible year on request, plus the years that have sales.
+test('monthly history serves a chosen calendar year and lists the years with sales', async () => {
+  const adminCookie = await login(fixture.admin.email);
+  const thisYear = new Date().getFullYear();
+  const repId = fixture.reps[0].id;
+  await dbx.prepare('DELETE FROM rep_monthly_sales WHERE rep_id = ? AND [month] = ?').run(repId, `${thisYear - 1}-11`);
+  await dbx.prepare('INSERT INTO rep_monthly_sales (rep_id, [month], sales_value) VALUES (?, ?, 4321)').run(repId, `${thisYear - 1}-11`);
+
+  const current = await request('/api/kpis/monthly-history', { cookie: adminCookie });
+  assert.equal(current.response.status, 200, JSON.stringify(current.body));
+  assert.equal(current.body.year, thisYear);
+  assert.equal(current.body.months.length, 12);
+  assert.equal(current.body.months[0], `${thisYear}-01`);
+  assert.equal(current.body.months[11], `${thisYear}-12`);
+  assert.ok(current.body.years.includes(thisYear) && current.body.years.includes(thisYear - 1), `years: ${current.body.years}`);
+
+  const last = await request(`/api/kpis/monthly-history?year=${thisYear - 1}`, { cookie: adminCookie });
+  assert.equal(last.body.year, thisYear - 1);
+  assert.equal(last.body.months[10], `${thisYear - 1}-11`);
+  const rep = last.body.reps.find((r) => r.rep_id === repId);
+  assert.equal(rep.months[`${thisYear - 1}-11`], 4321);
+  assert.equal(rep.total, 4321);
+
+  // nonsense falls back to the current year instead of erroring
+  for (const bad of ['abc', '1999', '3000', '-5', '']) {
+    const r = await request(`/api/kpis/monthly-history?year=${bad}`, { cookie: adminCookie });
+    assert.equal(r.response.status, 200, `year=${bad}`);
+    assert.equal(r.body.year, thisYear, `year=${bad} -> ${r.body.year}`);
+  }
+
+  // a rep only ever sees their own row
+  const repCookie = await login(fixture.reps[0].email);
+  const mine = await request(`/api/kpis/monthly-history?year=${thisYear - 1}`, { cookie: repCookie });
+  assert.equal(mine.body.reps.length, 1);
+  assert.equal(mine.body.reps[0].rep_id, repId);
+});
