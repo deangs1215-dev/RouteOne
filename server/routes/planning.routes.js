@@ -322,9 +322,18 @@ router.get('/kpis/monthly-history', requireRole('admin', 'manager', 'office', 'r
     ORDER BY u.name
   `).all(...(scope.isRep ? [req.user.id] : []));
 
-  // January to December of the current calendar year (resets each January).
-  const year = new Date().getFullYear();
+  // January to December of one calendar year: the current year unless ?year= asks for another
+  // (the Monthly history tab pages back through earlier years). Anything that is not a plausible
+  // year falls back to the current one rather than erroring.
+  const thisYear = new Date().getFullYear();
+  const asked = Number.parseInt(req.query.year, 10);
+  const year = Number.isInteger(asked) && asked >= 2000 && asked <= thisYear + 1 ? asked : thisYear;
   const months = Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`);
+  // Years that actually have sales, so the page only offers years worth looking at.
+  const years = [...new Set((await dbx.prepare('SELECT DISTINCT month FROM rep_monthly_sales').all())
+    .map((r) => Number(String(r.month).slice(0, 4))).filter(Number.isInteger))];
+  if (!years.includes(thisYear)) years.push(thisYear);
+  years.sort((a, b) => a - b);
 
   const salesByMonth = await dbx.prepare(`
     SELECT rep_id, month, sales_value
@@ -341,7 +350,7 @@ router.get('/kpis/monthly-history', requireRole('admin', 'manager', 'office', 'r
     }
   }
 
-  res.json({ months, reps: [...byRep.values()].sort((a, b) => b.total - a.total) });
+  res.json({ year, years, months, reps: [...byRep.values()].sort((a, b) => b.total - a.total) });
 });
 
 export default router;
