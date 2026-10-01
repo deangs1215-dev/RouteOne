@@ -256,12 +256,23 @@ export default function Integration() {
                       <option value="hourly">Every hour</option>
                       <option value="4hours">Every 4 hours</option>
                       <option value="daily">Daily at…</option>
+                      <option value="twice_daily">Twice daily at…</option>
                     </select>
                   </Field>
                   {settings[`${entity}_sync_schedule`] === 'daily' && (
                     <Field label="Time">
                       <input className="input" type="time" value={settings[`${entity}_sync_daily_time`] || '02:00'} onChange={set(`${entity}_sync_daily_time`)} />
                     </Field>
+                  )}
+                  {settings[`${entity}_sync_schedule`] === 'twice_daily' && (
+                    <>
+                      <Field label="First run">
+                        <input className="input" type="time" value={settings[`${entity}_sync_daily_time`] || '08:00'} onChange={set(`${entity}_sync_daily_time`)} />
+                      </Field>
+                      <Field label="Second run">
+                        <input className="input" type="time" value={settings[`${entity}_sync_daily_time2`] || '17:00'} onChange={set(`${entity}_sync_daily_time2`)} />
+                      </Field>
+                    </>
                   )}
                 </div>
               ))}
@@ -283,12 +294,23 @@ export default function Integration() {
                 <select className="input" value={settings.rep_sync_schedule || 'off'} onChange={set('rep_sync_schedule')}>
                   <option value="off">Off (manual only)</option>
                   <option value="daily">Daily at…</option>
+                  <option value="twice_daily">Twice daily at…</option>
                 </select>
               </Field>
               {settings.rep_sync_schedule === 'daily' && (
                 <Field label="Time">
                   <input className="input" type="time" value={settings.rep_sync_daily_time || '03:00'} onChange={set('rep_sync_daily_time')} />
                 </Field>
+              )}
+              {settings.rep_sync_schedule === 'twice_daily' && (
+                <>
+                  <Field label="First run">
+                    <input className="input" type="time" value={settings.rep_sync_daily_time || '08:00'} onChange={set('rep_sync_daily_time')} />
+                  </Field>
+                  <Field label="Second run">
+                    <input className="input" type="time" value={settings.rep_sync_daily_time2 || '17:00'} onChange={set('rep_sync_daily_time2')} />
+                  </Field>
+                </>
               )}
               <button className="btn-secondary" onClick={save} disabled={busy === 'save'}>
                 {busy === 'save' ? 'Saving…' : 'Save schedule'}

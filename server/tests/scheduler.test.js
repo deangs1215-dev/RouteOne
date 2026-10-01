@@ -17,7 +17,7 @@ await resetBackend(dbx);
 const { setSetting, getSetting } = await import('../dbh.js');
 const { sendSyncDigest } = await import('../integration/syncDigest.js');
 const { sendAllRepDigests } = await import('../integration/repDigest.js');
-const { runAllNow, runRepSyncNow } = await import('../integration/scheduler.js');
+const { runAllNow, runRepSyncNow, isEntitySyncDue, repSyncDueNow } = await import('../integration/scheduler.js');
 const { runBackup, listBackups } = await import('../backup.js');
 const { runSync } = await import('../integration/sync.js');
 
@@ -105,4 +105,36 @@ test('customer_pricing bulk sync at scale: loads, then re-syncs unchanged', asyn
   assert.equal((await count()).n, existing + N); // re-sync adds nothing
   const sample = await dbx.prepare("SELECT contract_price FROM syspro_customer_pricing WHERE customer_code = 'C00007' AND product_code = 'P0000'").get();
   assert.equal(sample.contract_price, 10 + 7);
+});
+
+// "Twice daily at 08:00 and 17:00": driven through the real scheduler checks with the settings stored
+// exactly as the Integration form saves them. Slot times are built relative to "now" so the test does
+// not depend on the hour it runs; skipped within ~10 minutes of midnight, where "earlier today" breaks.
+test('twice-daily schedule is honoured by the scheduler (data syncs and rep match)', async (t) => {
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (mins < 15 || mins > 23 * 60 + 45) return t.skip('too close to midnight for a same-day slot test');
+  const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const earlier = hhmm(mins - 10);   // first slot already passed
+  const later = hhmm(Math.min(mins + 10, 23 * 60 + 59)); // second slot still ahead
+  for (const [dueFn, schedKey, t1, t2, lastKey, arg] of [
+    [isEntitySyncDue, 'customers_sync_schedule', 'customers_sync_daily_time', 'customers_sync_daily_time2', 'last_customers_sync_at', 'customers'],
+    [repSyncDueNow, 'rep_sync_schedule', 'rep_sync_daily_time', 'rep_sync_daily_time2', 'last_rep_sync_at', undefined]
+  ]) {
+    await setSetting(schedKey, 'twice_daily');
+    await setSetting(t1, earlier);
+    await setSetting(t2, later);
+    await setSetting(lastKey, new Date(Date.now() - 3600000).toISOString());          // last ran an hour ago
+    assert.equal(await dueFn(arg), true, `${schedKey}: first slot passed since the last run -> due`);
+    await setSetting(lastKey, new Date().toISOString());                                // just ran
+    assert.equal(await dueFn(arg), false, `${schedKey}: already ran after that slot -> not due`);
+    await setSetting(t2, earlier);                                                      // both slots in the past
+    await setSetting(lastKey, new Date(Date.now() - 3600000).toISOString());
+    assert.equal(await dueFn(arg), true, `${schedKey}: due`);
+    await setSetting(t1, '');                                                           // blank times (untouched form fields) fall back to 08:00 / 17:00, no crash
+    await setSetting(t2, '');
+    assert.equal(typeof (await dueFn(arg)), 'boolean');
+    await setSetting(schedKey, 'off');
+    assert.equal(await dueFn(arg), false, `${schedKey}: off -> never due`);
+  }
 });

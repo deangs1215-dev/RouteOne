@@ -5,6 +5,7 @@ import { dbx, getTodayISO } from '../db.js';
 import { getSetting, setSetting } from '../dbh.js';
 import { runSync, SYNC_ENTITIES, matchRep } from './sync.js';
 import { getProvider } from './providers.js';
+import { parseTime, slotDue } from './schedule.js';
 
 let running = false;
 
@@ -51,7 +52,7 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
 }
 
 // Check if a specific entity's sync is due
-async function isEntitySyncDue(entity) {
+export async function isEntitySyncDue(entity) {
   const schedule = await getSetting(`${entity}_sync_schedule`, 'off');
   if (schedule === 'off') return false;
 
@@ -61,9 +62,17 @@ async function isEntitySyncDue(entity) {
 
   if (schedule === 'hourly') return minsSince >= 60;
   if (schedule === '4hours') return minsSince >= 240;
+  // Twice a day, at two set times (default 08:00 and 17:00) - see schedule.js.
+  if (schedule === 'twice_daily') {
+    const first = parseTime(await getSetting(`${entity}_sync_daily_time`, ''), '08:00');
+    const second = parseTime(await getSetting(`${entity}_sync_daily_time2`, ''), '17:00');
+    return slotDue([first, second], last ? new Date(last).getTime() : null);
+  }
   if (schedule === 'daily') {
     const timeKey = `${entity}_sync_daily_time`;
-    const [h, m] = (await getSetting(timeKey, '02:00')).split(':').map(Number);
+    // `|| '02:00'`: the settings form saves '' for a time that was never touched, and a
+    // blank would parse to NaN and silently never fire.
+    const [h, m] = ((await getSetting(timeKey, '02:00')) || '02:00').split(':').map(Number);
     const now = new Date();
     // Fires once the scheduled time has passed today, not only in the exact
     // minute it lands on - an exact-minute match silently skips the whole day
@@ -120,15 +129,20 @@ async function runRepSync(trigger = 'schedule') {
 }
 
 // Is a rep sync due right now, given the schedule and the last run time?
-async function repSyncDueNow() {
+export async function repSyncDueNow() {
   const schedule = await getSetting('rep_sync_schedule', 'off');
   if (schedule === 'off') return false;
 
   const last = await getSetting('last_rep_sync_at', null);
   const minsSince = last ? (Date.now() - new Date(last).getTime()) / 60000 : Infinity;
 
+  if (schedule === 'twice_daily') {
+    const first = parseTime(await getSetting('rep_sync_daily_time', ''), '08:00');
+    const second = parseTime(await getSetting('rep_sync_daily_time2', ''), '17:00');
+    return slotDue([first, second], last ? new Date(last).getTime() : null);
+  }
   if (schedule === 'daily') {
-    const [h, m] = (await getSetting('rep_sync_daily_time', '03:00')).split(':').map(Number);
+    const [h, m] = ((await getSetting('rep_sync_daily_time', '03:00')) || '03:00').split(':').map(Number);
     const now = new Date();
     // Same catch-up fix as isEntitySyncDue above - fire once the scheduled
     // time has passed today (23h floor, not an exact-minute match), so a
