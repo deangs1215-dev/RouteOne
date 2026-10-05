@@ -5,6 +5,18 @@ import { requireRole, userCanAccessCustomer, withoutCostFields } from '../auth.j
 
 const router = Router();
 
+// Word-order-independent product search: every word typed must appear in the name or the code
+// ("red col" matches "COLOUR RED SPECIAL"). `a` is an optional table alias. Keep in step with
+// matchesWords() in client/src/search.js.
+function searchWhere(q, a = '') {
+  const col = (c) => (a ? `${a}.${c}` : c);
+  const words = String(q).trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  return {
+    sql: words.map(() => `(${col('name')} LIKE ? OR ${col('code')} LIKE ?)`).join(' AND ') || '1 = 1',
+    params: words.flatMap((w) => [`%${w}%`, `%${w}%`])
+  };
+}
+
 // Check if a price is still valid based on start/end dates
 function isPriceValid(startDate, endDate) {
   if (!startDate && !endDate) return true; // No date restrictions
@@ -18,7 +30,7 @@ router.get('/products', async (req, res) => {
   const { q, category_id, active } = req.query;
   const where = [];
   const params = [];
-  if (q) { where.push('(p.name LIKE ? OR p.code LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
+  if (q) { const w = searchWhere(q, 'p'); where.push(w.sql); params.push(...w.params); }
   if (category_id) { where.push('p.category_id = ?'); params.push(category_id); }
   if (active !== undefined) { where.push('p.active = ?'); params.push(active === 'false' ? 0 : 1); }
   const rows = await dbx.prepare(`
@@ -64,13 +76,14 @@ router.get('/products', async (req, res) => {
 router.get('/products/depot-stock', async (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.json([]);
+  const w = searchWhere(q);
   const rows = await dbx.prepare(`
     SELECT id, code, name, uom, pack_size
     FROM products
-    WHERE active = 1 AND (name LIKE ? OR code LIKE ?)
+    WHERE active = 1 AND ${w.sql}
     ORDER BY name
     LIMIT 50
-  `).all(`%${q}%`, `%${q}%`);
+  `).all(...w.params);
 
   if (!req.user.warehouse_id) {
     return res.json(rows.map((p) => ({ ...p, stock_qty: null }))); // no depot assigned - can't scope stock

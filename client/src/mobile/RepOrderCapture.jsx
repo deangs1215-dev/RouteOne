@@ -11,6 +11,7 @@ import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2, priceSourc
 import { queueWrite } from '../offline';
 import { useAuth } from '../auth';
 import { MobileHeader } from './MobileApp';
+import { matchesWords } from '../search';
 
 const VAT_RATE = 0.15;
 
@@ -153,9 +154,8 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   const boughtCount = useMemo(() => (products || []).filter((p) => p.times_bought > 0).length, [products]);
 
   const filtered = useMemo(() => {
-    const s = search.toLowerCase();
     const rows = (products || []).filter((p) =>
-      (!s || p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s)) &&
+      matchesWords(search, p.name, p.code) &&
       (!onlyBought || p.times_bought > 0) &&
       (!onlyInCart || cart[p.id])
     );

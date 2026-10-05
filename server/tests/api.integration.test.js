@@ -938,3 +938,16 @@ test('per-customer intelligence is shared safely between requests', async () => 
   const row = list.body.find((c) => c.id === id);
   assert.ok(row && row.suggested_products === undefined, 'list rows must not carry per-customer fields');
 });
+
+test('product search matches words in any order', async () => {
+  const adminCookie = await login(fixture.admin.email);
+  const all = await request('/api/products', { cookie: adminCookie });
+  const product = all.body.find((p) => p.name.trim().split(/\s+/).length >= 2) || all.body[0];
+  const words = product.name.trim().split(/\s+/);
+  const reversed = [...words].reverse().map((w) => w.slice(0, 3)).join(' ');
+  const found = await request(`/api/products?q=${encodeURIComponent(reversed)}`, { cookie: adminCookie });
+  assert.equal(found.response.status, 200);
+  assert.ok(found.body.some((p) => p.id === product.id), `"${reversed}" should find "${product.name}"`);
+  const none = await request(`/api/products?q=${encodeURIComponent(`${words[0]} zzzznotaword`)}`, { cookie: adminCookie });
+  assert.ok(!none.body.some((p) => p.id === product.id));
+});

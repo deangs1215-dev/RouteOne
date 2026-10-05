@@ -8,6 +8,7 @@ import OrderSendModal from './OrderSendModal';
 import ProductPurchaseHistory from './ProductPurchaseHistory';
 import { useAuth } from '../auth';
 import CustomerSearch from './CustomerSearch';
+import { matchesWords } from '../search';
 
 const VAT_RATE = 0.15;
 
@@ -168,10 +169,9 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   const selectedCustomer = pickedCustomer;
 
   const filtered = useMemo(() => {
-    const s = search.toLowerCase();
     const rows = products
       .filter((p) => filterMode === 'all' || p.times_bought > 0)
-      .filter((p) => !s || p.name.toLowerCase().includes(s) || p.code.toLowerCase().includes(s));
+      .filter((p) => matchesWords(search, p.name, p.code));
     // Sorted before the 60-item cap so "lowest to highest" reflects the actual
     // SYSPRO stock code (p.code), not just the first 60 alphabetical-by-name
     // matches re-sorted afterwards. numeric:true handles codes that carry a
