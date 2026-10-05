@@ -14,7 +14,27 @@ const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
 // --- Core: per-customer intelligence rows -------------------------------------
 
-export async function customerIntel(repId = null) {
+// Scoring every customer costs ~1.5 s on the live database (14,000 customers, each with several
+// correlated lookups), and the customer page, Sales AI, the actions list and visit planning all
+// need it. The inputs only change when orders, invoices or visits do (the SYSPRO syncs run hourly),
+// so one computation is shared for a few minutes - per rep scope, since quintiles are relative to
+// the rep's own book - and concurrent callers wait on the same run instead of starting more.
+// Cached rows are shared: callers must copy a row before changing it and must not sort in place.
+const INTEL_TTL_MS = process.env.NODE_ENV === 'test' ? 0 : 5 * 60 * 1000;
+const intelCache = new Map(); // repId|'all' -> { at, promise }
+
+export function customerIntel(repId = null) {
+  const key = repId ?? 'all';
+  const hit = intelCache.get(key);
+  if (hit && Date.now() - hit.at < INTEL_TTL_MS) return hit.promise;
+  const promise = computeCustomerIntel(repId);
+  intelCache.set(key, { at: Date.now(), promise });
+  // A failed run must not be served again for the next five minutes.
+  promise.catch(() => { if (intelCache.get(key)?.promise === promise) intelCache.delete(key); });
+  return promise;
+}
+
+async function computeCustomerIntel(repId = null) {
   const customers = await dbx.prepare(`
     SELECT c.id, c.name, c.city, c.classification, c.visit_frequency, c.status,
       c.rep_id, u.name AS rep_name,
@@ -139,15 +159,16 @@ export async function buildActions(intel, { repId = null, customerId = null } = 
 // Segments + risk for every customer (managers see all; reps their own book).
 router.get('/intel/customers', async (req, res) => {
   const scope = scopeForUser(req.user);
-  res.json((await customerIntel(scope.isRep ? req.user.id : null)).sort((a, b) => b.risk_score - a.risk_score));
+  res.json([...await customerIntel(scope.isRep ? req.user.id : null)].sort((a, b) => b.risk_score - a.risk_score));
 });
 
 // One customer's intel + product suggestions + its AI actions - used on customer pages.
 router.get('/intel/customer/:id', async (req, res) => {
   const scope = scopeForUser(req.user);
   // Reps only get intel on their own customers (quintiles also stay within their book).
-  const intel = (await customerIntel(scope.isRep ? req.user.id : null)).find((c) => c.id === Number(req.params.id));
-  if (!intel) return res.status(404).json({ error: 'Customer not found' });
+  const found = (await customerIntel(scope.isRep ? req.user.id : null)).find((c) => c.id === Number(req.params.id));
+  if (!found) return res.status(404).json({ error: 'Customer not found' });
+  const intel = { ...found }; // the cached row is shared - never write onto it
 
   // This customer's slice of the Sales AI recommended actions.
   intel.actions = await buildActions([intel], { customerId: intel.id });

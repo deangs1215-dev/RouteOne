@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { Modal, Field, ErrorNote } from './ui';
+import useCustomerSearch from '../useCustomerSearch';
 
 export const CATEGORIES = [
   { value: 'system_issue', label: 'System / App Issue' },
@@ -20,19 +21,14 @@ export default function SupportTicketModal({ onClose, onCreated }) {
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('other');
   const [priority, setPriority] = useState('normal');
-  const [customers, setCustomers] = useState([]);
+  const [pickedName, setPickedName] = useState('');
   const [selectedCustId, setSelectedCustId] = useState('');
   const [searchCust, setSearchCust] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { api.get('/customers').then(setCustomers).catch(() => {}); }, []);
-
-  const filtered = useMemo(() => {
-    const s = searchCust.toLowerCase();
-    if (!s) return [];
-    return customers.filter((c) => c.name.toLowerCase().includes(s) || c.code.toLowerCase().includes(s)).slice(0, 15);
-  }, [customers, searchCust]);
+  // Searched on the server as you type - the customer table is far too big to download.
+  const { results: filtered, loading: searching } = useCustomerSearch(searchCust, { minChars: 1 });
 
   const submit = async () => {
     setError('');
@@ -95,7 +91,7 @@ export default function SupportTicketModal({ onClose, onCreated }) {
         <Field label="Related customer (optional)">
           {selectedCustId ? (
             <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 text-sm font-medium text-slate-700">
-              <span>{customers.find((c) => c.id === Number(selectedCustId))?.name}</span>
+              <span>{pickedName}</span>
               <button type="button" onClick={() => { setSelectedCustId(''); setSearchCust(''); }} className="text-xs text-slate-400 hover:text-slate-600">
                 Change
               </button>
@@ -115,7 +111,7 @@ export default function SupportTicketModal({ onClose, onCreated }) {
                     <button
                       key={c.id}
                       type="button"
-                      onClick={() => { setSelectedCustId(c.id); setSearchCust(''); }}
+                      onClick={() => { setSelectedCustId(c.id); setPickedName(c.name); setSearchCust(''); }}
                       className="w-full text-left px-3 py-2 hover:bg-slate-50 text-sm"
                     >
                       <div className="font-medium">{c.name}</div>
@@ -124,7 +120,7 @@ export default function SupportTicketModal({ onClose, onCreated }) {
                   ))}
                 </div>
               )}
-              {searchCust && filtered.length === 0 && (
+              {searchCust && !searching && filtered.length === 0 && (
                 <div className="absolute top-full left-0 right-0 mt-1 rounded-lg border border-slate-200 bg-white shadow-lg z-10 px-3 py-2 text-sm text-slate-400">
                   No customers found
                 </div>

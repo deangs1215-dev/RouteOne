@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, addDaysISO } from '../api';
 import { Modal, Field, ErrorNote, Spinner } from './ui';
+import useCustomerSearch from '../useCustomerSearch';
 
 const TASK_TYPES = ['Call Customer', 'Visit Customer', 'Follow Up Quote', 'Follow Up Order', 'Resolve Query', 'Collect Payment', 'Deliver Sample', 'Other'];
 
@@ -13,7 +14,7 @@ const quickDates = () => ({
 });
 
 export default function TaskCreateModal({ customerId, customerName, onClose, onCreated }) {
-  const [customers, setCustomers] = useState([]);
+  const [pickedName, setPickedName] = useState('');
   const [selectedCustId, setSelectedCustId] = useState(customerId || '');
   const [preName, setPreName] = useState(customerName || '');
   const [taskType, setTaskType] = useState('');
@@ -24,22 +25,15 @@ export default function TaskCreateModal({ customerId, customerName, onClose, onC
   const [busy, setBusy] = useState(false);
 
   // Pre-selected from a customer screen: just resolve the name to show it.
-  // Otherwise load the full list so the rep can search and pick a customer.
+  // Otherwise the rep searches for a customer (matched on the server as they type).
   useEffect(() => {
-    if (customerId) {
-      if (!customerName) {
-        api.get(`/customers/${customerId}`).then((c) => setPreName(c.name)).catch(() => {});
-      }
-    } else {
-      api.get('/customers').then(setCustomers).catch(() => {});
+    if (customerId && !customerName) {
+      api.get(`/customers/${customerId}`).then((c) => setPreName(c.name)).catch(() => {});
     }
   }, [customerId, customerName]);
 
   const [searchCust, setSearchCust] = useState('');
-  const filtered = useMemo(() => {
-    const s = searchCust.toLowerCase();
-    return customers.filter((c) => c.name.toLowerCase().includes(s) || c.code.toLowerCase().includes(s)).slice(0, 15);
-  }, [customers, searchCust]);
+  const { results: filtered, loading: searching } = useCustomerSearch(searchCust, { minChars: 1 });
 
   const submit = async () => {
     setError('');
@@ -83,7 +77,7 @@ export default function TaskCreateModal({ customerId, customerName, onClose, onC
             </div>
           ) : selectedCustId ? (
             <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 text-sm font-medium text-slate-700">
-              <span>{customers.find((c) => c.id === selectedCustId)?.name}</span>
+              <span>{pickedName}</span>
               <button
                 type="button"
                 onClick={() => { setSelectedCustId(''); setSearchCust(''); }}
@@ -110,6 +104,7 @@ export default function TaskCreateModal({ customerId, customerName, onClose, onC
                       type="button"
                       onClick={() => {
                         setSelectedCustId(c.id);
+                        setPickedName(c.name);
                         setSearchCust('');
                       }}
                       className="w-full text-left px-3 py-2 hover:bg-slate-50 text-sm"
@@ -120,7 +115,7 @@ export default function TaskCreateModal({ customerId, customerName, onClose, onC
                   ))}
                 </div>
               )}
-              {searchCust && filtered.length === 0 && (
+              {searchCust && !searching && filtered.length === 0 && (
                 <div className="absolute top-full left-0 right-0 mt-1 rounded-lg border border-slate-200 bg-white shadow-lg z-10 px-3 py-2 text-sm text-slate-400">
                   No customers found
                 </div>

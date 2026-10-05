@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api, fmtR } from '../api';
 import { Card, Table, Modal, Field, Spinner, ErrorNote, Badge, PasswordInput, MultiSelect } from '../components/ui';
 import { useAuth } from '../auth';
+import CustomerSearch from '../components/CustomerSearch';
 
 export default function Users() {
   const { user } = useAuth();
@@ -127,7 +128,7 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
     home_address: u?.home_address || '', home_lat: u?.home_lat ?? '', home_lng: u?.home_lng ?? '',
     manager_warehouses: u?.manager_warehouses || []
   });
-  const [customers, setCustomers] = useState([]);
+  const [linkedCustomer, setLinkedCustomer] = useState(u?.customer_id ? { id: u.customer_id, name: u.customer_name || `Customer ${u.customer_id}` } : null);
   const [error, setError] = useState('');
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
@@ -141,12 +142,9 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
   const isCustomerRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'customer';
   const isRepRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'rep';
   const isManagerRole = roles.find((r) => String(r.id) === String(form.role_id))?.name === 'manager';
-  useEffect(() => {
-    if (isCustomerRole && customers.length === 0) api.get('/customers').then(setCustomers).catch(() => {});
-  }, [isCustomerRole]);
-
   const save = async (e) => {
     e.preventDefault();
+    if (isCustomerRole && !form.customer_id) return setError('Pick the customer account to link');
     try {
       const body = {
         ...form, role_id: Number(form.role_id),
@@ -191,10 +189,7 @@ function UserModal({ u, roles, warehouses, onClose, onSaved }) {
         </Field>
         {isCustomerRole && (
           <Field label="Linked customer account">
-            <select className="input" value={form.customer_id} onChange={set('customer_id')} required>
-              <option value="">Select…</option>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.code})</option>)}
-            </select>
+            <CustomerSearch value={linkedCustomer} onChange={(c) => { setLinkedCustomer(c); setForm({ ...form, customer_id: c ? c.id : '' }); }} />
           </Field>
         )}
         {isRepRole && (

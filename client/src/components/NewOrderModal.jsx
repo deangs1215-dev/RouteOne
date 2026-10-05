@@ -7,6 +7,7 @@ import OrderSummary from './OrderSummary';
 import OrderSendModal from './OrderSendModal';
 import ProductPurchaseHistory from './ProductPurchaseHistory';
 import { useAuth } from '../auth';
+import CustomerSearch from './CustomerSearch';
 
 const VAT_RATE = 0.15;
 
@@ -118,7 +119,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   // Fail closed: requires a confirmed non-rep role, not just "not confirmed
   // rep" - so the edit UI can never flash on before auth has actually loaded.
   const canEditPrice = !!user && user.role !== 'rep';
-  const [customers, setCustomers] = useState([]);
+  const [pickedCustomer, setPickedCustomer] = useState(null); // chosen via CustomerSearch
   const [custId, setCustId] = useState(customerId || '');
   const [products, setProducts] = useState([]);
   const [search, setSearch] = useState('');
@@ -155,10 +156,6 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
     setLines((ls) => ls.map((l) => (l.product.id === productId ? { ...l, ...patch } : l)));
 
   useEffect(() => {
-    if (!customerId) api.get('/customers').then(setCustomers).catch(() => {});
-  }, [customerId]);
-
-  useEffect(() => {
     if (!custId) return setProducts([]);
     api.get(`/products/for-customer/${custId}`).then((ps) => {
       setProducts(ps);
@@ -168,10 +165,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   }, [custId]);
 
   const boughtCount = useMemo(() => products.filter((p) => p.times_bought > 0).length, [products]);
-  const selectedCustomer = useMemo(
-    () => customers.find((c) => String(c.id) === String(custId)) || null,
-    [customers, custId]
-  );
+  const selectedCustomer = pickedCustomer;
 
   const filtered = useMemo(() => {
     const s = search.toLowerCase();
@@ -413,10 +407,8 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
       {!customerId && (
         <div className="mb-4">
           <Field label="Customer">
-            <select className="input" value={custId} onChange={(e) => setCustId(e.target.value)}>
-              <option value="">Select a customer...</option>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.code})</option>)}
-            </select>
+            <CustomerSearch value={pickedCustomer} autoFocus
+              onChange={(c) => { setPickedCustomer(c); setCustId(c ? String(c.id) : ''); }} />
           </Field>
         </div>
       )}

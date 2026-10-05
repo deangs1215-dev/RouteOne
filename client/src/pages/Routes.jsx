@@ -34,7 +34,7 @@ export default function RoutesPage() {
     api.get('/coverage').then(setCoverage).catch(() => {});
     // All customers (with locations) so the map can show this rep's accounts in
     // green and every other rep's in red behind the planned route.
-    api.get('/customers?scope=all').then(setAllCustomers).catch(() => {});
+    api.get('/customers/map').then(setAllCustomers).catch(() => {});
   }, []);
 
   const load = async () => {

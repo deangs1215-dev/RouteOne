@@ -6,6 +6,7 @@ import CycleImportModal from '../components/CycleImportModal';
 import CallCycleModal from '../components/CallCycleModal';
 import VisitPhotosModal from '../components/VisitPhotosModal';
 import { useAuth } from '../auth';
+import CustomerSearch from '../components/CustomerSearch';
 
 export default function Visits() {
   const { user } = useAuth();
@@ -139,15 +140,14 @@ function ViewPhotosButton({ visitId, customerName, onView }) {
 }
 
 function PlanVisitModal({ reps, isRep, onClose, onSaved }) {
-  const [customers, setCustomers] = useState([]);
+  const [cust, setCust] = useState(null);
   const [form, setForm] = useState({ customer_id: '', rep_id: '', planned_date: todayISO(), purpose: 'sales call' });
   const [error, setError] = useState('');
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
 
-  useEffect(() => { api.get('/customers').then(setCustomers).catch(() => {}); }, []);
-
   const save = async (e) => {
     e.preventDefault();
+    if (!form.customer_id) return setError('Select a customer');
     try {
       await api.post('/visits', { ...form, customer_id: Number(form.customer_id), rep_id: form.rep_id ? Number(form.rep_id) : undefined });
       onSaved();
@@ -159,10 +159,7 @@ function PlanVisitModal({ reps, isRep, onClose, onSaved }) {
       <form onSubmit={save} className="space-y-4">
         <ErrorNote error={error} />
         <Field label="Customer">
-          <select className="input" value={form.customer_id} onChange={set('customer_id')} required>
-            <option value="">Select…</option>
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
+          <CustomerSearch value={cust} onChange={(c) => { setCust(c); setForm({ ...form, customer_id: c ? String(c.id) : '' }); }} />
         </Field>
         {!isRep && (
           <Field label="Rep">

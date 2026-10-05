@@ -4,21 +4,29 @@ import { api, fmtDate } from '../api';
 import { Card, Table, Modal, Field, Spinner, ErrorNote, GradeBadge, Badge, usePagination, PageSizeSelect, Pagination } from '../components/ui';
 import { useAuth } from '../auth';
 
+const PAGE_LIMIT = 200;
+
 export default function Customers() {
   const { user } = useAuth();
   const [rows, setRows] = useState(null);
+  const [total, setTotal] = useState(0); // matching customers in the database (rows is capped at PAGE_LIMIT)
   const [q, setQ] = useState('');
   const [showNew, setShowNew] = useState(false);
   const { page, setPage, pageSize, setPageSize, totalPages, pageRows } = usePagination(rows);
   const canEdit = ['admin', 'manager', 'office'].includes(user.role);
 
+  // The customer table is ~14,000 rows, so the server returns the first PAGE_LIMIT matches
+  // (by name) plus the real total; typing in the search box narrows it down.
   const load = () => {
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ limit: String(PAGE_LIMIT), paged: '1' });
     if (q) params.set('q', q);
-    api.get(`/customers?${params}`).then(setRows).catch(console.error);
+    api.get(`/customers?${params}`).then((r) => { setRows(r.rows); setTotal(r.total); }).catch(console.error);
   };
 
-  useEffect(() => { load(); }, [q]);
+  useEffect(() => {
+    const timer = setTimeout(load, q ? 250 : 0);
+    return () => clearTimeout(timer);
+  }, [q]);
 
   return (
     <div className="space-y-4">
@@ -56,6 +64,9 @@ export default function Customers() {
                 </tr>
               ))}
             </Table>
+            {total > rows.length && (
+              <div className="px-1 pt-2 text-xs text-slate-400">Showing the first {rows.length} of {total.toLocaleString('en-ZA')} customers. Search by name, code or city to find others.</div>
+            )}
             {rows.length > 0 && <Pagination page={page} totalPages={totalPages} onChange={setPage} />}
           </>
         )}

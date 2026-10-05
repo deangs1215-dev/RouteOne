@@ -900,3 +900,41 @@ test('forgot-password emails a link that resets the password, once', async () =>
       .run(before.password_hash, before.token_version, rep.id);
   }
 });
+
+test('customer lists can be capped and paged, and the map list is lean', async () => {
+  const adminCookie = await login(fixture.admin.email);
+  const all = await request('/api/customers', { cookie: adminCookie });
+  assert.equal(all.response.status, 200);
+  assert.ok(Array.isArray(all.body) && all.body.length >= 2, 'fixture should have several customers');
+
+  const capped = await request('/api/customers?limit=1', { cookie: adminCookie });
+  assert.equal(capped.body.length, 1);
+  assert.equal(capped.body[0].name, all.body[0].name, 'cap keeps the name ordering');
+
+  const paged = await request('/api/customers?limit=1&paged=1', { cookie: adminCookie });
+  assert.equal(paged.body.rows.length, 1);
+  assert.equal(paged.body.total, all.body.length, 'total counts every match, not just the page');
+
+  const searched = await request(`/api/customers?paged=1&limit=5&q=${encodeURIComponent(all.body[0].name)}`, { cookie: adminCookie });
+  assert.ok(searched.body.rows.some((c) => c.id === all.body[0].id));
+  assert.ok(searched.body.total >= 1);
+
+  const map = await request('/api/customers/map', { cookie: adminCookie });
+  assert.equal(map.response.status, 200);
+  assert.ok(Array.isArray(map.body));
+  for (const c of map.body) assert.ok(c.map_lat != null && c.map_lng != null, 'map list only has located accounts');
+});
+
+test('per-customer intelligence is shared safely between requests', async () => {
+  const adminCookie = await login(fixture.admin.email);
+  const id = fixture.customers[0].id;
+  const first = await request(`/api/intel/customer/${id}`, { cookie: adminCookie });
+  assert.equal(first.response.status, 200, JSON.stringify(first.body));
+  assert.ok(Array.isArray(first.body.suggested_products));
+  const second = await request(`/api/intel/customer/${id}`, { cookie: adminCookie });
+  assert.deepEqual(second.body.segment, first.body.segment);
+  // The all-customers list must not pick up the per-customer extras written onto one row.
+  const list = await request('/api/intel/customers', { cookie: adminCookie });
+  const row = list.body.find((c) => c.id === id);
+  assert.ok(row && row.suggested_products === undefined, 'list rows must not carry per-customer fields');
+});

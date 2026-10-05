@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { dbx } from '../db.js';
 import { nextNumber, logActivity } from '../dbh.js';
 import { requireRole, scopeForUser } from '../auth.js';
-import { geoColumns, parseCoordinates } from '../geo.js';
+import { geoColumns, geoLat, parseCoordinates } from '../geo.js';
 
 const router = Router();
 
@@ -34,6 +34,12 @@ router.get('/customers', async (req, res) => {
   else if (rep_id) { where.push('c.rep_id = ?'); params.push(rep_id); }
   if (q) { where.push('(c.name LIKE ? OR c.code LIKE ? OR c.city LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`); }
   if (status) { where.push('c.status = ?'); params.push(status); }
+  // `limit` caps the rows returned (hard max 500). The full customer table is ~14,000 rows /
+  // 11 MB of JSON, so every list, picker and search box asks for a page and narrows with `q`
+  // instead of downloading everyone. `paged=1` answers { rows, total } so a screen can say
+  // "showing 100 of 14,010". Without `limit` the old behaviour (every matching row) is kept.
+  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 0, 0), 500);
+  const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
   const rows = await dbx.prepare(`
     SELECT c.*, u.name AS rep_name,
       w.code AS warehouse_code, w.name AS warehouse_name,
@@ -44,10 +50,25 @@ router.get('/customers', async (req, res) => {
     FROM customers c
     LEFT JOIN users u ON u.id = c.rep_id
     LEFT JOIN warehouses w ON w.id = c.warehouse_id
-    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ${whereSql}
     ORDER BY c.name
+    ${limit ? `LIMIT ${limit}` : ''}
   `).all(req.user.id, ...params);
+  if (req.query.paged === '1') {
+    const total = (await dbx.prepare(`SELECT COUNT(*) AS n FROM customers c ${whereSql}`).get(...params)).n;
+    return res.json({ rows, total });
+  }
   res.json(rows);
+});
+
+// Lean list for map backdrops: only accounts that have a location, and only the few fields a
+// marker needs (the full /customers rows are ~800 bytes each). Same visibility as scope=all.
+router.get('/customers/map', async (req, res) => {
+  res.json(await dbx.prepare(`
+    SELECT c.id, c.name, c.rep_id, u.name AS rep_name, ${geoColumns('c')}
+    FROM customers c LEFT JOIN users u ON u.id = c.rep_id
+    WHERE ${geoLat('c')} IS NOT NULL
+  `).all());
 });
 
 router.get('/customers/:id', async (req, res) => {

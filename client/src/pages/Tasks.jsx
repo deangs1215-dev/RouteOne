@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo } from 'react';
 import { api, fmtDate, todayISO } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
 import { useAuth } from '../auth';
+import CustomerSearch from '../components/CustomerSearch';
 
 const TASK_TYPES = ['Call Customer', 'Visit Customer', 'Follow Up Quote', 'Follow Up Order', 'Resolve Query', 'Collect Payment', 'Deliver Sample', 'Other'];
 const STATUSES = ['open', 'done'];
@@ -388,7 +389,7 @@ function EditTaskModal({ task, onClose, onSaved }) {
 }
 
 function CreateTaskModal({ users, isRep, currentUserId, onClose, onCreated }) {
-  const [customers, setCustomers] = useState([]);
+  const [cust, setCust] = useState(null);
   const [custId, setCustId] = useState('');
   const [repId, setRepId] = useState(isRep ? String(currentUserId) : '');
   const [taskType, setTaskType] = useState('');
@@ -396,10 +397,6 @@ function CreateTaskModal({ users, isRep, currentUserId, onClose, onCreated }) {
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    api.get('/customers').then(setCustomers).catch(() => {});
-  }, []);
 
   const submit = async () => {
     setError('');
@@ -432,10 +429,7 @@ function CreateTaskModal({ users, isRep, currentUserId, onClose, onCreated }) {
 
         <div>
           <label className="block text-sm font-semibold text-slate-700 mb-1">Customer *</label>
-          <select className="input w-full" value={custId} onChange={(e) => setCustId(e.target.value)}>
-            <option value="">Select customer...</option>
-            {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
+          <CustomerSearch value={cust} onChange={(c) => { setCust(c); setCustId(c ? String(c.id) : ''); }} />
         </div>
 
         {!isRep && (

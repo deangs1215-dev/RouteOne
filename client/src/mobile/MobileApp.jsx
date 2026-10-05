@@ -483,13 +483,18 @@ function RepCustomers() {
   const [mineOnly, setMineOnly] = useState(true);
   const [showAddProspect, setShowAddProspect] = useState(false);
 
-  // scope=all: reps see every account, but ones that aren't theirs render
-  // greyed-out and non-clickable (the detail endpoint is rep-scoped anyway).
-  // Fetched once regardless of the filter - "Mine"/"All" just slices the same
-  // rows locally so toggling is instant, no re-fetch.
-  const load = () => api.get(`/customers?scope=all&q=${encodeURIComponent(q)}`).then(setRows).catch(console.error);
-  useEffect(() => { load(); }, [q]);
-  const visible = rows ? (mineOnly ? rows.filter((c) => c.is_mine) : rows) : null;
+  // "Mine" asks for this rep's own accounts only. "All" asks for one page of every account that
+  // matches the search (greyed out unless it is theirs) - the full list is ~14,000 rows, far too
+  // much to download to a phone. Re-fetched when the search or the Mine/All toggle changes.
+  const ALL_LIMIT = 100;
+  const load = () => api.get(mineOnly
+    ? `/customers?q=${encodeURIComponent(q)}`
+    : `/customers?scope=all&limit=${ALL_LIMIT}&q=${encodeURIComponent(q)}`).then(setRows).catch(console.error);
+  useEffect(() => {
+    const timer = setTimeout(load, q ? 250 : 0);
+    return () => clearTimeout(timer);
+  }, [q, mineOnly]);
+  const visible = rows;
 
   return (
     <>
@@ -503,6 +508,7 @@ function RepCustomers() {
         <button className="btn-secondary w-full py-2.5" onClick={() => setShowAddProspect(true)}>
           ＋ New prospect (not yet a SYSPRO account)
         </button>
+        {!mineOnly && rows && rows.length >= ALL_LIMIT && <div className="text-xs text-slate-400">Showing the first {ALL_LIMIT} accounts - search to find others.</div>}
         {!rows ? <Spinner /> : visible.map((c) => {
           const mine = !!c.is_mine;
           const inner = (
@@ -554,12 +560,18 @@ function CustomersDark() {
   const [mineOnly, setMineOnly] = useState(true);
   const [showAddProspect, setShowAddProspect] = useState(false);
 
-  // scope=all: see every account; ones that aren't this rep's are greyed out
-  // and non-clickable. Fetched once regardless of filter - "Mine"/"All" just
-  // slices the same rows locally so toggling is instant, no re-fetch.
-  const load = () => api.get(`/customers?scope=all&q=${encodeURIComponent(q)}`).then(setRows).catch(console.error);
-  useEffect(() => { load(); }, [q]);
-  const visible = rows ? (mineOnly ? rows.filter((c) => c.is_mine) : rows) : null;
+  // "Mine" asks for this rep's own accounts only. "All" asks for one page of every account that
+  // matches the search (greyed out unless it is theirs) - the full list is ~14,000 rows, far too
+  // much to download to a phone. Re-fetched when the search or the Mine/All toggle changes.
+  const ALL_LIMIT = 100;
+  const load = () => api.get(mineOnly
+    ? `/customers?q=${encodeURIComponent(q)}`
+    : `/customers?scope=all&limit=${ALL_LIMIT}&q=${encodeURIComponent(q)}`).then(setRows).catch(console.error);
+  useEffect(() => {
+    const timer = setTimeout(load, q ? 250 : 0);
+    return () => clearTimeout(timer);
+  }, [q, mineOnly]);
+  const visible = rows;
 
   return (
     <>
@@ -580,6 +592,7 @@ function CustomersDark() {
           + New prospect (not yet a SYSPRO account)
         </button>
 
+        {!mineOnly && rows && rows.length >= ALL_LIMIT && <div className="text-xs text-slate-400">Showing the first {ALL_LIMIT} accounts - search to find others.</div>}
         {!rows ? <Spinner /> : visible.map((c) => {
           const mine = !!c.is_mine;
           const inner = (
