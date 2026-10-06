@@ -342,6 +342,53 @@ router.post('/orders/:id/repeat', async (req, res) => {
   await createOrder(req.user, { customer_id: source.customer_id, items, notes: `Repeat of ${source.number}` }, res);
 });
 
+// Send an existing order to telesales (or anyone else) after the fact - the same
+// email a rep's capture screen sends, for orders that were not captured that way
+// (e.g. a quote converted to an order). Open to the order's own rep and to office
+// roles. Configured recipients are branch-scoped as in createOrder, and a rep can
+// only use their own saved contacts. Body: { recipient_ids, personal_recipient_ids,
+// extra_email } - at least one address is required.
+router.post('/orders/:id/email-telesales', async (req, res) => {
+  const b = req.body || {};
+  const order = await dbx.prepare('SELECT id, rep_id, warehouse_id, status FROM orders WHERE id = ?').get(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (scopeForUser(req.user).isRep && order.rep_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your order' });
+  }
+  if (order.status === 'draft' || order.status === 'cancelled') {
+    return res.status(400).json({ error: `A ${order.status} order cannot be sent` });
+  }
+
+  const ids = (v) => (Array.isArray(v) ? v : []).filter((n) => Number.isInteger(n)).slice(0, 50);
+  const recipientIds = ids(b.recipient_ids);
+  const personalIds = ids(b.personal_recipient_ids);
+  const addresses = new Set();
+
+  if (recipientIds.length) {
+    const rows = await dbx.prepare(`
+      SELECT email FROM email_recipients
+      WHERE id IN (${recipientIds.map(() => '?').join(',')}) AND (warehouse_id = ? OR warehouse_id IS NULL)
+    `).all(...recipientIds, order.warehouse_id);
+    rows.forEach((r) => addresses.add(r.email.trim().toLowerCase()));
+  }
+  if (personalIds.length) {
+    const rows = await dbx.prepare(`
+      SELECT email FROM rep_email_contacts
+      WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
+    `).all(...personalIds, req.user.id);
+    rows.forEach((r) => addresses.add(r.email.trim().toLowerCase()));
+  }
+  if (isEmail(b.extra_email)) addresses.add(b.extra_email.trim().toLowerCase());
+
+  if (addresses.size === 0) return res.status(400).json({ error: 'Choose at least one recipient or type an email address' });
+
+  const draft = await buildOrderEmail(order.id);
+  const results = await Promise.allSettled([...addresses].map((to) => sendEmail({ ...draft, cc_addr: null, to_addr: to })));
+  const sent = results.filter((r) => r.status === 'fulfilled' && r.value?.status === 'sent').length;
+  await logActivity(req.user.id, 'email_telesales', 'order', order.id, { recipients: addresses.size, sent });
+  res.json({ ok: true, recipients: addresses.size, sent, queued: addresses.size - sent });
+});
+
 // Send an order to selected recipients (admin/manager only).
 router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (req, res) => {
   const { recipients = [], send_to_rep, send_to_customer } = req.body || {};
@@ -380,7 +427,7 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
       ref_id: order.id,
       to_addr: recip.email,
       cc_addr: null,
-      subject: `Sales order ${order.number} — ${order.customer_name} — ${fmtR(order.total)}`,
+      subject: `Sales order ${order.number} — ${order.customer_name} (${order.customer_code}) — ${fmtR(order.total)}`,
       body_html: await wrap(`Order ${order.number}`, inner)
     });
   }
@@ -392,7 +439,7 @@ router.post('/orders/:id/send-email', requireRole('admin', 'manager'), async (re
       ref_id: order.id,
       to_addr: order.rep_email,
       cc_addr: null,
-      subject: `Order confirmation: ${order.number} — ${order.customer_name}`,
+      subject: `Order confirmation ${order.number} — ${order.customer_name} (${order.customer_code}) — ${fmtR(order.total)}`,
       body_html: await wrap('Order confirmation', `<p>Your order <b>${order.number}</b> for <b>${esc(order.customer_name)}</b> has been confirmed.</p>${notesHtml(order)}${docTable(items, order)}`)
     });
   }

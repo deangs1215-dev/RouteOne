@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { dbx, PRICE_SOURCES, VAT_RATE, round2 } from '../db.js';
 import { nextNumber, logActivity, effectivePrice, effectivePriceSource, adjustOrderStock, getSetting } from '../dbh.js';
 import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
-import { buildQuoteEmail, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
+import { buildQuoteEmail, quoteSubject, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
 import { loadDoc } from '../integration/docData.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
 
@@ -336,7 +336,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
         <tr><td style="color:#64748b;padding:2px 12px 2px 0">Valid until</td><td>${quote.valid_until || ''}</td></tr>
       </table>
       ${notesHtml(quote)}
-      ${customerBlockHtml(quote)}
+      ${customerBlockHtml(quote, { contact: false })}
       ${docTable(items, quote, 'quote')}`;
 
     emailsToSend.push({
@@ -344,7 +344,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
       ref_id: quote.id,
       to_addr: recip.email,
       cc_addr: null,
-      subject: `Quotation ${quote.number} — ${quote.customer_name} — ${fmtR(quote.total)}`,
+      subject: quoteSubject(quote),
       body_html: await wrap(`Quote ${quote.number}`, inner)
     });
   }
@@ -356,7 +356,7 @@ router.post('/quotes/:id/send-email', requireRole('admin', 'manager'), async (re
       ref_id: quote.id,
       to_addr: quote.rep_email,
       cc_addr: null,
-      subject: `Quote confirmation: ${quote.number} — ${quote.customer_name}`,
+      subject: quoteSubject(quote),
       body_html: await wrap('Quote confirmation', `<p>Your quote <b>${quote.number}</b> for <b>${esc(quote.customer_name)}</b> has been sent.</p>${docTable(items, quote, 'quote')}`)
     });
   }

@@ -1049,3 +1049,67 @@ test('product search matches words in any order', async () => {
   const none = await request(`/api/products?q=${encodeURIComponent(`${words[0]} zzzznotaword`)}`, { cookie: adminCookie });
   assert.ok(!none.body.some((p) => p.id === product.id));
 });
+
+test('a converted order can be sent to telesales by its own rep, and only with real recipients', async () => {
+  const repCookie = await login(fixture.reps[0].email);
+  const otherCookie = await login(fixture.reps[1].email);
+  const opts = (cookie, extra = {}) => ({ cookie, origin: allowedOrigin, ...extra });
+
+  const quote = await request('/api/quotes', opts(repCookie, { method: 'POST', body: {
+    customer_id: fixture.customers[0].id, items: [{ product_id: fixture.product.id, qty: 1 }] } }));
+  assert.equal(quote.response.status, 200, JSON.stringify(quote.body));
+  const order = await request(`/api/quotes/${quote.body.id}/convert`, opts(repCookie, { method: 'POST' }));
+  assert.equal(order.response.status, 200, JSON.stringify(order.body));
+  const send = (cookie, body) => request(`/api/orders/${order.body.id}/email-telesales`, opts(cookie, { method: 'POST', body }));
+
+  // Nothing chosen, an invalid address, or another rep's saved contact -> refused.
+  assert.equal((await send(repCookie, {})).response.status, 400);
+  assert.equal((await send(repCookie, { extra_email: 'not-an-email' })).response.status, 400);
+  const theirs = await request('/api/my-email-contacts', opts(otherCookie, { method: 'POST', body: { name: 'Theirs', email: 'theirs@example.com' } }));
+  assert.equal((await send(repCookie, { personal_recipient_ids: [theirs.body.id] })).response.status, 400);
+  // Another rep cannot send this order at all.
+  assert.equal((await send(otherCookie, { extra_email: 'x@example.com' })).response.status, 403);
+
+  // The owner can, and the email logged is the full internal order email.
+  const ok = await send(repCookie, { extra_email: 'Telesales@Example.com' });
+  assert.equal(ok.response.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.recipients, 1);
+  const logged = await dbx.prepare("SELECT to_addr, body_html FROM email_log WHERE kind = 'order' AND ref_id = ? AND to_addr = ?")
+    .get(order.body.id, 'telesales@example.com');
+  assert.ok(logged, 'email logged to the typed address');
+  assert.match(logged.body_html, /Customer Code/);
+});
+
+test('every quote email has the same subject: type, number, customer (account), amount', async () => {
+  const adminCookie = await login(fixture.admin.email);
+  const repCookie = await login(fixture.reps[0].email);
+  const opts = (cookie, extra = {}) => ({ cookie, origin: allowedOrigin, ...extra });
+  const customer = fixture.customers[0];
+  await dbx.prepare('UPDATE customers SET email = ? WHERE id = ?').run('customer-subject-test@example.com', customer.id);
+  const desk = await request('/api/email-recipients', opts(adminCookie, { method: 'POST', body: { name: 'Quote Desk', email: 'quotedesk@example.com', category: 'orders' } }));
+  assert.equal(desk.response.status, 200, JSON.stringify(desk.body));
+
+  // Capture-time sends: customer, a copy to the rep, a typed address and a configured recipient.
+  const created = await request('/api/quotes', opts(repCookie, { method: 'POST', body: {
+    customer_id: customer.id, items: [{ product_id: fixture.product.id, qty: 2 }],
+    send_to_customer: true, send_to_rep: true, extra_email: 'typed-subject-test@example.com', recipient_ids: [desk.body.id] } }));
+  assert.equal(created.response.status, 200, JSON.stringify(created.body));
+  // Send-email button: configured recipient, the rep and the customer.
+  const sentBtn = await request(`/api/quotes/${created.body.id}/send-email`, opts(adminCookie, { method: 'POST', body: {
+    recipients: [desk.body.id], send_to_rep: true, send_to_customer: true } }));
+  assert.equal(sentBtn.response.status, 200, JSON.stringify(sentBtn.body));
+
+  // Capture-time sends are not awaited by the request, so wait for them to be logged.
+  let rows = [];
+  for (let i = 0; i < 40; i++) {
+    rows = await dbx.prepare("SELECT to_addr, subject FROM email_log WHERE kind = 'quote' AND ref_id = ?").all(created.body.id);
+    if (rows.length >= 8) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(rows.length >= 6, `expected several quote emails, got ${rows.length}`);
+  const fmt = (n) => 'R ' + Number(n).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const cust = await dbx.prepare('SELECT name, code FROM customers WHERE id = ?').get(customer.id);
+  const expected = `Quotation ${created.body.number} — ${cust.name} (${cust.code}) — ${fmt(created.body.total)}`;
+  for (const r of rows) assert.equal(r.subject, expected, `subject for ${r.to_addr}`);
+  await request(`/api/email-recipients/${desk.body.id}`, opts(adminCookie, { method: 'DELETE' }));
+});

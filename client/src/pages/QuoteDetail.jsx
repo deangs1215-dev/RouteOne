@@ -25,7 +25,7 @@ export default function QuoteDetail() {
   const convert = async () => {
     try {
       const order = await api.post(`/quotes/${id}/convert`);
-      navigate(`/orders/${order.id}`);
+      navigate(`/orders/${order.id}?send=1`);
     } catch (e) { setError(e.message); }
   };
 
