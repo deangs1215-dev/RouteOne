@@ -5,6 +5,7 @@ import { scopeForUser, requireRole, userCanAccessCustomer } from '../auth.js';
 import { buildOrderEmail, buildOrderConfirmationEmail, sendEmail, wrap, esc, companyDetails, docTable, customerBlockHtml, notesHtml } from '../integration/email.js';
 import { loadDoc } from '../integration/docData.js';
 import { buildDocumentPdf } from '../integration/pdf.js';
+import { liveOrderPrices } from '../integration/livePrice.js';
 
 const router = Router();
 
@@ -110,6 +111,55 @@ async function createOrder(user, b, res) {
   // it is stored in its own column rather than inside notes.
   const customerOrderNo = String(b.customer_order_no ?? '').trim().slice(0, 100) || null;
 
+  // Live SYSPRO check ("stop and confirm"). Prices are read straight from SYSPRO
+  // for this customer's lines, because the stored copy can be minutes-to-hours
+  // old and the rep has already quoted (and the customer signed) a total.
+  //  - A line whose live SYSPRO price differs from the price the client says it
+  //    showed (item.quoted_price) stops the whole order with a 409 listing the
+  //    changes. The client shows the new prices, the rep confirms (and, in the
+  //    rep app, the customer re-signs), and resubmits with the new quoted_price.
+  //  - A client that sends no quoted_price (older app version, "repeat order")
+  //    has nothing to compare against; it simply gets SYSPRO's live price.
+  //  - Office-typed override prices are the office's decision and never replaced.
+  //  - Drafts are not binding, so they are not checked.
+  // If SYSPRO cannot answer, the order goes ahead on stored prices and the
+  // outcome is recorded in the activity log (see livePrice.js for why).
+  const isRep = scopeForUser(user).isRep;
+  let live = { status: 'skipped', prices: new Map() };
+  if (b.status !== 'draft') {
+    const products = [];
+    for (const item of b.items) {
+      const p = await dbx.prepare('SELECT id, code, name, conv_factor_alt_uom, pack_weight_kg FROM products WHERE id = ?').get(item.product_id);
+      if (p) products.push(p);
+    }
+    live = await liveOrderPrices(customer.code, products);
+    const changes = [];
+    for (const item of b.items) {
+      const product = products.find((p) => p.id === Number(item.product_id));
+      const tier = product && live.prices.get(product.id);
+      if (!tier || (!isRep && item.unit_price != null)) continue;
+      const quoted = Number(item.quoted_price);
+      if (item.quoted_price != null && Number.isFinite(quoted) && Math.abs(quoted - tier.price) > 0.005) {
+        changes.push({
+          product_id: product.id, product_code: product.code, product_name: product.name,
+          qty: Number(item.qty), quoted_price: quoted, current_price: tier.price, source: tier.source
+        });
+      }
+    }
+    if (changes.length) {
+      return res.status(409).json({
+        error: `SYSPRO prices have changed for ${changes.length} line${changes.length === 1 ? '' : 's'} since they were quoted - please review and confirm the new prices.`,
+        code: 'price_changed',
+        changes
+      });
+    }
+  }
+  // Prices the rep/office explicitly accepted after an earlier stop - kept for the
+  // audit trail only (the accepted price is already this request's quoted_price).
+  const acceptedChanges = (Array.isArray(b.price_changes_accepted) ? b.price_changes_accepted : []).slice(0, 200)
+    .map((c) => ({ product_id: Number(c?.product_id), from: Number(c?.from), to: Number(c?.to) }))
+    .filter((c) => Number.isFinite(c.product_id) && Number.isFinite(c.from) && Number.isFinite(c.to));
+
   const create = () => dbx.transaction(async (tx) => {
     const number = await nextNumber('ORD', tx);
     const info = await tx.prepare(`
@@ -141,7 +191,10 @@ async function createOrder(user, b, res) {
       // Qty-aware pricing: quantity breaks from price rules apply per line.
       const requestedPrice = Number(item.unit_price);
       const officeOverrode = !scopeForUser(user).isRep && item.unit_price != null;
-      const unitPrice = officeOverrode ? requestedPrice : await effectivePrice(b.customer_id, product.id, qty, tx);
+      // SYSPRO's live price (checked before this transaction) wins over the stored
+      // copy; lines SYSPRO has no tier for fall back to RouteOne's own rules.
+      const liveTier = officeOverrode ? null : live.prices.get(product.id);
+      const unitPrice = officeOverrode ? requestedPrice : liveTier ? liveTier.price : await effectivePrice(b.customer_id, product.id, qty, tx);
       if (!Number.isFinite(unitPrice) || unitPrice < 0) throw new Error('Invalid unit price');
       // R1-016: SYSPRO has no price at all for this product (list_price and
       // every pricing tier are 0/null) - block the line the same way a
@@ -159,7 +212,7 @@ async function createOrder(user, b, res) {
       // R1-044: an explicit office-entered price is always a manual override,
       // regardless of what tier it happens to match numerically - otherwise
       // it's whichever tier await effectivePrice() actually used for this line.
-      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : await effectivePriceSource(b.customer_id, product.id, qty, tx);
+      const priceSource = officeOverrode ? PRICE_SOURCES.MANUAL_OVERRIDE : liveTier ? liveTier.source : await effectivePriceSource(b.customer_id, product.id, qty, tx);
       await insertItem.run(orderId, product.id, product.name, qty, product.uom, unitPrice, discount, lineTotal, priceSource);
     }
     if (subtotal === 0) throw new Error('Order has no valid lines');
@@ -172,7 +225,14 @@ async function createOrder(user, b, res) {
 
   try {
     const orderId = await create();
-    await logActivity(user.id, 'create', 'order', orderId, { customer: customer.name });
+    await logActivity(user.id, 'create', 'order', orderId, {
+      customer: customer.name,
+      // 'ok' = prices verified against SYSPRO at submit; 'unavailable' = SYSPRO did
+      // not answer, so stored prices were used and this order is worth a second look.
+      live_price_check: live.status,
+      ...(acceptedChanges.length ? { price_changes_accepted: acceptedChanges } : {}),
+      ...(live.error ? { live_price_error: live.error } : {})
+    });
     const order = await dbx.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     order.items = await dbx.prepare('SELECT * FROM order_items WHERE order_id = ?').all(orderId);
     // Submitted orders can be emailed to the customer, the rep, an ad-hoc

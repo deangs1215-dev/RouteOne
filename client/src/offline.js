@@ -164,6 +164,31 @@ export function discardOutboxItem(id) {
   persistOutbox(getOutbox().filter((o) => o.id !== id));
 }
 
+// A queued order that the server stopped because SYSPRO's price differs from the
+// quoted one (409 price_changed) keeps the server's change list on the item
+// (`price_changes`). Accepting means: re-quote each changed line at SYSPRO's
+// current price, note the acceptance for the audit trail, and send it again.
+// The server re-checks, so if SYSPRO moved again meanwhile it is stopped again.
+export function acceptOutboxPriceChanges(id) {
+  const outbox = getOutbox();
+  const item = outbox.find((o) => o.id === id);
+  if (!item?.price_changes?.length || !item.body?.items) return;
+  const byProduct = new Map(item.price_changes.map((c) => [c.product_id, c]));
+  item.body = {
+    ...item.body,
+    items: item.body.items.map((line) => (byProduct.has(line.product_id) ? { ...line, quoted_price: byProduct.get(line.product_id).current_price } : line)),
+    price_changes_accepted: [
+      ...(item.body.price_changes_accepted || []),
+      ...item.price_changes.map((c) => ({ product_id: c.product_id, from: c.quoted_price, to: c.current_price }))
+    ]
+  };
+  delete item.price_changes;
+  delete item.error;
+  item.status = 'pending';
+  persistOutbox(outbox);
+  flushOutbox();
+}
+
 let flushing = false;
 export async function flushOutbox() {
   if (flushing || !navigator.onLine) return;
@@ -201,6 +226,9 @@ export async function flushOutbox() {
         live.status = 'failed';
         live.error = e.message;
         live.failed_at = new Date().toISOString();
+        // Keep the price-change details so the rep can see and accept them (the
+        // customer already signed the original, so this can't ask for a re-sign).
+        if (e.status === 409 && e.data?.code === 'price_changed') live.price_changes = e.data.changes;
         persistOutbox(outbox);
       }
     }

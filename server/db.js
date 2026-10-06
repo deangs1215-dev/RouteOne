@@ -117,6 +117,10 @@ for (const stmt of [
   'ALTER TABLE customers ADD COLUMN ship_to_address TEXT',
   'ALTER TABLE customers ADD COLUMN ship_to_city TEXT',
   'ALTER TABLE customers ADD COLUMN ship_to_postcode TEXT',
+  // Set when a planned visit is edited/rescheduled (PUT /visits/:id). schema.sql
+  // has it for new databases, but older ones were created without it and the
+  // edit failed with "no such column: updated_at".
+  'ALTER TABLE visits ADD COLUMN updated_at TEXT',
   // Covering index for products.routes.js's "all pricing for this customer"
   // lookup (WHERE customer_code = ?, the /products/for-customer/:id hot path
   // reps hit on every order/quote capture). syspro_customer_pricing is a

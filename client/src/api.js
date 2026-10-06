@@ -36,6 +36,7 @@ async function request(method, path, body) {
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
+    err.data = data; // lets a caller read structured details, e.g. a 409 price_changed list
     throw err;
   }
   return data;

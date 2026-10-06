@@ -23,10 +23,18 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
   running = true;
   const results = [];
   try {
-    const entitiesToSync = onlyDue && trigger !== 'manual' ? await getEntitiesDueNow() : SYNC_ENTITIES;
+    const entitiesToSync = onlyDue && trigger !== 'manual' ? await getEntitiesDueNow() : [...SYNC_ENTITIES];
     if (entitiesToSync.length === 0) {
       running = false;
       return [];
+    }
+    // The big customer_pricing sync overwrites the contract columns from its own
+    // (slower, sometimes incomplete) view. Re-applying the contract view straight
+    // after it keeps that window to the minutes the write takes, instead of
+    // waiting for contract_pricing's own 15-minute turn.
+    if (entitiesToSync.includes('customer_pricing') && !entitiesToSync.includes('contract_pricing') &&
+        ((await getSetting('contract_pricing_sync_schedule', '')) || DEFAULT_SCHEDULES.contract_pricing) !== 'off') {
+      entitiesToSync.splice(entitiesToSync.indexOf('customer_pricing') + 1, 0, 'contract_pricing');
     }
 
     for (const entity of entitiesToSync) {
@@ -36,6 +44,10 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
         await setSetting(`last_${entity}_sync_at`, new Date().toISOString());
       } catch (e) {
         results.push({ entity, error: e.message });
+        // A frequent sync that fails (view not deployed yet, SYSPRO briefly
+        // unreachable) would otherwise be retried on EVERY one-minute tick, since
+        // the "last run" only advances on success. Retry at its normal cadence.
+        if (entity === 'contract_pricing') await setSetting(`last_${entity}_sync_at`, new Date().toISOString());
       }
     }
 
@@ -51,15 +63,22 @@ async function runAll(trigger = 'schedule', onlyDue = true) {
   return results;
 }
 
+// The contract/buying-group price sync is small (seconds) and the one whose
+// staleness costs money, so unlike every other entity it is ON by default. The
+// Integration form saves an untouched schedule as '' - treated as "default".
+export const DEFAULT_SCHEDULES = { contract_pricing: '15min' };
+
 // Check if a specific entity's sync is due
 export async function isEntitySyncDue(entity) {
-  const schedule = await getSetting(`${entity}_sync_schedule`, 'off');
+  const schedule = (await getSetting(`${entity}_sync_schedule`, '')) || DEFAULT_SCHEDULES[entity] || 'off';
   if (schedule === 'off') return false;
 
   const lastKey = `last_${entity}_sync_at`;
   const last = await getSetting(lastKey, null);
   const minsSince = last ? (Date.now() - new Date(last).getTime()) / 60000 : Infinity;
 
+  if (schedule === '15min') return minsSince >= 15;
+  if (schedule === '30min') return minsSince >= 30;
   if (schedule === 'hourly') return minsSince >= 60;
   if (schedule === '4hours') return minsSince >= 240;
   // Twice a day, at two set times (default 08:00 and 17:00) - see schedule.js.

@@ -9,6 +9,7 @@ import ProductPurchaseHistory from './ProductPurchaseHistory';
 import { useAuth } from '../auth';
 import CustomerSearch from './CustomerSearch';
 import { matchesWords } from '../search';
+import PriceChangePanel from './PriceChangePanel';
 
 const VAT_RATE = 0.15;
 
@@ -137,6 +138,12 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
   const [delivery, setDelivery] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // Live SYSPRO price check at submit (server: orders.routes.js): the server stops
+  // the order when SYSPRO's price for a line differs from the one shown. Nothing is
+  // submitted until the changes are accepted; accepted prices become `priceFixes`.
+  const [priceChanges, setPriceChanges] = useState(null);
+  const [priceFixes, setPriceFixes] = useState({}); // productId -> { price, source }
+  const [acceptedChanges, setAcceptedChanges] = useState([]);
   // R1-052: 'builder' (product lines) -> 'notes' (Order/Quote Notes & Special
   // Instructions, its own step) -> 'summary' (final review, notes shown
   // read-only). Was a single showSummary boolean before this ticket - notes
@@ -204,7 +211,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
       const n = Number(l.price_override);
       if (Number.isFinite(n)) return n;
     }
-    return unitPriceFor(l.product, qty);
+    return priceFixes[l.product.id]?.price ?? unitPriceFor(l.product, qty);
   };
 
   const setQty = (productId, qty) =>
@@ -234,6 +241,9 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
         // own price even if a request were crafted by hand.
         items: lines.map((l) => {
           const item = { product_id: l.product.id, qty: Number(l.qty) };
+          // The price shown on screen; the server checks it against SYSPRO's live
+          // price (see the stop-and-confirm handling below). Quotes aren't checked.
+          if (kind !== 'quote') item.quoted_price = priceForLine(l);
           if (canEditPrice && l.price_override != null && l.price_override !== '') {
             const n = Number(l.price_override);
             if (Number.isFinite(n)) item.unit_price = n;
@@ -243,7 +253,8 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
         }),
         notes: notes || null,
         customer_order_no: kind === 'quote' ? undefined : customerOrderNo || null,
-        delivery_instructions: kind === 'quote' ? undefined : delivery || null
+        delivery_instructions: kind === 'quote' ? undefined : delivery || null,
+        price_changes_accepted: kind === 'quote' || !acceptedChanges.length ? undefined : acceptedChanges
       });
       // Setting createdOrder alone is enough to switch to the confirmation
       // screen (see the render branch above) - busy is left true rather than
@@ -251,9 +262,26 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
       // screen's Submit button entirely.
       setCreatedOrder(result);
     } catch (err) {
-      setError(err.message);
+      if (kind !== 'quote' && err.status === 409 && err.data?.code === 'price_changed') {
+        // Nothing was saved - show what changed and wait for it to be accepted.
+        setPriceChanges(err.data.changes);
+        setError('');
+      } else {
+        setError(err.message);
+      }
       setBusy(false);
     }
+  };
+
+  const acceptPriceChanges = () => {
+    setPriceFixes((fixes) => {
+      const next = { ...fixes };
+      for (const c of priceChanges) next[c.product_id] = { price: c.current_price, source: c.source };
+      return next;
+    });
+    setAcceptedChanges((prev) => [...prev, ...priceChanges.map((c) => ({ product_id: c.product_id, from: c.quoted_price, to: c.current_price }))]);
+    setPriceChanges(null);
+    setError('');
   };
 
   // R1-029/030: shown the instant the order/quote actually exists server-side,
@@ -327,13 +355,18 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
       footer={
         <div className="flex gap-2">
           <button className="btn-secondary" onClick={() => setStep('notes')} disabled={busy}>Back</button>
-          <button className="btn-primary" disabled={busy} onClick={confirmSubmit}>
+          <button className="btn-primary" disabled={busy || !!priceChanges} onClick={confirmSubmit}>
             {busy ? 'Submitting...' : kind === 'quote' ? 'Create quote' : 'Submit order'}
           </button>
         </div>
       }
     >
       <ErrorNote error={error} />
+      {priceChanges && (
+        <div className="mb-3">
+          <PriceChangePanel changes={priceChanges} acceptLabel="Accept new prices" onAccept={acceptPriceChanges} onBack={() => { setPriceChanges(null); setStep('builder'); }} backLabel="Back to order" />
+        </div>
+      )}
 
       <div>
         <OrderSummary
@@ -369,9 +402,10 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
               uom: l.product.uom,
               discount_pct: discount,
               line_total: round2(qty * unitPrice * (1 - discount / 100)),
-              price_source: priceSourceForLine(l.product, unitPrice, {
-                overridden: l.price_override != null && l.price_override !== ''
-              })
+              price_source: (!(l.price_override != null && l.price_override !== '') && priceFixes[l.product.id]?.source) ||
+                priceSourceForLine(l.product, unitPrice, {
+                  overridden: l.price_override != null && l.price_override !== ''
+                })
             };
           })}
           customer={selectedCustomer || { name: 'Customer', contact_name: '', address: '', city: '' }}

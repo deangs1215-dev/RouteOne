@@ -22,6 +22,7 @@ const allowedOrigin = 'http://localhost:5190';
 const testPassword = 'RouteOne-Test-Password-2026!';
 let server;
 let fixture;
+const livePriceFile = path.join(tempDir, 'live-prices.json');
 
 function runNode(script, extraEnv = {}) {
   return new Promise((resolve, reject) => {
@@ -140,6 +141,7 @@ before(async () => {
     loadUsers
   };
 
+  fs.writeFileSync(livePriceFile, '{}'); // stands in for SYSPRO's answer to the live price check; tests rewrite it
   server = spawn(process.execPath, ['server/index.js'], {
     cwd: projectRoot,
     env: {
@@ -148,7 +150,8 @@ before(async () => {
       DATABASE_PATH: databasePath,
       DISABLE_SCHEDULERS: '1',
       APP_ORIGIN: allowedOrigin,
-      NODE_ENV: 'test'
+      NODE_ENV: 'test',
+      LIVE_PRICE_TEST_FILE: livePriceFile
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -260,6 +263,101 @@ test('rep-supplied prices and discounts cannot override server pricing', async (
   assert.ok(result.body.items[0].unit_price > 0.01);
   assert.equal(result.body.items[0].discount_pct, 0);
   assert.ok(result.body.total > 0);
+});
+
+// --- Live SYSPRO price check at order submit ("stop and confirm") ---
+// The server process reads SYSPRO's answer from livePriceFile (test hook in
+// integration/livePrice.js), so each case below sets what "SYSPRO" says right now.
+const setSysproAnswer = (answer) => fs.writeFileSync(livePriceFile, JSON.stringify(answer));
+const contractRow = (perKg) => ({ contract_price: perKg, contract_start_date: '2020-01-01', contract_end_date: '2099-12-31' });
+async function liveCase() {
+  const customer = await dbx.prepare('SELECT id, code FROM customers WHERE id = ?').get(fixture.customers[0].id);
+  const product = await dbx.prepare('SELECT id, code, conv_factor_alt_uom, pack_weight_kg FROM products WHERE id = ?').get(fixture.product.id);
+  const factor = product.conv_factor_alt_uom || product.pack_weight_kg || 1;
+  const perKg = 33.33;
+  const livePrice = Math.round(perKg * factor * 100 + 1e-9) / 100;
+  return { customer, product, perKg, livePrice, answer: { [customer.code]: { [product.code]: contractRow(perKg) } } };
+}
+const countOrders = async (customerId) => (await dbx.prepare('SELECT COUNT(*) AS n FROM orders WHERE customer_id = ?').get(customerId)).n;
+const lastOrderActivity = async (orderId) => JSON.parse((await dbx.prepare("SELECT detail FROM activity_log WHERE entity_type = 'order' AND entity_id = ? ORDER BY id DESC").get(orderId)).detail);
+
+test('live price check: a changed SYSPRO price stops the order, confirming it saves at the SYSPRO price', async () => {
+  const cookie = await login(fixture.reps[0].email);
+  const { customer, product, livePrice, answer } = await liveCase();
+  setSysproAnswer(answer);
+  const before = await countOrders(customer.id);
+  const post = (quoted, extra = {}) => request('/api/orders', {
+    method: 'POST', cookie, origin: allowedOrigin,
+    body: { customer_id: customer.id, items: [{ product_id: product.id, qty: 2, quoted_price: quoted }], ...extra }
+  });
+
+  // The rep was shown a different price (stale snapshot) -> stop, nothing saved.
+  const stopped = await post(livePrice + 100);
+  assert.equal(stopped.response.status, 409, JSON.stringify(stopped.body));
+  assert.equal(stopped.body.code, 'price_changed');
+  assert.equal(stopped.body.changes.length, 1);
+  assert.equal(stopped.body.changes[0].product_id, product.id);
+  assert.equal(stopped.body.changes[0].quoted_price, livePrice + 100);
+  assert.equal(stopped.body.changes[0].current_price, livePrice);
+  assert.equal(stopped.body.changes[0].source, 'contract');
+  assert.equal(await countOrders(customer.id), before, 'a stopped order must not be saved');
+
+  // Rep accepts the new price: the client resubmits with it as the quoted price.
+  const accepted = await post(livePrice, { price_changes_accepted: [{ product_id: product.id, from: livePrice + 100, to: livePrice }] });
+  assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.items[0].unit_price, livePrice);
+  assert.equal(accepted.body.items[0].price_source, 'contract');
+  assert.equal(accepted.body.items[0].line_total, Math.round(livePrice * 2 * 100 + 1e-9) / 100);
+  const activity = await lastOrderActivity(accepted.body.id);
+  assert.equal(activity.live_price_check, 'ok');
+  assert.deepEqual(activity.price_changes_accepted, [{ product_id: product.id, from: livePrice + 100, to: livePrice }]);
+});
+
+test('live price check: the SYSPRO price is used even when the stored copy is stale, and older clients get it silently', async () => {
+  const cookie = await login(fixture.reps[0].email);
+  const { customer, product, livePrice, answer } = await liveCase();
+  setSysproAnswer(answer);
+  const send = (item) => request('/api/orders', { method: 'POST', cookie, origin: allowedOrigin, body: { customer_id: customer.id, items: [item] } });
+  // Quoted price already equals SYSPRO's: no stop, and the order carries SYSPRO's price (stored data knows nothing of this contract).
+  const matching = await send({ product_id: product.id, qty: 1, quoted_price: livePrice });
+  assert.equal(matching.response.status, 200, JSON.stringify(matching.body));
+  assert.equal(matching.body.items[0].unit_price, livePrice);
+  // No quoted price at all (older app / repeat order): nothing to compare against, SYSPRO's price is applied.
+  const legacy = await send({ product_id: product.id, qty: 1 });
+  assert.equal(legacy.response.status, 200, JSON.stringify(legacy.body));
+  assert.equal(legacy.body.items[0].unit_price, livePrice);
+  // Drafts are not binding and not checked.
+  const draft = await request('/api/orders', { method: 'POST', cookie, origin: allowedOrigin, body: { customer_id: customer.id, status: 'draft', items: [{ product_id: product.id, qty: 1, quoted_price: livePrice + 50 }] } });
+  assert.equal(draft.response.status, 200, JSON.stringify(draft.body));
+});
+
+test('live price check: SYSPRO unreachable does not block the order, and is recorded', async () => {
+  const cookie = await login(fixture.reps[0].email);
+  const { customer, product, livePrice } = await liveCase();
+  setSysproAnswer({ __fail: 'SYSPRO did not answer' });
+  const res = await request('/api/orders', {
+    method: 'POST', cookie, origin: allowedOrigin,
+    body: { customer_id: customer.id, items: [{ product_id: product.id, qty: 1, quoted_price: livePrice + 100 }] }
+  });
+  assert.equal(res.response.status, 200, JSON.stringify(res.body));
+  assert.notEqual(res.body.items[0].unit_price, livePrice, 'falls back to the stored price');
+  const activity = await lastOrderActivity(res.body.id);
+  assert.equal(activity.live_price_check, 'unavailable');
+  assert.match(activity.live_price_error, /did not answer/);
+  setSysproAnswer({});
+});
+
+test('live price check: an office-typed override price is never replaced by the SYSPRO price', async () => {
+  const { customer, product, livePrice, answer } = await liveCase();
+  setSysproAnswer(answer);
+  const res = await request('/api/orders', {
+    method: 'POST', cookie: await login(fixture.admin.email), origin: allowedOrigin,
+    body: { customer_id: customer.id, items: [{ product_id: product.id, qty: 1, unit_price: livePrice + 7, quoted_price: livePrice + 7 }] }
+  });
+  assert.equal(res.response.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.items[0].unit_price, livePrice + 7);
+  assert.equal(res.body.items[0].price_source, 'manual_override');
+  setSysproAnswer({});
 });
 
 test('rep cannot mutate or convert another rep quote', async () => {

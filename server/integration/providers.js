@@ -42,6 +42,7 @@ export async function sysproConfig(overrides = {}) {
       products: await getSetting('syspro_view_products', '') || 'vw_FS_Products',
       stock: await getSetting('syspro_view_stock', '') || 'vw_FS_Stock',
       customer_pricing: await getSetting('syspro_view_customer_pricing', '') || 'vw_FS_CustomerPricing_ContractBuyingGroup',
+      contract_pricing: await getSetting('syspro_view_contract_pricing', '') || 'vw_FS_ContractPricing',
       invoices: await getSetting('syspro_view_invoices', '') || 'vw_FS_Invoices',
       invoice_lines: await getSetting('syspro_view_invoice_lines', '') || 'vw_FS_InvoiceLines',
       rep_sales: await getSetting('syspro_view_rep_sales', '') || 'vw_FS_RepSalesByMonth',
@@ -102,6 +103,7 @@ const sysproProvider = {
       products: 500000,
       stock: 1000000,
       customer_pricing: 5000000,  // increased from 1M to handle ~13M SYSPRO view (will fetch TOP 5M)
+      contract_pricing: 1000000,  // contracts + buying groups only: ~85k rows today
       invoices: 1000000,
       invoice_lines: 500000,
       rep_sales: 200000,
@@ -127,6 +129,7 @@ const sysproProvider = {
     // instead of blocking for the better part of an hour.
     const timeouts = {
       customer_pricing: 2700000, // 45 min (~20 min observed, generous headroom)
+      contract_pricing: 300000,  // 5 min - should answer in seconds; this runs every 15 min so it must not hang long
       stock: 900000,             // 15 min
       invoices: 900000,
       invoice_lines: 600000,     // 10 min - only a 30-day window, but ArTrnDetail itself is huge
@@ -190,6 +193,10 @@ const DEMO_ROWS = {
   customer_pricing: [
     { customer_code: 'GOLD001', product_code: 'FLR-001', contract_price: 176.5, buying_group_price: null, price_code_price: null },
     { customer_code: 'GOLD001', product_code: 'SYS-P001', contract_price: 265.0, buying_group_price: null, price_code_price: null }
+  ],
+  contract_pricing: [
+    { customer_code: 'GOLD001', product_code: 'FLR-001', contract_price: 176.5, contract_start_date: null, contract_end_date: null, buying_group_price: null, buying_group_start_date: null, buying_group_end_date: null },
+    { customer_code: 'GOLD001', product_code: 'SYS-P001', contract_price: 265.0, contract_start_date: null, contract_end_date: null, buying_group_price: null, buying_group_start_date: null, buying_group_end_date: null }
   ]
 };
 

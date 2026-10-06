@@ -4,6 +4,7 @@
 import { dbx, packWeightKg, getTodayISO } from '../db.js';
 import { getSetting } from '../dbh.js';
 import { getProvider } from './providers.js';
+import { noteMainViewContracts, checkContractPricing } from './contractCheck.js';
 
 // Every upserter takes (row, conn): conn is the transaction handle the row is
 // written in (or dbx itself).
@@ -287,6 +288,90 @@ const upsertCustomerPricing = (row, conn) => {
   });
 };
 
+// contract_pricing: contract + buying-group prices only, from the small
+// vw_FS_ContractPricing view, so they can be refreshed every 15-30 minutes
+// instead of waiting for the multi-million-row customer_pricing sync. It writes
+// ONLY the contract/buying-group columns - price_code_price stays whatever the
+// customer_pricing sync put there - so the two never fight over a column they
+// do not both own. Rows for pairs the view no longer returns are cleared by
+// clearVanishedContracts below.
+const CONTRACT_COLUMNS = PRICING_COLUMNS.filter((c) => c.name !== 'price_code_price');
+
+const contractBulkRow = (row) => {
+  const out = pricingBulkRow(row);
+  if (!out) return null;
+  delete out.price_code_price;
+  return out;
+};
+
+const upsertContractPricing = (row, conn) => {
+  return conn.upsert('syspro_customer_pricing', {
+    keys: { customer_code: toSafeValue(row.customer_code), product_code: toSafeValue(row.product_code) },
+    set: {
+      contract_price: toSafeValue(row.contract_price),
+      buying_group_price: toSafeValue(row.buying_group_price),
+      contract_start_date: toSafeValue(row.contract_start_date),
+      contract_end_date: toSafeValue(row.contract_end_date),
+      buying_group_start_date: toSafeValue(row.buying_group_start_date),
+      buying_group_end_date: toSafeValue(row.buying_group_end_date)
+    },
+    now: ['synced_at']
+  });
+};
+
+// A contract that is deleted or edited out of scope simply stops appearing in
+// the view, and an upsert never notices an absent row - the old price would be
+// quoted until it expired. So after each run, contract/buying-group values for
+// pairs the view did not return are cleared.
+//
+// Guard: if the view suddenly returns far fewer live contracts than RouteOne
+// holds, it is more likely broken (cache table mid-rebuild, partial read) than
+// a genuine mass cancellation - clearing then would recreate the exact
+// "contracts missing" failure this sync exists to prevent. Nothing is cleared
+// and a warning is raised instead. Rows already past their own end date are
+// not counted: effectivePriceDetail ignores them anyway, so a month-end
+// mass-expiry must not trip the guard.
+const MASS_CLEAR_FLOOR = 500;
+const MASS_CLEAR_FRACTION = 0.25;
+
+async function clearVanishedContracts(conn, rows, today = getTodayISO()) {
+  const key = (c, p) => `${c}\u0000${p}`;
+  const incoming = new Set();
+  for (const r of rows) {
+    const c = toSafeValue(r.customer_code);
+    const p = toSafeValue(r.product_code);
+    if (c != null && p != null) incoming.add(key(String(c), String(p)));
+  }
+  const stored = await conn.prepare(`
+    SELECT customer_code, product_code, contract_price, contract_end_date, buying_group_price, buying_group_end_date
+    FROM syspro_customer_pricing
+    WHERE contract_price IS NOT NULL OR buying_group_price IS NOT NULL
+  `).all();
+  const live = (price, end) => price != null && (!end || String(end).slice(0, 10) >= today);
+  const vanished = stored.filter((s) => !incoming.has(key(s.customer_code, s.product_code)));
+  const vanishedLive = vanished.filter((s) => live(s.contract_price, s.contract_end_date) || live(s.buying_group_price, s.buying_group_end_date));
+  const storedLive = stored.filter((s) => live(s.contract_price, s.contract_end_date) || live(s.buying_group_price, s.buying_group_end_date));
+
+  if (vanishedLive.length > Math.max(MASS_CLEAR_FLOOR, storedLive.length * MASS_CLEAR_FRACTION)) {
+    return { cleared: 0, warning: `Contract view no longer returns ${vanishedLive.length.toLocaleString('en-ZA')} of ${storedLive.length.toLocaleString('en-ZA')} ` +
+      'contract prices held in RouteOne - not clearing them (the view is probably incomplete). Existing prices kept.' };
+  }
+  if (!vanished.length) return { cleared: 0 };
+  for (let i = 0; i < vanished.length; i += BATCH_SIZE) {
+    const batch = vanished.slice(i, i + BATCH_SIZE);
+    await conn.transaction(async (tx) => {
+      const clear = tx.prepare(`
+        UPDATE syspro_customer_pricing
+        SET contract_price = NULL, contract_start_date = NULL, contract_end_date = NULL,
+            buying_group_price = NULL, buying_group_start_date = NULL, buying_group_end_date = NULL, synced_at = ${conn.nowSql}
+        WHERE customer_code = ? AND product_code = ?
+      `);
+      for (const s of batch) await clear.run(s.customer_code, s.product_code);
+    });
+  }
+  return { cleared: vanished.length };
+}
+
 // vw_FS_RepSalesByMonth gives one row per (year, month, branch, rep) - the
 // same rep code can appear under several branches, and a rep's actual sales
 // can be split across branches too, so rows are summed into a single
@@ -565,6 +650,13 @@ const BULK_UPSERT = {
     now: ['synced_at'],
     build: async () => pricingBulkRow
   },
+  contract_pricing: {
+    table: 'syspro_customer_pricing',
+    columns: CONTRACT_COLUMNS,
+    keys: ['customer_code', 'product_code'],
+    now: ['synced_at'],
+    build: async () => contractBulkRow
+  },
   customers: {
     table: 'customers',
     columns: CUSTOMER_COLUMNS,
@@ -642,7 +734,7 @@ const BULK_INSERT = {
   invoice_lines: { table: 'invoice_items', columns: INVOICE_ITEM_COLUMNS, build: invoiceLineBulkBuild }
 };
 
-const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, invoice_lines: upsertInvoiceLine, customer_pricing: upsertCustomerPricing, rep_sales: upsertRepSales, customer_sales: upsertCustomerSales };
+const UPSERTERS = { warehouses: upsertWarehouse, customers: upsertCustomer, products: upsertProduct, stock: upsertStock, invoices: upsertInvoice, invoice_lines: upsertInvoiceLine, customer_pricing: upsertCustomerPricing, contract_pricing: upsertContractPricing, rep_sales: upsertRepSales, customer_sales: upsertCustomerSales };
 
 // Entities whose upserter accumulates (SUM) or has no natural key to upsert
 // on must clear their destination table before each run - otherwise
@@ -667,7 +759,7 @@ const SORT_KEYS = {
 // invoice_lines must come after invoices (resolves invoice_number -> invoice_id).
 // Rep-to-warehouse assignment is managed manually in RouteOne (SalSalesperson branch data is
 // unreliable - the same rep code can show multiple conflicting branches), so "reps" is not synced here.
-export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'invoice_lines', 'customer_pricing', 'rep_sales', 'customer_sales'];
+export const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'invoices', 'invoice_lines', 'customer_pricing', 'contract_pricing', 'rep_sales', 'customer_sales'];
 const syncsInFlight = new Set();
 
 // Rows are committed in batches of this size, yielding to the event loop
@@ -704,6 +796,12 @@ export async function runSync(entity, { provider = null } = {}) {
     const fetchStart = Date.now();
     const rows = await (provider ?? await getProvider()).fetch(entity);
     const fetchMs = Date.now() - fetchStart;
+    // Remember how many live contracts this (big) view held, so the check after
+    // the next contract_pricing sync can compare the two views. Never allowed to
+    // fail the sync itself.
+    if (entity === 'customer_pricing') {
+      await noteMainViewContracts(rows).catch((e) => console.error('[sync] could not record main-view contract count:', e.message));
+    }
     // customer_pricing arrives in SYSPRO view order, which has no relation to
     // its (customer_code, product_code) primary key - upserting 4.47M rows in
     // that order means each one likely lands on a different, uncached B-tree
@@ -816,6 +914,20 @@ export async function runSync(entity, { provider = null } = {}) {
           for (let i = start; i < end; i++) await applyRow(rows[i], tx);
         });
         await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+    // contract_pricing is authoritative for the contract columns: drop prices
+    // SYSPRO no longer returns, then run the sanity check. Any warning is
+    // recorded as a run error so it reaches the Integration page and the daily
+    // digest; neither step may fail the sync that already wrote its rows.
+    if (entity === 'contract_pricing') {
+      try {
+        const cleared = await clearVanishedContracts(dbx, rows);
+        if (cleared.warning) errors.push(cleared.warning);
+        else if (cleared.cleared) console.log(`[sync] contract_pricing: cleared ${cleared.cleared} contract price(s) SYSPRO no longer returns`);
+        errors.push(...await checkContractPricing());
+      } catch (e) {
+        errors.push(`contract post-check failed: ${e.message}`);
       }
     }
     const writeMs = Date.now() - writeStart;

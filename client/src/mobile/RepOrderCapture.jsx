@@ -9,6 +9,7 @@ import OrderSummary from '../components/OrderSummary';
 import ProductPurchaseHistory from '../components/ProductPurchaseHistory';
 import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2, priceSourceForLine, PriceSourceBadge } from '../components/NewOrderModal';
 import { queueWrite } from '../offline';
+import PriceChangePanel from '../components/PriceChangePanel';
 import { useAuth } from '../auth';
 import { MobileHeader } from './MobileApp';
 import { matchesWords } from '../search';
@@ -55,6 +56,15 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   // dedicated stop between capture and review.
   const [step, setStep] = useState('cart');
   const [signature, setSignature] = useState(null); // customer signature - required before an order can be submitted (not required for quotes)
+  // Live SYSPRO price check at submit (server: orders.routes.js). When SYSPRO's
+  // price for a line differs from the one shown here, the server stops the order
+  // and returns the changes (`priceChanges`). Only once the rep accepts them do
+  // they become `priceFixes` - the prices this screen then shows and submits - and
+  // the customer must sign again, because the total they signed has changed.
+  const [priceChanges, setPriceChanges] = useState(null);
+  const [priceFixes, setPriceFixes] = useState({}); // productId -> { price, source }
+  const [acceptedChanges, setAcceptedChanges] = useState([]); // audit trail sent with the order
+  const [signatureEpoch, setSignatureEpoch] = useState(0); // remounts the signature pad to blank it
 
   // Resuming a saved draft - load its cart/notes once, on top of whatever the
   // for-customer product fetch below already sets up. Skipped for a draftId
@@ -189,6 +199,11 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     return next;
   });
 
+  // The price shown/submitted for a line: a price the rep accepted after a SYSPRO
+  // change wins over the (possibly stale) one in the local snapshot.
+  const priceFor = (p, qty) => priceFixes[p.id]?.price ?? unitPriceFor(p, qty);
+  const sourceFor = (p, price) => priceFixes[p.id]?.source ?? priceSourceForLine(p, price);
+
   const cartLines = (products || []).filter((p) => cart[p.id]);
   // R1-027/028: round EACH line first, then sum, then round VAT on that
   // rounded subtotal - the exact same order of operations orders.routes.js /
@@ -196,7 +211,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   // what actually gets stored. round2 is the same epsilon-safe rounding as
   // server/db.js's round2 - see NewOrderModal.jsx's copy for why plain
   // Math.round(n*100)/100 misrounds at exact half-cent boundaries.
-  const subtotal = round2(cartLines.reduce((sum, p) => sum + round2(cart[p.id] * unitPriceFor(p, cart[p.id])), 0));
+  const subtotal = round2(cartLines.reduce((sum, p) => sum + round2(cart[p.id] * priceFor(p, cart[p.id])), 0));
   const vat = round2(subtotal * VAT_RATE);
   const total = round2(subtotal + vat);
 
@@ -278,7 +293,11 @@ export default function RepOrderCapture({ base = '/mobile' }) {
     const payload = {
       customer_id: Number(id),
       visit_id: visitId ? Number(visitId) : null,
-      items: cartLines.map((p) => ({ product_id: p.id, qty: cart[p.id] })),
+      // quoted_price: the price this screen showed. The server compares it with
+      // SYSPRO's live price and stops the order if they differ. (Quotes are not
+      // binding and are not checked.)
+      items: cartLines.map((p) => ({ product_id: p.id, qty: cart[p.id], ...(isQuote ? {} : { quoted_price: priceFor(p, cart[p.id]) }) })),
+      price_changes_accepted: isQuote || !acceptedChanges.length ? undefined : acceptedChanges,
       notes: notes || null,
       customer_order_no: isQuote ? undefined : customerOrderNo || null,
       signature: isQuote ? null : signature,
@@ -301,11 +320,30 @@ export default function RepOrderCapture({ base = '/mobile' }) {
         queueWrite('POST', path, payload);
         if (draftId) api.del(`/drafts/${draftId}`).catch(() => {});
         setDone({ queued: true, total });
+      } else if (!isQuote && e.status === 409 && e.data?.code === 'price_changed') {
+        // Nothing was saved. Show what changed and wait for the rep to accept.
+        setPriceChanges(e.data.changes);
+        setError('');
+        setBusy(false);
       } else {
         setError(e.message);
         setBusy(false);
       }
     }
+  };
+
+  const acceptPriceChanges = () => {
+    setPriceFixes((fixes) => {
+      const next = { ...fixes };
+      for (const c of priceChanges) next[c.product_id] = { price: c.current_price, source: c.source };
+      return next;
+    });
+    setAcceptedChanges((prev) => [...prev, ...priceChanges.map((c) => ({ product_id: c.product_id, from: c.quoted_price, to: c.current_price }))]);
+    // The customer signed the old total - they must sign the new one.
+    setSignature(null);
+    setSignatureEpoch((n) => n + 1);
+    setPriceChanges(null);
+    setError('');
   };
 
   const noun = isQuote ? 'Quote' : 'Order';
@@ -365,7 +403,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
         <div className="space-y-2">
           {filtered.map((p) => {
             const qty = cart[p.id] || 0;
-            const price = unitPriceFor(p, qty || 1);
+            const price = priceFor(p, qty || 1);
             const kgPrice = kgPriceFor(p, price);
             const nextBreak = (p.price_breaks || []).find((b) => b.min_qty > (qty || 0));
             // General (list) price, per unit - the "G Price" (R1-019). Order
@@ -402,7 +440,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                         those as "contract"). Mirrors the office order
                         builder's badge (NewOrderModal.jsx) so the same price
                         source always reads the same way everywhere. */}
-                    <PriceSourceBadge className="ml-1" source={priceSourceForLine(p, price)} />
+                    <PriceSourceBadge className="ml-1" source={sourceFor(p, price)} />
                     {p.syspro_pricing_tier && listPrice > 0 && (
                       <span className="ml-1">
                         · G {fmtR(listPrice)}{gDiscountPct != null && <span className="font-medium text-emerald-600"> -{gDiscountPct}%</span>}
@@ -520,7 +558,19 @@ export default function RepOrderCapture({ base = '/mobile' }) {
           <MobileHeader title={`Review ${isQuote ? 'quote' : 'order'}`} back={null} />
           <div className="p-4 pb-64 space-y-4">
             <ErrorNote error={error} />
+            {priceChanges && (
+              <PriceChangePanel
+                changes={priceChanges}
+                acceptLabel="Accept new prices"
+                backLabel="Back to order"
+                onAccept={acceptPriceChanges}
+                onBack={() => { setPriceChanges(null); setStep('cart'); }}
+              >
+                {!isQuote && <p className="mt-2 text-xs">After accepting, the customer needs to sign the new total again.</p>}
+              </PriceChangePanel>
+            )}
             <OrderSummary
+              key={signatureEpoch}
               order={{
                 number: '',
                 quote_date: new Date().toISOString(),
@@ -533,7 +583,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                 customer_code: customer.code
               }}
               items={cartLines.map((p) => {
-                const price = unitPriceFor(p, cart[p.id]);
+                const price = priceFor(p, cart[p.id]);
                 return {
                   product_name: p.name,
                   product_code: p.code,
@@ -543,7 +593,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                   uom: p.uom,
                   // R1-027: rounded per line, matching the server's exact formula.
                   line_total: round2(cart[p.id] * price),
-                  price_source: priceSourceForLine(p, price)
+                  price_source: sourceFor(p, price)
                 };
               })}
               customer={customer}
@@ -636,7 +686,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
             {!isQuote && !signature && (
               <div className="text-center text-xs text-amber-600">✋ Customer signature required before submitting</div>
             )}
-            <button className="btn-primary w-full py-3" onClick={confirmSubmit} disabled={busy || (!isQuote && !signature)}>
+            <button className="btn-primary w-full py-3" onClick={confirmSubmit} disabled={busy || !!priceChanges || (!isQuote && !signature)}>
               {busy ? 'Submitting…' : `Confirm & ${isQuote ? 'create quote' : 'submit order'}`}
             </button>
             <button className="btn-secondary w-full py-2" onClick={() => setStep('notes')} disabled={busy}>
