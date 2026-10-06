@@ -168,6 +168,31 @@ export async function priceBreaksFor(product, rules = null, conn = dbx) {
   return priceBreaks(product, rules ?? await rulesForProduct(product, conn));
 }
 
+// The SYSPRO tiers, as one pure decision shared by the stored-data lookup below
+// and the live check at order submit (integration/livePrice.js), so the two can
+// never disagree about which tier wins: an in-window contract price, else an
+// in-window buying-group price, else the customer's price-code price. `row` has
+// the columns of syspro_customer_pricing (or the view they come from); dates may
+// be 'YYYY-MM-DD' strings or Dates. Returns { price (per selling unit), source }
+// or null when SYSPRO has no tier for the pair.
+export function sysproTierPrice(row, product, today = getTodayISO()) {
+  if (!row) return null;
+  const day = (v) => (v instanceof Date ? v.toISOString().split('T')[0] : v ? String(v).slice(0, 10) : null);
+  const inWindow = (start, end) => (!day(start) || day(start) <= today) && (!day(end) || day(end) >= today);
+  const contractPrice = row.contract_price != null &&
+    inWindow(row.contract_start_date, row.contract_end_date)
+    ? row.contract_price : null;
+  const groupPrice = row.buying_group_price != null &&
+    inWindow(row.buying_group_start_date, row.buying_group_end_date)
+    ? row.buying_group_price : null;
+  const perKgPrice = contractPrice ?? groupPrice ?? row.price_code_price;
+  if (perKgPrice == null) return null;
+  const source = contractPrice != null ? PRICE_SOURCES.CONTRACT
+    : groupPrice != null ? PRICE_SOURCES.BUYING_GROUP
+    : PRICE_SOURCES.PRICE_CODE;
+  return { price: round2(perKgPrice * (product.conv_factor_alt_uom || product.pack_weight_kg || 1)), source };
+}
+
 async function effectivePriceDetail(customerId, productId, qty = 1, conn = dbx) {
   const product = await conn.prepare('SELECT * FROM products WHERE id = ?').get(productId);
   if (!product) return { price: 0, source: null };
@@ -180,23 +205,8 @@ async function effectivePriceDetail(customerId, productId, qty = 1, conn = dbx) 
       FROM syspro_customer_pricing
       WHERE customer_code = ? AND product_code = ?
     `).get(customer.code, product.code);
-    if (syspro) {
-      const today = getTodayISO();
-      const inWindow = (start, end) => (!start || start <= today) && (!end || end >= today);
-      const contractPrice = syspro.contract_price != null &&
-        inWindow(syspro.contract_start_date, syspro.contract_end_date)
-        ? syspro.contract_price : null;
-      const groupPrice = syspro.buying_group_price != null &&
-        inWindow(syspro.buying_group_start_date, syspro.buying_group_end_date)
-        ? syspro.buying_group_price : null;
-      const perKgPrice = contractPrice ?? groupPrice ?? syspro.price_code_price;
-      if (perKgPrice != null) {
-        const source = contractPrice != null ? PRICE_SOURCES.CONTRACT
-          : groupPrice != null ? PRICE_SOURCES.BUYING_GROUP
-          : PRICE_SOURCES.PRICE_CODE;
-        return { price: round2(perKgPrice * (product.conv_factor_alt_uom || product.pack_weight_kg || 1)), source };
-      }
-    }
+    const tier = sysproTierPrice(syspro, product);
+    if (tier) return tier;
   }
   const contract = await conn.prepare(
     'SELECT price FROM customer_prices WHERE customer_id = ? AND product_id = ?'

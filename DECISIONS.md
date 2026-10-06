@@ -19,7 +19,22 @@ Record of significant technical decisions, rationale, and trade-offs.
 
 **Status:** Code in `server/integration/{sync,scheduler,contractCheck,providers}.js`. Needs `docs/sql/vw_FS_ContractPricing.sql` deployed on SYSPRO; until then each run reports "invalid object" and the existing twice-daily sync carries on unchanged.
 
-**Not done yet (next):** live check at order submit - re-read the contract prices for the order's lines from SYSPRO in `createOrder`, so a price can never be quoted from data older than the order.
+### Live check at order submit - stop and confirm (2026-10-06)
+
+**Decision:** when an order is submitted, the server reads the customer's prices for the order's lines straight from SYSPRO (the customer-pricing view, filtered to that customer and those products; ~1s) and compares them with the price the screen showed (`quoted_price`). Any difference **stops the order** (HTTP 409 `price_changed`, nothing saved). The person sees old -> new prices and must accept; the order is then submitted at SYSPRO's price.
+
+**Why stop rather than save-and-notify:** the rep has usually already told the customer a price, and in the rep app the customer has signed a total. A silent change makes both wrong.
+
+**Behaviour:**
+- Rep app: after accepting, the signature pad is cleared and the customer must sign the new total.
+- Offline orders (replayed later, customer not present): a stopped order stays in the sync queue with its price changes; the rep taps "Accept new prices & send".
+- Old app versions / repeat orders send no `quoted_price`: nothing to compare, so SYSPRO's live price is applied.
+- Office-typed override prices are never replaced. Drafts and quotes are not checked.
+- The saved line always carries SYSPRO's live price and tier, never the stored copy.
+- **SYSPRO unreachable or slower than `live_price_timeout_ms` (8s): the order proceeds on stored prices** (at most 15 min old for contracts) and `activity_log` records `live_price_check: 'unavailable'`. Refusing all orders whenever SYSPRO hiccups would cost more than the narrow window this leaves. Settings: `live_price_check` ('off' disables), `live_price_timeout_ms`, `syspro_view_live_pricing` (a faster dedicated view, if ever needed).
+- Accepted changes are recorded in the order's activity log entry (`price_changes_accepted`).
+
+**Code:** `server/integration/livePrice.js`, `createOrder` in `server/routes/orders.routes.js`, `sysproTierPrice` in `server/dbh.js` (one shared tier decision), `client/src/components/PriceChangePanel.jsx`, `RepOrderCapture.jsx`, `NewOrderModal.jsx`, `offline.js`/`MobileApp.jsx`.
 
 ---
 

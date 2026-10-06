@@ -16,7 +16,7 @@ import DatePicker from '../components/DatePicker';
 import CustomerTasksSheet from '../components/CustomerTasksSheet';
 import AddProspectModal from '../components/AddProspectModal';
 import AppIcon from '../components/AppIcon';
-import { onOfflineChange, getOutbox, flushOutbox, refreshSnapshot, describeOutboxItem, retryOutboxItem, discardOutboxItem } from '../offline';
+import { onOfflineChange, getOutbox, flushOutbox, refreshSnapshot, describeOutboxItem, retryOutboxItem, discardOutboxItem, acceptOutboxPriceChanges } from '../offline';
 import { MobileThemeProvider, useMobileTheme } from './theme';
 import ThemePicker from './ThemePicker';
 import RepCustomer from './RepCustomer';
@@ -87,12 +87,25 @@ function OfflineBanner() {
                   <div className="truncate font-medium">{describeOutboxItem(item)}</div>
                   <div className="text-slate-400">{fmtDateTime(item.queued_at)}</div>
                   {status === 'failed' && item.error && <div className="mt-0.5 text-red-600">{item.error}</div>}
+                  {/* Offline order stopped at sync because SYSPRO's price moved: show what
+                      changed; nothing is sent until the rep accepts the new prices. */}
+                  {status === 'failed' && item.price_changes?.length > 0 && (
+                    <ul className="mt-1 space-y-0.5 text-slate-700">
+                      {item.price_changes.map((c) => (
+                        <li key={c.product_id}>
+                          {c.product_name} ×{c.qty}: <span className="line-through text-slate-400">{fmtR(c.quoted_price)}</span> → <span className="font-semibold">{fmtR(c.current_price)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <span className={`whitespace-nowrap rounded-full px-2 py-0.5 font-semibold ${badge[status]}`}>{statusLabel[status]}</span>
                   {status === 'failed' && (
                     <>
-                      <button type="button" className="text-brand-600 underline" onClick={() => retryOutboxItem(item.id)}>Retry</button>
+                      {item.price_changes?.length > 0
+                        ? <button type="button" className="font-semibold text-brand-600 underline" onClick={() => acceptOutboxPriceChanges(item.id)}>Accept new prices &amp; send</button>
+                        : <button type="button" className="text-brand-600 underline" onClick={() => retryOutboxItem(item.id)}>Retry</button>}
                       <button type="button" className="text-slate-400 underline" onClick={() => discardOutboxItem(item.id)}>Discard</button>
                     </>
                   )}
