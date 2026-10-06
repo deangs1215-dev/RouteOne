@@ -43,7 +43,7 @@ const sign = (key, label) => ({ key, label, type: 'signature' });
 const product = (key, label) => ({ key, label, type: 'product' });
 const select = (key, label, options, required = false) => ({ key, label, type: 'select', options, required });
 
-const DEFAULT_FORMS = [
+export const DEFAULT_FORMS = [
   // 2 ---------------------------------------------------------------------
   {
     name: 'Demonstration & Training',
