@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { api, downloadFile } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
 import OrderSummary from '../components/OrderSummary';
+import SendToTelesalesModal from '../components/SendToTelesalesModal';
 import { MobileHeader } from './MobileApp';
 
 export default function OrderDetail({ base = '/mobile' }) {
@@ -10,6 +11,8 @@ export default function OrderDetail({ base = '/mobile' }) {
   const [order, setOrder] = useState(null);
   const [error, setError] = useState('');
   const [downloading, setDownloading] = useState(false);
+  const [showTelesales, setShowTelesales] = useState(false);
+  const [note, setNote] = useState('');
 
   useEffect(() => {
     api.get(`/orders/${id}`).then(setOrder).catch((e) => setError(e.message));
@@ -53,6 +56,10 @@ export default function OrderDetail({ base = '/mobile' }) {
         <button className="btn-secondary w-full py-2.5" onClick={download} disabled={downloading}>
           {downloading ? 'Downloading…' : '⬇ Download order'}
         </button>
+        {['submitted', 'processing', 'invoiced'].includes(order.status) && (
+          <button className="btn-primary w-full py-2.5" onClick={() => { setNote(''); setShowTelesales(true); }}>✉ Send to telesales</button>
+        )}
+        {note && <div className="rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{note}</div>}
         <div className="card p-4">
           <OrderSummary
             order={order}
@@ -63,6 +70,10 @@ export default function OrderDetail({ base = '/mobile' }) {
           />
         </div>
       </div>
+      {showTelesales && (
+        <SendToTelesalesModal order={order} onClose={() => setShowTelesales(false)}
+          onSent={(r) => { setShowTelesales(false); setNote(`✓ Sent to ${r.sent} of ${r.recipients} recipient${r.recipients === 1 ? '' : 's'}`); }} />
+      )}
     </>
   );
 }

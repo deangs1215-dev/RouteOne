@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams, useNavigate } from 'react-router-dom';
+import { Link, useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, fmtR, fmtDateTime } from '../api';
 import { Card, Table, Spinner, OrderStatusBadge, ErrorNote } from '../components/ui';
 import { PRICE_SOURCE_LABELS } from '../components/NewOrderModal';
 import { useAuth } from '../auth';
+import SendToTelesalesModal from '../components/SendToTelesalesModal';
 
 const NEXT_ACTIONS = {
   draft: [['submitted', 'Submit order']],
@@ -21,6 +22,9 @@ export default function OrderDetail() {
   const [order, setOrder] = useState(null);
   const [error, setError] = useState('');
   const [emailNote, setEmailNote] = useState('');
+  // ?send=1 is set right after a quote is converted, so the order can be sent to telesales straight away.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [showTelesales, setShowTelesales] = useState(searchParams.get('send') === '1');
 
   const load = () => api.get(`/orders/${id}`).then(setOrder).catch(console.error);
   useEffect(() => { load(); }, [id]);
@@ -64,6 +68,9 @@ export default function OrderDetail() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          {['submitted', 'processing', 'invoiced'].includes(order.status) && (
+            <button className="btn-primary" onClick={() => setShowTelesales(true)}>✉ Send to telesales</button>
+          )}
           <button className="btn-secondary" onClick={() => sendMail(`/orders/${id}/email-customer`)}>✉ Confirmation to customer</button>
           <button className="btn-secondary" onClick={repeat}>Repeat order</button>
           {canChangeStatus && NEXT_ACTIONS[order.status].map(([status, label]) => (
@@ -123,6 +130,16 @@ export default function OrderDetail() {
           {order.notes && <p className="text-sm"><span className="font-medium">Notes:</span> {order.notes}</p>}
           {order.delivery_instructions && <p className="text-sm mt-1"><span className="font-medium">Delivery:</span> {order.delivery_instructions}</p>}
         </Card>
+      )}
+
+      {showTelesales && (
+        <SendToTelesalesModal order={order}
+          onClose={() => { setShowTelesales(false); setSearchParams({}, { replace: true }); }}
+          onSent={(r) => {
+            setShowTelesales(false);
+            setSearchParams({}, { replace: true });
+            setEmailNote(r.queued ? `Sent to ${r.sent} of ${r.recipients} - the rest are saved in the email log (see the Integration page).` : `✓ Sent to ${r.sent} recipient${r.sent === 1 ? '' : 's'}`);
+          }} />
       )}
     </div>
   );
