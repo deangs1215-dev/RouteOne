@@ -89,7 +89,8 @@ export function buildDocumentPdf({ type, doc, items, company }) {
     const leftRows = [
       ['To', [d.toName, d.toCity].filter(Boolean).join('\n')],
       ['Customer Code', dash(d.code)],
-      ['Contact Person', d.contacts.length ? d.contacts.join('\n') : '-'],
+      // Quotations leave the contact person out; orders keep it.
+      ...(type === 'quote' ? [] : [['Contact Person', d.contacts.length ? d.contacts.join('\n') : '-']]),
       ['Phone no', dash(d.phone)],
       ['Cell no', dash(d.cell)],
       ['E-mail', dash(d.email)],

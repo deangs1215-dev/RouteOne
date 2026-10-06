@@ -187,7 +187,8 @@ export function notesHtml(doc, { includeNotes = true } = {}) {
 // The customer details block shared by every order/quote email (and mirrored in
 // the PDF): To / Customer Code / Contact Person / Phone / Cell / E-mail / VAT /
 // Address on the left, Placed By / Warehouse on the right.
-export function customerBlockHtml(doc) {
+// Quotations leave out the contact person (`{ contact: false }`); orders keep it.
+export function customerBlockHtml(doc, { contact = true } = {}) {
   const d = customerDetails(doc);
   const multi = (arr) => (arr.length ? arr.map(esc).join('<br>') : '-');
   const lbl = 'font-weight:bold;color:#1e293b;padding:3px 14px 3px 0;vertical-align:top;white-space:nowrap';
@@ -199,7 +200,7 @@ export function customerBlockHtml(doc) {
           <table style="border-collapse:collapse;font-size:13px">
             ${row('To', `${esc(d.toName)}${d.toCity ? '<br>' + esc(d.toCity) : ''}`)}
             ${row('Customer Code', `<b>${esc(d.code) || '-'}</b>`)}
-            ${row('Contact Person', multi(d.contacts))}
+            ${contact ? row('Contact Person', multi(d.contacts)) : ''}
             ${row('Phone no', esc(d.phone) || '-')}
             ${row('Cell no', esc(d.cell) || '-')}
             ${row('E-mail', esc(d.email) || '-')}
@@ -302,7 +303,8 @@ export async function buildOrderConfirmationEmail(orderId, { includeNotes = fals
 
   // R1-048: many customer email addresses are generic/bulk/shared, not
   // reliably the actual contact - a named greeting was often wrong for
-  // whoever actually opened the email. Always "Dear Customer," instead.
+  // whoever actually opened the email. Always "Dear Customer," instead. (The
+  // customer's name goes in the subject line, not the greeting.)
   const inner = `
     <p>Dear Customer,</p>
     <p>Thank you for your order! Here's a summary of what we received — our team is processing it now.</p>
@@ -321,9 +323,15 @@ export async function buildOrderConfirmationEmail(orderId, { includeNotes = fals
     ref_id: order.id,
     to_addr: order.customer_email || '',
     cc_addr: order.rep_email || null,
-    subject: `Order confirmation ${order.number} — ${fmtR(order.total)} incl. VAT`,
+    subject: `Order confirmation ${order.number} — ${order.customer_name} (${order.customer_code}) — ${fmtR(order.total)} incl. VAT`,
     body_html: await wrap(`Order confirmation ${order.number}`, inner)
   };
+}
+
+// The one subject every quote email uses - customer, rep copy, telesales, extra
+// recipients and the send-email buttons - so they can never differ.
+export function quoteSubject(quote) {
+  return `Quotation ${quote.number} — ${quote.customer_name} (${quote.customer_code}) — ${fmtR(quote.total)}`;
 }
 
 export async function buildQuoteEmail(quoteId) {
@@ -342,7 +350,7 @@ export async function buildQuoteEmail(quoteId) {
       <tr><td style="color:#64748b;padding:2px 12px 2px 0">Date</td><td>${(quote.quote_date || '').slice(0, 16)}</td></tr>
       ${quote.valid_until ? `<tr><td style="color:#64748b;padding:2px 12px 2px 0">Valid until</td><td>${quote.valid_until}</td></tr>` : ''}
     </table>
-    ${customerBlockHtml(quote)}
+    ${customerBlockHtml(quote, { contact: false })}
     ${docTable(items, quote, 'quote')}
     ${notesHtml(quote)}
     <p style="font-size:14px">To place this order, simply reply to this email or contact ${quote.rep_name ? esc(quote.rep_name) : 'your rep'}.</p>`;
@@ -352,7 +360,7 @@ export async function buildQuoteEmail(quoteId) {
     ref_id: quote.id,
     to_addr: quote.customer_email || '',
     cc_addr: quote.rep_email || null,
-    subject: `Quotation ${quote.number} — valid until ${quote.valid_until || 'soon'}`,
+    subject: quoteSubject(quote),
     body_html: await wrap(`Quotation ${quote.number}`, inner)
   };
 }
