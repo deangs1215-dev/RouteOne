@@ -14,6 +14,9 @@
 //   strftime('%Y-01', expr)           CONVERT(VARCHAR(4), expr, 23) + '-01'
 //   julianday(x)                      (DATEDIFF_BIG(SECOND, '1970-01-01', x) / 86400.0)
 //   ... LIMIT n                       SELECT TOP (n) ...   (numeric literal only)
+//   col [NOT] LIKE ?                  col COLLATE Latin1_General_CI_AS [NOT] LIKE ?
+//     (SQLite's LIKE ignores case; this database's collation is Latin1_General_BIN,
+//     which does not, so every search on a plain column reference was case sensitive.)
 //
 // julianday() is only faithful for DIFFERENCES ('julianday(a) - julianday(b)' is
 // the gap in days): the T-SQL form counts days from 1970, not from the Julian
@@ -222,6 +225,39 @@ function translateLimit(sql) {
   return out;
 }
 
+// SQLite's LIKE is case-insensitive for ASCII; SQL Server's depends on the column's
+// collation, and this database uses Latin1_General_BIN (case- and accent-sensitive),
+// so "bakels" would not find "Bakels". Give a plain column reference on the left of
+// LIKE an explicit case-insensitive collation (accent-sensitive, as on SQLite).
+// Only `name`/`t.name` forms are touched: LOWER(x) LIKE ... and the like are left alone.
+const LIKE_COLLATION = 'Latin1_General_CI_AS';
+
+function translateLike(sql) {
+  let out = '';
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    const cEnd = skipComment(sql, i);
+    if (cEnd !== -1) { out += sql.slice(i, cEnd); i = cEnd; continue; }
+    if (c === "'") { const end = skipLiteral(sql, i); out += sql.slice(i, end); i = end; continue; }
+    if (/[A-Za-z_]/.test(c) && !isWordChar(sql[i - 1]) && sql[i - 1] !== '.') {
+      const m = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/.exec(sql.slice(i));
+      const ident = m[0];
+      const after = sql.slice(i + ident.length);
+      if (ident.toUpperCase() !== 'NOT' && /^\s+(?:NOT\s+)?LIKE\b/i.test(after)) {
+        out += `${ident} COLLATE ${LIKE_COLLATION}`;
+      } else {
+        out += ident;
+      }
+      i += ident.length;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
 export function sqliteToTsql(sql) {
-  return translateLimit(translateFunctions(sql));
+  return translateLike(translateLimit(translateFunctions(sql)));
 }
