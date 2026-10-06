@@ -10,7 +10,7 @@ const STATUS_COLORS = { completed: '#16a34a', failed: '#dc2626', running: '#f59e
 // "sync now" buttons and the schedule rows below are driven off this one list -
 // they were previously two separate hardcoded arrays, so adding an entity to
 // the server left it invisible in the UI.
-const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'customer_pricing', 'invoices', 'invoice_lines', 'rep_sales', 'customer_sales'];
+const SYNC_ENTITIES = ['warehouses', 'customers', 'products', 'stock', 'customer_pricing', 'contract_pricing', 'invoices', 'invoice_lines', 'rep_sales', 'customer_sales'];
 
 export default function Integration() {
   const { user } = useAuth();
@@ -88,7 +88,7 @@ export default function Integration() {
     setNotice('');
     try {
       const r = await api.post(`/integration/sync/${entity}`);
-      const parts = (r.results || [r]).map((x) => `${x.entity}: ${x.rows_upserted}/${x.rows_read}${x.rows_skipped ? ` (${x.rows_skipped} skipped, no match)` : ''}${x.row_errors ? ` (${x.row_errors} errors)` : ''}`);
+      const parts = (r.results || [r]).map((x) => x.error ? `${x.entity}: FAILED (${x.error})` : `${x.entity}: ${x.rows_upserted}/${x.rows_read}${x.rows_skipped ? ` (${x.rows_skipped} skipped, no match)` : ''}${x.row_errors ? ` (${x.row_errors} errors)` : ''}`);
       setNotice(`Sync done — ${parts.join(', ')}`);
       load();
     } catch (e) { setError(e.message); }
@@ -201,6 +201,7 @@ export default function Integration() {
               <Field label="Products view"><input className="input" value={settings.syspro_view_products || ''} onChange={set('syspro_view_products')} placeholder="vw_FS_Products" /></Field>
               <Field label="Stock view"><input className="input" value={settings.syspro_view_stock || ''} onChange={set('syspro_view_stock')} placeholder="vw_FS_Stock" /></Field>
               <Field label="Customer pricing view"><input className="input" value={settings.syspro_view_customer_pricing || ''} onChange={set('syspro_view_customer_pricing')} placeholder="vw_FS_CustomerPricing_ContractBuyingGroup" /></Field>
+              <Field label="Contract pricing view (contracts + buying groups only, synced often)"><input className="input" value={settings.syspro_view_contract_pricing || ''} onChange={set('syspro_view_contract_pricing')} placeholder="vw_FS_ContractPricing" /></Field>
               <Field label="Invoices view"><input className="input" value={settings.syspro_view_invoices || ''} onChange={set('syspro_view_invoices')} placeholder="vw_FS_Invoices" /></Field>
               <Field label="Invoice lines view"><input className="input" value={settings.syspro_view_invoice_lines || ''} onChange={set('syspro_view_invoice_lines')} placeholder="vw_FS_InvoiceLines" /></Field>
               <Field label="Rep sales view"><input className="input" value={settings.syspro_view_rep_sales || ''} onChange={set('syspro_view_rep_sales')} placeholder="vw_FS_RepSalesByMonth" /></Field>
@@ -251,8 +252,10 @@ export default function Integration() {
               {SYNC_ENTITIES.map((entity) => (
                 <div key={entity} className="flex flex-wrap items-end gap-3 pb-3 border-b border-slate-200 last:border-b-0 last:pb-0">
                   <Field label={`${entity.replace('_', ' ').replace(/^./, (c) => c.toUpperCase())} schedule`}>
-                    <select className="input" value={settings[`${entity}_sync_schedule`] || 'off'} onChange={set(`${entity}_sync_schedule`)}>
+                    <select className="input" value={settings[`${entity}_sync_schedule`] || (entity === 'contract_pricing' ? '15min' : 'off')} onChange={set(`${entity}_sync_schedule`)}>
                       <option value="off">Off (manual only)</option>
+                      {entity === 'contract_pricing' && <option value="15min">Every 15 minutes</option>}
+                      {entity === 'contract_pricing' && <option value="30min">Every 30 minutes</option>}
                       <option value="hourly">Every hour</option>
                       <option value="4hours">Every 4 hours</option>
                       <option value="daily">Daily at…</option>
@@ -284,6 +287,11 @@ export default function Integration() {
                   ? <>Last auto-sync: {fmtDateTime(settings.last_auto_sync_at)}<br />{settings.last_auto_sync_result}</>
                   : 'No automatic sync has run yet.'}
               </div>
+              {settings.contract_check_result && (
+                <div className={`text-xs mt-2 rounded border p-2 ${settings.contract_check_result.startsWith('WARNING') ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+                  Contract price check ({fmtDateTime(settings.contract_check_at)}): {settings.contract_check_result}
+                </div>
+              )}
             </div>
           </div>
 

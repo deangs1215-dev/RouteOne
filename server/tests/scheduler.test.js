@@ -87,6 +87,106 @@ test('backup: uploads always, database file only on SQLite', async () => {
   }
 });
 
+// --- contract_pricing: the small, frequent contract/buying-group sync + its sanity check ---
+const PRICE = (customer_code, product_code, contract_price, price_code_price, extra = {}) => ({
+  customer_code, product_code, contract_price, price_code_price, buying_group_price: null,
+  contract_start_date: contract_price == null ? null : '2026-01-01', contract_end_date: contract_price == null ? null : '2099-12-31',
+  buying_group_start_date: null, buying_group_end_date: null, ...extra
+});
+const CONTRACT = (customer_code, product_code, contract_price) => {
+  const { price_code_price, ...row } = PRICE(customer_code, product_code, contract_price, null);
+  return row;
+};
+const priceRow = (c, p) => dbx.prepare('SELECT contract_price, contract_end_date, price_code_price FROM syspro_customer_pricing WHERE customer_code = ? AND product_code = ?').get(c, p);
+
+test('contract_pricing sync: writes contract columns only, adds new pairs, clears vanished contracts', async () => {
+  await dbx.prepare('DELETE FROM syspro_customer_pricing').run();
+  await runSync('customer_pricing', { provider: { fetch: async () => [
+    PRICE('A1', 'P1', 10, 12.5), PRICE('A1', 'P2', null, 20), PRICE('B1', 'P1', 30, 31)
+  ] } });
+
+  const res = await runSync('contract_pricing', { provider: { fetch: async () => [
+    CONTRACT('A1', 'P1', 11),   // contract price changed
+    CONTRACT('A1', 'P2', 18),   // contract appeared on a pair that only had a price-code price
+    CONTRACT('C9', 'P9', 5)     // pair the big view never had at all
+  ] } });                       // B1/P1's contract is no longer returned -> must be cleared
+  assert.equal(res.rows_read, 3);
+
+  assert.deepEqual({ ...(await priceRow('A1', 'P1')) }, { contract_price: 11, contract_end_date: '2099-12-31', price_code_price: 12.5 });
+  assert.equal((await priceRow('A1', 'P2')).contract_price, 18);
+  assert.equal((await priceRow('A1', 'P2')).price_code_price, 20, 'price_code_price belongs to the customer_pricing sync and must be left alone');
+  assert.equal((await priceRow('C9', 'P9')).contract_price, 5);
+  assert.equal((await priceRow('C9', 'P9')).price_code_price, null);
+  const gone = await priceRow('B1', 'P1');
+  assert.equal(gone.contract_price, null, 'a contract SYSPRO stopped returning must stop being quoted');
+  assert.equal(gone.contract_end_date, null);
+  assert.equal(gone.price_code_price, 31, 'its price-code price survives');
+});
+
+test('contract_pricing sync refuses a mass clear (view returning almost nothing) and says so', async () => {
+  await dbx.prepare('DELETE FROM syspro_customer_pricing').run();
+  const many = Array.from({ length: 700 }, (_, i) => PRICE(`M${i}`, 'P1', 10 + i, 50));
+  await runSync('customer_pricing', { provider: { fetch: async () => many } });
+  const res = await runSync('contract_pricing', { provider: { fetch: async () => [CONTRACT('M0', 'P1', 10)] } });
+  assert.ok(res.row_errors >= 1, 'a warning is recorded on the run');
+  const run = await dbx.prepare("SELECT error FROM sync_runs WHERE entity = 'contract_pricing' ORDER BY id DESC").get();
+  assert.match(run.error, /not clearing/);
+  assert.equal((await priceRow('M5', 'P1')).contract_price, 15, 'nothing was wiped');
+});
+
+test('contract check: flags a main view that is missing contracts, and a sudden drop, once per problem', async () => {
+  await dbx.prepare('DELETE FROM syspro_customer_pricing').run();
+  await runSync('customer_pricing', { provider: { fetch: async () => Array.from({ length: 20 }, (_, i) => PRICE(`K${i}`, 'P1', 10, 12)) } });
+  const { checkContractPricing } = await import('../integration/contractCheck.js');
+  await setSetting('sync_digest_emails', 'ops@example.com');
+  await dbx.prepare("DELETE FROM email_log WHERE kind = 'sync_alert'").run();
+  const alerts = async () => (await dbx.prepare("SELECT COUNT(*) AS n FROM email_log WHERE kind = 'sync_alert'").get()).n;
+
+  await setSetting('contract_check_state', '');
+  await setSetting('contract_check_mainview', JSON.stringify({ at: new Date().toISOString(), contract: 20, buyingGroup: 0 }));
+  assert.deepEqual(await checkContractPricing({ minLines: 5 }), [], 'main view agrees with the contract view');
+  assert.match(await getSetting('contract_check_result'), /^OK/);
+  assert.equal(await alerts(), 0);
+
+  // The 2026-10-06 failure: the big view held only a fraction of the contracts.
+  await setSetting('contract_check_mainview', JSON.stringify({ at: new Date().toISOString(), contract: 4, buyingGroup: 0 }));
+  const w = await checkContractPricing({ minLines: 5 });
+  assert.equal(w.length, 1);
+  assert.match(w[0], /main pricing view returned 4 contract prices but the contract view has 20/);
+  assert.match(await getSetting('contract_check_result'), /^WARNING/);
+  assert.equal(await alerts(), 1);
+  await checkContractPricing({ minLines: 5 });
+  assert.equal(await alerts(), 1, 'the same problem is not emailed again every 15 minutes');
+
+  // Stale main-view figures (older than 36h) are not evidence of anything.
+  await setSetting('contract_check_mainview', JSON.stringify({ at: new Date(Date.now() - 48 * 3600000).toISOString(), contract: 1, buyingGroup: 0 }));
+  assert.deepEqual(await checkContractPricing({ minLines: 5 }), []);
+
+  // A collapse between two runs.
+  await setSetting('contract_check_mainview', '');
+  await setSetting('contract_check_state', JSON.stringify({ at: new Date().toISOString(), contract: 100, buyingGroup: 0 }));
+  const drop = await checkContractPricing({ minLines: 5 });
+  assert.match(drop[0], /dropped from 100 to 20/);
+});
+
+test('contract_pricing schedule: on by default every 15 minutes, 30 minutes selectable, off honoured', async () => {
+  await setSetting('contract_pricing_sync_schedule', '');
+  await setSetting('last_contract_pricing_sync_at', '');
+  assert.equal(await isEntitySyncDue('contract_pricing'), true, 'never run -> due, even though the form saved a blank schedule');
+  await setSetting('last_contract_pricing_sync_at', new Date(Date.now() - 10 * 60000).toISOString());
+  assert.equal(await isEntitySyncDue('contract_pricing'), false, 'ran 10 min ago');
+  await setSetting('last_contract_pricing_sync_at', new Date(Date.now() - 16 * 60000).toISOString());
+  assert.equal(await isEntitySyncDue('contract_pricing'), true, 'ran 16 min ago');
+  await setSetting('contract_pricing_sync_schedule', '30min');
+  assert.equal(await isEntitySyncDue('contract_pricing'), false, 'every 30 min: 16 min is not enough');
+  await setSetting('last_contract_pricing_sync_at', new Date(Date.now() - 31 * 60000).toISOString());
+  assert.equal(await isEntitySyncDue('contract_pricing'), true);
+  await setSetting('contract_pricing_sync_schedule', 'off');
+  assert.equal(await isEntitySyncDue('contract_pricing'), false);
+  assert.equal(await isEntitySyncDue('customer_pricing'), false, 'other entities still default to off');
+  await setSetting('contract_pricing_sync_schedule', '');
+});
+
 test('customer_pricing bulk sync at scale: loads, then re-syncs unchanged', async () => {
   const N = 60000;
   const rows = Array.from({ length: N }, (_, i) => ({

@@ -2,6 +2,27 @@
 
 Record of significant technical decisions, rationale, and trade-offs.
 
+## 2026-10-06: Contract prices sync separately, every 15 minutes, with a sanity check
+
+**Decision:** Contract and buying-group prices get their own small sync (`contract_pricing`, from the new `vw_FS_ContractPricing` view, ~85k rows, seconds) that runs every 15 minutes. The 4.5M-row `customer_pricing` sync stays twice a day for price-code prices. After every contract sync a check compares the two views and the previous run, and warns (Integration page, sync digest, one email per problem) when they disagree.
+
+**Rationale:**
+- ORD-00272 (SPAR RIDGEWAY GARDENS) was priced at the price-code price for two products that SYSPRO prices from an active contract (R30.00/kg, R70.29/kg). RouteOne's copy of contract prices came only from the big view, read twice a day.
+- The next sync found ~17,000 contract prices (1,507 customers) RouteOne had not been holding; RouteOne had ~210 contract customers when SYSPRO had ~1,500. Nothing flagged it.
+- Contract prices are where staleness costs money, and they are small enough to read cheaply and often.
+
+**Design points:**
+- `contract_pricing` writes only the contract/buying-group columns; `price_code_price` stays owned by `customer_pricing`. A scheduled `customer_pricing` run is always followed immediately by `contract_pricing`, since the big sync overwrites the contract columns from its own view.
+- Contracts SYSPRO stops returning are cleared - unless that would clear more than 25% (min 500) of live contracts, which is treated as a broken view: nothing is cleared and a warning is raised.
+- The view's filters deliberately match the contract/buying-group parts of `vw_FS_CustomerPricing_ContractBuyingGroup` so the two can be compared. (Both inherit its `tbl_ActiveCustomers_Weekly` limit: a customer new since the last weekly cache refresh has neither tier.)
+- A failed contract sync retries at its normal cadence, not every minute.
+
+**Status:** Code in `server/integration/{sync,scheduler,contractCheck,providers}.js`. Needs `docs/sql/vw_FS_ContractPricing.sql` deployed on SYSPRO; until then each run reports "invalid object" and the existing twice-daily sync carries on unchanged.
+
+**Not done yet (next):** live check at order submit - re-read the contract prices for the order's lines from SYSPRO in `createOrder`, so a price can never be quoted from data older than the order.
+
+---
+
 ## 2026-09-24: Migrate from SQLite to SQL Server (primary database)
 
 **Decision:** Move RouteOne's primary database from SQLite to SQL Server. Both RouteOne and SYSPRO will be on the same SQL Server instance.
