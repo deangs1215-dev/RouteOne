@@ -548,7 +548,9 @@ export default function RepCustomer({ base = '/mobile' }) {
                 return null;
               })()}
               <div className="mt-3 flex flex-col items-center rounded-lg bg-emerald-50 py-3">
-                <VisitTimer since={offlineVisit ? offlineVisit.check_in_at : activeVisit.check_in_at}
+                <VisitTimer key={offlineVisit ? 'offline' : `${activeVisit.id}:${c.server_now}`}
+                  since={offlineVisit ? offlineVisit.check_in_at : activeVisit.check_in_at}
+                  serverNow={offlineVisit ? null : c.server_now} local={!!offlineVisit}
                   className="text-3xl font-extrabold text-emerald-700" />
                 <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-widest text-emerald-600">Time on site</div>
               </div>

@@ -8,6 +8,9 @@ const parseUTC = (s) => {
   return new Date(norm.endsWith('Z') ? norm : norm + 'Z');
 };
 
+// Device-local 'YYYY-MM-DD HH:MM:SS' (what toLocalDateTime() writes for an offline visit).
+const parseLocal = (s) => (s ? new Date(s.replace(' ', 'T')) : null);
+
 // Live "H:MM:SS" while on site.
 function fmtElapsed(ms) {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -30,13 +33,22 @@ export function visitDuration(checkIn, checkOut) {
 }
 
 // Live counting-up timer since check-in.
-export default function VisitTimer({ since, className = '' }) {
-  const start = parseUTC(since);
+//  - serverNow: the server's "now" (same clock that stamped `since`), as received
+//    with the visit. Elapsed time is measured against it, so a phone clock that
+//    is off by seconds or minutes doesn't change the starting value.
+//  - local: `since` is a device-local timestamp (a visit started offline), not UTC.
+export default function VisitTimer({ since, serverNow, local = false, className = '' }) {
+  const start = local ? parseLocal(since) : parseUTC(since);
+  // Computed once per received value: server minus device clock, at receipt.
+  const [skewMs] = useState(() => {
+    const server = !local && serverNow ? parseUTC(serverNow) : null;
+    return server ? server.getTime() - Date.now() : 0;
+  });
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
   if (!start) return null;
-  return <span className={`tabular-nums ${className}`}>{fmtElapsed(now - start.getTime())}</span>;
+  return <span className={`tabular-nums ${className}`}>{fmtElapsed(now + skewMs - start.getTime())}</span>;
 }

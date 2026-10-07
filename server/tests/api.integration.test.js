@@ -1080,6 +1080,50 @@ test('a converted order can be sent to telesales by its own rep, and only with r
   assert.match(logged.body_html, /Customer Code/);
 });
 
+test('a quote can be emailed to a picked list by its own rep, and only with real recipients', async () => {
+  const repCookie = await login(fixture.reps[0].email);
+  const otherCookie = await login(fixture.reps[1].email);
+  const opts = (cookie, extra = {}) => ({ cookie, origin: allowedOrigin, ...extra });
+  const quote = await request('/api/quotes', opts(repCookie, { method: 'POST', body: {
+    customer_id: fixture.customers[0].id, items: [{ product_id: fixture.product.id, qty: 1 }] } }));
+  assert.equal(quote.response.status, 200, JSON.stringify(quote.body));
+  const send = (cookie, body) => request(`/api/quotes/${quote.body.id}/email-recipients`, opts(cookie, { method: 'POST', body }));
+
+  assert.equal((await send(repCookie, {})).response.status, 400);
+  assert.equal((await send(repCookie, { extra_email: 'not-an-email' })).response.status, 400);
+  assert.equal((await send(otherCookie, { extra_email: 'x@example.com' })).response.status, 403);
+
+  const ok = await send(repCookie, { extra_email: 'Quotes@Example.com' });
+  assert.equal(ok.response.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.recipients, 1);
+  const logged = await dbx.prepare("SELECT to_addr, body_html FROM email_log WHERE kind = 'quote' AND ref_id = ? AND to_addr = ?")
+    .get(quote.body.id, 'quotes@example.com');
+  assert.ok(logged, 'quote emailed to the typed address');
+  // The quote GET carries the customer's branch so the screen can list that branch's recipients.
+  const got = await request(`/api/quotes/${quote.body.id}`, opts(repCookie));
+  assert.ok('warehouse_id' in got.body);
+});
+
+test('customer detail carries the database clock so the on-site timer starts at 0, not the phone clock offset', async () => {
+  const repCookie = await login(fixture.reps[0].email);
+  const opts = (extra = {}) => ({ cookie: repCookie, origin: allowedOrigin, ...extra });
+  const customer = fixture.customers[0];
+  const checkIn = await request('/api/visits/check-in', opts({ method: 'POST', body: { customer_id: customer.id, check_in_type: 'offsite' } }));
+  assert.equal(checkIn.response.status, 200, JSON.stringify(checkIn.body));
+  try {
+    const got = await request(`/api/customers/${customer.id}`, opts());
+    assert.equal(got.response.status, 200);
+    const visit = got.body.recent_visits.find((v) => v.id === checkIn.body.id);
+    assert.ok(visit?.check_in_at, 'visit is checked in');
+    const utc = (s) => Date.parse(s.replace(' ', 'T') + 'Z');
+    const elapsed = utc(got.body.server_now) - utc(visit.check_in_at);
+    // Same clock as the stamp: a fresh check-in reads as 0-5 seconds, never a clock-skew-sized number.
+    assert.ok(elapsed >= 0 && elapsed < 5000, `elapsed since check-in was ${elapsed} ms`);
+  } finally {
+    await request(`/api/visits/${checkIn.body.id}/check-out`, opts({ method: 'POST', body: {} }));
+  }
+});
+
 test('every quote email has the same subject: type, number, customer (account), amount', async () => {
   const adminCookie = await login(fixture.admin.email);
   const repCookie = await login(fixture.reps[0].email);

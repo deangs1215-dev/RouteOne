@@ -3,6 +3,7 @@ import { Link, useParams, useNavigate } from 'react-router-dom';
 import { api, fmtR, fmtDate, fmtDateTime } from '../api';
 import { Card, Table, Spinner, QuoteStatusBadge, ErrorNote } from '../components/ui';
 import { PRICE_SOURCE_LABELS } from '../components/NewOrderModal';
+import SendToTelesalesModal from '../components/SendToTelesalesModal';
 
 export default function QuoteDetail() {
   const { id } = useParams();
@@ -10,6 +11,7 @@ export default function QuoteDetail() {
   const [quote, setQuote] = useState(null);
   const [error, setError] = useState('');
   const [emailNote, setEmailNote] = useState('');
+  const [showEmail, setShowEmail] = useState(false);
 
   const load = () => api.get(`/quotes/${id}`).then(setQuote).catch(console.error);
   useEffect(() => { load(); }, [id]);
@@ -26,16 +28,6 @@ export default function QuoteDetail() {
     try {
       const order = await api.post(`/quotes/${id}/convert`);
       navigate(`/orders/${order.id}?send=1`);
-    } catch (e) { setError(e.message); }
-  };
-
-  const emailQuote = async () => {
-    setEmailNote('');
-    try {
-      const r = await api.post(`/quotes/${id}/email`);
-      setEmailNote(r.status === 'sent'
-        ? `✓ Emailed to ${r.to_addr}`
-        : `Saved to email log (${r.error || r.status}) — see Integration page.`);
     } catch (e) { setError(e.message); }
   };
 
@@ -56,7 +48,7 @@ export default function QuoteDetail() {
           )}
         </div>
         <div className="flex gap-2">
-          <button className="btn-secondary" onClick={emailQuote}>✉ Email quote to customer</button>
+          <button className="btn-primary" onClick={() => setShowEmail(true)}>✉ Email quote</button>
           {open && (
             <>
               <button className="btn-danger" onClick={() => setStatus('rejected')}>Mark rejected</button>
@@ -96,6 +88,15 @@ export default function QuoteDetail() {
       </Card>
 
       {quote.notes && <Card title="Notes"><p className="text-sm">{quote.notes}</p></Card>}
+
+      {showEmail && (
+        <SendToTelesalesModal order={quote} kind="quote"
+          onClose={() => setShowEmail(false)}
+          onSent={(r) => {
+            setShowEmail(false);
+            setEmailNote(r.queued ? `Sent to ${r.sent} of ${r.recipients} - the rest are saved in the email log (see the Integration page).` : `✓ Sent to ${r.sent} recipient${r.sent === 1 ? '' : 's'}`);
+          }} />
+      )}
     </div>
   );
 }

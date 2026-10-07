@@ -37,7 +37,7 @@ router.get('/quotes', async (req, res) => {
 router.get('/quotes/:id', async (req, res) => {
   const quote = await dbx.prepare(`
     SELECT qu.*, c.name AS customer_name, c.code AS customer_code, c.payment_terms,
-      u.name AS rep_name, o.number AS order_number
+      c.warehouse_id AS warehouse_id, u.name AS rep_name, o.number AS order_number
     FROM quotes qu
     JOIN customers c ON c.id = qu.customer_id
     LEFT JOIN users u ON u.id = qu.rep_id
@@ -304,6 +304,70 @@ router.post('/quotes/:id/convert', async (req, res) => {
   const orderId = await convert();
   await logActivity(req.user.id, 'convert', 'quote', quote.id, { order_id: orderId });
   res.json(await dbx.prepare('SELECT * FROM orders WHERE id = ?').get(orderId));
+});
+
+// Email an existing quote to a picked list - the quote twin of
+// POST /orders/:id/email-telesales. Open to the quote's own rep and to office
+// roles. Configured recipients are branch-scoped to the customer's warehouse and a
+// rep can only use their own saved contacts. Body: { recipient_ids,
+// personal_recipient_ids, extra_email } - at least one address is required.
+router.post('/quotes/:id/email-recipients', async (req, res) => {
+  const b = req.body || {};
+  const quote = await loadDoc('quote', req.params.id);
+  if (!quote) return res.status(404).json({ error: 'Quote not found' });
+  if (scopeForUser(req.user).isRep && quote.rep_id !== req.user.id) {
+    return res.status(403).json({ error: 'Not your quote' });
+  }
+
+  const ids = (v) => (Array.isArray(v) ? v : []).filter((n) => Number.isInteger(n)).slice(0, 50);
+  const recipientIds = ids(b.recipient_ids);
+  const personalIds = ids(b.personal_recipient_ids);
+  const addresses = new Set();
+
+  if (recipientIds.length) {
+    const rows = await dbx.prepare(`
+      SELECT email FROM email_recipients
+      WHERE id IN (${recipientIds.map(() => '?').join(',')}) AND (warehouse_id = ? OR warehouse_id IS NULL)
+    `).all(...recipientIds, quote.customer_warehouse_id);
+    rows.forEach((r) => addresses.add(r.email.trim().toLowerCase()));
+  }
+  if (personalIds.length) {
+    const rows = await dbx.prepare(`
+      SELECT email FROM rep_email_contacts
+      WHERE id IN (${personalIds.map(() => '?').join(',')}) AND user_id = ?
+    `).all(...personalIds, req.user.id);
+    rows.forEach((r) => addresses.add(r.email.trim().toLowerCase()));
+  }
+  if (isEmail(b.extra_email)) addresses.add(b.extra_email.trim().toLowerCase());
+
+  if (addresses.size === 0) return res.status(400).json({ error: 'Choose at least one recipient or type an email address' });
+
+  const items = await dbx.prepare(`
+    SELECT i.*, p.pack_weight_kg, p.conv_factor_alt_uom, p.code AS product_code FROM quote_items i
+    LEFT JOIN products p ON p.id = i.product_id WHERE i.quote_id = ? ORDER BY i.id
+  `).all(quote.id);
+  const inner = `
+    <p>Please find the quotation below for your records.</p>
+    <table style="font-size:14px;margin-bottom:14px">
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Quote no</td><td><b>${quote.number}</b></td></tr>
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Amount</td><td><b>${fmtR(quote.total)}</b></td></tr>
+      <tr><td style="color:#64748b;padding:2px 12px 2px 0">Valid until</td><td>${quote.valid_until || ''}</td></tr>
+    </table>
+    ${notesHtml(quote)}
+    ${customerBlockHtml(quote, { contact: false })}
+    ${docTable(items, quote, 'quote')}`;
+  const draft = {
+    kind: 'quote',
+    ref_id: quote.id,
+    cc_addr: null,
+    subject: quoteSubject(quote),
+    body_html: await wrap(`Quote ${quote.number}`, inner)
+  };
+
+  const results = await Promise.allSettled([...addresses].map((to) => sendEmail({ ...draft, to_addr: to })));
+  const sent = results.filter((r) => r.status === 'fulfilled' && r.value?.status === 'sent').length;
+  await logActivity(req.user.id, 'email_recipients', 'quote', quote.id, { recipients: addresses.size, sent });
+  res.json({ ok: true, recipients: addresses.size, sent, queued: addresses.size - sent });
 });
 
 // Send a quote to selected recipients (admin/manager only).

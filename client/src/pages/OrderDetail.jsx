@@ -45,16 +45,6 @@ export default function OrderDetail() {
     } catch (e) { setError(e.message); }
   };
 
-  const sendMail = async (path) => {
-    setEmailNote('');
-    try {
-      const r = await api.post(path);
-      setEmailNote(r.status === 'sent'
-        ? `✓ Emailed to ${r.to_addr}`
-        : `Saved to email log (${r.error || r.status}) — see Integration page.`);
-    } catch (e) { setError(e.message); }
-  };
-
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -69,9 +59,8 @@ export default function OrderDetail() {
         </div>
         <div className="flex flex-wrap gap-2">
           {['submitted', 'processing', 'invoiced'].includes(order.status) && (
-            <button className="btn-primary" onClick={() => setShowTelesales(true)}>✉ Send to telesales</button>
+            <button className="btn-primary" onClick={() => setShowTelesales(true)}>✉ Email order</button>
           )}
-          <button className="btn-secondary" onClick={() => sendMail(`/orders/${id}/email-customer`)}>✉ Confirmation to customer</button>
           <button className="btn-secondary" onClick={repeat}>Repeat order</button>
           {canChangeStatus && NEXT_ACTIONS[order.status].map(([status, label]) => (
             <button key={status} className={status === 'cancelled' ? 'btn-danger' : 'btn-primary'} onClick={() => setStatus(status)}>

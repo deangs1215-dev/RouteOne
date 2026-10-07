@@ -1,12 +1,12 @@
-// "Send to telesales" for an order that was not emailed at capture time, e.g. a
-// quote converted to an order. Sends the same internal order email a rep's capture
-// screen sends. Recipients: the branch's configured telesales addresses, the rep's
+// "Email order" / "Email quote": send an existing order or quote to a picked list.
+// For an order this is the same internal email a rep's capture screen sends.
+// Recipients: the branch's configured telesales addresses, the rep's
 // own saved contacts, and/or one typed address. Nothing is ticked by default.
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { Modal, ErrorNote, Spinner } from './ui';
 
-export default function SendToTelesalesModal({ order, onClose, onSent }) {
+export default function SendToTelesalesModal({ order, kind = 'order', onClose, onSent }) {
   const [recipients, setRecipients] = useState(null);
   const [contacts, setContacts] = useState([]);
   const [picked, setPicked] = useState(new Set());
@@ -35,7 +35,7 @@ export default function SendToTelesalesModal({ order, onClose, onSent }) {
     }
     setBusy(true);
     try {
-      const r = await api.post(`/orders/${order.id}/email-telesales`, {
+      const r = await api.post(kind === 'quote' ? `/quotes/${order.id}/email-recipients` : `/orders/${order.id}/email-telesales`, {
         recipient_ids: [...picked],
         personal_recipient_ids: [...pickedContacts],
         extra_email: extra.trim() || undefined
@@ -48,12 +48,12 @@ export default function SendToTelesalesModal({ order, onClose, onSent }) {
   };
 
   return (
-    <Modal title={`Send ${order.number} to telesales`} onClose={onClose}>
+    <Modal title={`Email ${order.number}`} onClose={onClose}>
       <ErrorNote error={error} />
       {!recipients ? <Spinner /> : (
         <div className="space-y-4">
           <p className="text-sm text-slate-500">
-            Sends the order, with the customer details and notes, so it can be captured in SYSPRO.
+            {kind === 'quote' ? 'Sends the quotation, with the customer details and notes.' : 'Sends the order, with the customer details and notes, so it can be captured in SYSPRO.'}
           </p>
 
           <div>

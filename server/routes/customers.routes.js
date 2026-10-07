@@ -100,6 +100,11 @@ router.get('/customers/:id', async (req, res) => {
     JOIN users u ON u.id = v.rep_id
     WHERE v.customer_id = ? ORDER BY COALESCE(v.check_in_at, v.planned_date) DESC LIMIT 20
   `).all(customer.id);
+  // The database's own "now", from the same clock that stamps check_in_at. The
+  // rep app's on-site timer measures elapsed time against it instead of the
+  // phone's clock, so a phone that is a minute fast or slow doesn't start the
+  // timer at 00:54.
+  customer.server_now = (await dbx.prepare("SELECT datetime('now') AS t").get()).t;
   customer.recent_quotes = await dbx.prepare(`
     SELECT q.*, u.name AS rep_name FROM quotes q
     LEFT JOIN users u ON u.id = q.rep_id
