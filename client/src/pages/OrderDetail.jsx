@@ -8,7 +8,7 @@ import SendToTelesalesModal from '../components/SendToTelesalesModal';
 
 const NEXT_ACTIONS = {
   draft: [['submitted', 'Submit order']],
-  submitted: [['processing', 'Start processing'], ['cancelled', 'Cancel']],
+  submitted: [['cancelled', 'Cancel']],
   processing: [['invoiced', 'Mark invoiced'], ['cancelled', 'Cancel']],
   invoiced: [],
   cancelled: []
