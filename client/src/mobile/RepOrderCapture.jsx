@@ -7,7 +7,7 @@ import { api, fmtR } from '../api';
 import { Spinner, ErrorNote } from '../components/ui';
 import OrderSummary from '../components/OrderSummary';
 import ProductPurchaseHistory from '../components/ProductPurchaseHistory';
-import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2, priceSourceForLine, PriceSourceBadge } from '../components/NewOrderModal';
+import { unitPriceFor, kgPriceFor, gPriceFor, discountPctFor, round2, priceSourceForLine, PriceSourceBadge, BuyingGroupWarning } from '../components/NewOrderModal';
 import { queueWrite } from '../offline';
 import PriceChangePanel from '../components/PriceChangePanel';
 import { useAuth } from '../auth';
@@ -450,6 +450,7 @@ export default function RepOrderCapture({ base = '/mobile' }) {
                       ? <span className="ml-1 text-red-500 font-medium">out of stock</span>
                       : p.stock_qty < 20 && <span className="ml-1 text-amber-600">low stock ({p.stock_qty})</span>}
                   </div>
+                  {qty > 0 && <BuyingGroupWarning product={p} price={price} />}
                   {qty > 0 && nextBreak && (
                     <div className="text-[10px] text-sky-600">💡 {nextBreak.min_qty}+ units → {fmtR(nextBreak.price)} each</div>
                   )}

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { dbx, priceBreaks, getTodayISO } from '../db.js';
+import { dbx, priceBreaks, getTodayISO, round2 } from '../db.js';
 import { logActivity, activeRules } from '../dbh.js';
 import { requireRole, userCanAccessCustomer, withoutCostFields } from '../auth.js';
 
@@ -217,6 +217,7 @@ router.get('/products/for-customer/:customerId', async (req, res) => {
     const syspro = sysproPricingByProductCode[p.code];
     let sysproEffectivePrice = null;
     let sysproPricingTier = null;
+    let cheaperBuyingGroupPrice = null; // per selling unit; set only when it undercuts the contract price in use
     if (syspro) {
       // Use contract price if valid and not expired
       let contractPrice = null;
@@ -241,6 +242,13 @@ router.get('/products/for-customer/:customerId', async (req, res) => {
       // price-code line as "Customer Price" while the actually-submitted order
       // (priced via db.js's effectivePriceDetail, which already used `!= null`)
       // correctly recorded "Price Code" for the same line.
+      // The contract price outranks the buying-group price even when the group's is
+      // lower (SYSPRO invoiced ORD-00284 at the group price, R382.25 vs R383.00).
+      // The order screens warn so the rep/office can check it before it's invoiced.
+      if (contractPrice != null && syspro.buying_group_price != null && syspro.buying_group_price < contractPrice &&
+          isPriceValid(syspro.buying_group_start_date, syspro.buying_group_end_date)) {
+        cheaperBuyingGroupPrice = round2(syspro.buying_group_price * (p.conv_factor_alt_uom || p.pack_weight_kg || 1));
+      }
       if (contractPrice != null) sysproPricingTier = 'syspro_contract';
       else if (buyingGroupPrice != null) sysproPricingTier = 'syspro_buying_group';
       else if (syspro.price_code_price != null) sysproPricingTier = 'syspro_price_code';
@@ -265,7 +273,8 @@ router.get('/products/for-customer/:customerId', async (req, res) => {
       has_contract_price: hasSysproPrice ? 1 : p.has_contract_price,
       price_breaks: breaks,
       syspro_pricing: syspro || null,
-      syspro_pricing_tier: sysproPricingTier
+      syspro_pricing_tier: sysproPricingTier,
+      cheaper_buying_group_price: cheaperBuyingGroupPrice
     });
   }));
 });

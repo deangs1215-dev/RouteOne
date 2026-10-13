@@ -111,6 +111,20 @@ export function PriceSourceBadge({ source, className = '' }) {
   return <span className={`${PRICE_SOURCE_COLORS[source]} ${className}`}>{PRICE_SOURCE_LABELS[source]}</span>;
 }
 
+// Contract price outranks buying-group price even when the group's is lower, and
+// SYSPRO has invoiced at the group price in that case. Shown on a line already in
+// the order, only while it is priced above the group price (an office override
+// at or below it needs no warning).
+export function BuyingGroupWarning({ product, price, className = '' }) {
+  const group = product.cheaper_buying_group_price;
+  if (group == null || !(price > group)) return null;
+  return (
+    <div className={`text-xs font-medium text-amber-700 ${className}`}>
+      ⚠ Buying-group price is lower ({fmtR(group)}). Contract price {fmtR(price)} applies, so SYSPRO may invoice at {fmtR(group)}. Check with the office.
+    </div>
+  );
+}
+
 export default function NewOrderModal({ customerId, kind = 'order', onClose, onSaved }) {
   const { user } = useAuth();
   // R1-026: price/discount editing is only for office/manager/admin - matches
@@ -581,6 +595,7 @@ export default function NewOrderModal({ customerId, kind = 'order', onClose, onS
                             ) : null;
                           })()}
                         </div>
+                        <BuyingGroupWarning product={l.product} price={price} />
                       </div>
                       <input className="input w-20 text-center" type="number" min="0" value={l.qty}
                         onChange={(e) => setQty(l.product.id, e.target.value)} />
