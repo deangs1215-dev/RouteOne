@@ -574,6 +574,8 @@ export default function RepCustomer({ base = '/mobile' }) {
                 <option value="other">Other</option>
               </select>
             </div>
+            {/* The page-level ErrorNote is at the very top, out of sight from down here. */}
+            <ErrorNote error={error} />
             <button className="btn-primary w-full py-3 bg-red-600 hover:bg-red-700" onClick={checkOut} disabled={busy}>
               {busy ? 'Checking out…' : '🔴 Check out'}
             </button>

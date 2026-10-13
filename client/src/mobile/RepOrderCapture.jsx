@@ -89,6 +89,8 @@ export default function RepOrderCapture({ base = '/mobile' }) {
   // tapped - without this the notes/review screen renders starting from that
   // same scroll position instead of its own top.
   useEffect(() => { if (step !== 'cart') window.scrollTo(0, 0); }, [step]);
+  // The price-change panel sits at the top of the review screen; bring it into view.
+  useEffect(() => { if (priceChanges) window.scrollTo(0, 0); }, [priceChanges]);
   const [done, setDone] = useState(null); // { number?, queued? }
   const [orderEmailInfo, setOrderEmailInfo] = useState(null); // { recipients }
   const [sendToRep, setSendToRep] = useState(false);
@@ -684,6 +686,12 @@ export default function RepOrderCapture({ base = '/mobile' }) {
 
           {/* Action buttons */}
           <div className="fixed bottom-14 left-1/2 z-30 w-full max-w-md -translate-x-1/2 space-y-2 border-t border-slate-200 bg-white p-3">
+            {/* Mirrored here: the error and the price-change panel render at the top of
+                the page, out of sight from the submit button. */}
+            {error && <div className="text-center text-xs font-medium text-red-600">{error}</div>}
+            {priceChanges && (
+              <div className="text-center text-xs font-medium text-amber-700">⚠ SYSPRO prices changed. Review and accept them at the top of the page.</div>
+            )}
             {!isQuote && !signature && (
               <div className="text-center text-xs text-amber-600">✋ Customer signature required before submitting</div>
             )}
