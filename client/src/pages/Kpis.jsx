@@ -67,6 +67,9 @@ export default function Kpis() {
                         style={{ width: `${Math.min(100, k.target_pct)}%` }} />
                     </div>
                   )}
+                  {k.target_pct != null && (
+                    <div className={`mt-1 text-right text-xs font-semibold ${pctColor(k.target_pct)}`}>{k.target_pct}% MTD achieved</div>
+                  )}
                 </div>
 
                 {/* R1-056: Jan-through-selected-month, not the full annual
